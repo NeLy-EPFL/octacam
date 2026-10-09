@@ -1,49 +1,57 @@
-// Shutdown dialog: a three-way choice shown when the operator shuts down the
-// server after recording — Cancel / Shut down / Shut down & process. The last
-// one asks the server to start a detached processing job for this session on the
-// way out (reattach from a terminal with `octacam jobs attach`).
+// Shutdown dialog. After recordings it offers Cancel / Shut down / Shut down &
+// process; the last asks the server to start a detached processing job for this
+// session on the way out.
 
-import { ModalFocus } from "./util.js";
+import { api, Modal } from "./util.js";
 
-export class ShutdownDialog {
+export class ShutdownDialog extends Modal {
   constructor() {
-    this.dialog = document.getElementById("shutdown-dialog");
-    this.focus = new ModalFocus(this.dialog.querySelector(".modal-card"));
+    super(document.getElementById("shutdown-dialog"));
     this.msg = document.getElementById("shutdown-dialog-msg");
     this._resolve = null;
+    for (const [id, choice] of [
+      ["shutdown-cancel", "cancel"],
+      ["shutdown-plain", "shutdown"],
+      ["shutdown-process", "process"],
+    ]) {
+      document.getElementById(id).addEventListener("click", () => this._done(choice));
+    }
+  }
 
-    document
-      .getElementById("shutdown-cancel")
-      .addEventListener("click", () => this._done("cancel"));
-    document
-      .getElementById("shutdown-plain")
-      .addEventListener("click", () => this._done("shutdown"));
-    document
-      .getElementById("shutdown-process")
-      .addEventListener("click", () => this._done("process"));
-    this.dialog.addEventListener("click", (e) => {
-      if (e.target === this.dialog) this._done("cancel");
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && !this.dialog.classList.contains("hidden")) {
-        this._done("cancel");
-      }
-    });
+  // Confirm, then ask the server to shut down. Resolves true once it accepted.
+  async shutDown({ notify, ...session }) {
+    const choice = await this.confirm(session);
+    if (choice === "cancel") return false;
+    let r;
+    try {
+      r = await api("POST", "/api/shutdown", { process_after: choice === "process" });
+    } catch {
+      notify("error", "Shutdown request failed: server unreachable");
+      return false;
+    }
+    if (r.status === 409) {
+      notify("warning", "Stop the recording before shutting down.");
+      return false;
+    }
+    if (!r.ok) {
+      notify("error", r.data?.detail || `Shutdown failed (HTTP ${r.status})`);
+      return false;
+    }
+    return true;
   }
 
   // Resolves to "cancel" | "shutdown" | "process".
   confirm({ recordingActive, hasWork, peerCount }) {
     const others = (peerCount || 1) - 1;
-    // Every operator on this rig loses their cameras and their socket, so say how
-    // many. This warning used to live only in the recordingActive branch — the one
-    // path /api/shutdown rejects with 409 — so in practice nobody ever saw it.
+    // Every other browser loses its cameras and socket too: say so on every path.
     const extra =
       others > 0
         ? ` ${others} other browser${others === 1 ? " is" : "s are"} connected and will be disconnected.`
         : "";
-    // While recording, "& process" is meaningless (the server refuses a shutdown
-    // mid-trial), so keep the plain binary confirm as a speed-bump.
-    if (recordingActive) {
+    // A plain confirm while recording (the server refuses the shutdown, so
+    // "& process" is moot) or with nothing to process: one click on an icon
+    // button must not shut the rig down.
+    if (recordingActive || !hasWork) {
       const ok = window.confirm(
         "Shut down the octacam server on the rig? This releases all cameras " +
           "and disconnects every client." +
@@ -51,39 +59,25 @@ export class ShutdownDialog {
       );
       return Promise.resolve(ok ? "shutdown" : "cancel");
     }
-    // Nothing recorded this session. This is the path that actually shuts the
-    // server down, and it is reached from a bare icon button sitting next to
-    // save-config — so it still confirms. (It previously returned "shutdown"
-    // immediately; the comment claiming that matched main was wrong, main ran an
-    // unconditional window.confirm here.)
-    if (!hasWork) {
-      const ok = window.confirm(
-        "Shut down the octacam server on the rig? This releases all cameras " +
-          "and disconnects every client." +
-          extra
-      );
-      return Promise.resolve(ok ? "shutdown" : "cancel");
-    }
-    // Recordings exist: offer to process them in a detached background job.
     this.msg.textContent =
       "Recordings were made this session. Start processing them (transcode, " +
       "grid, transfer) in a background job after shutting down? Reattach from a " +
       "terminal with `octacam jobs attach`." +
       extra;
-    this.dialog.classList.remove("hidden");
-    this.focus.activate();
+    this.open();
     return new Promise((resolve) => {
       this._resolve = resolve;
     });
   }
 
+  dismiss() {
+    this._done("cancel");
+  }
+
   _done(choice) {
-    if (!this.dialog.classList.contains("hidden")) {
-      this.dialog.classList.add("hidden");
-      this.focus.deactivate();
-    }
+    this.close();
     const resolve = this._resolve;
     this._resolve = null;
-    if (resolve) resolve(choice);
+    resolve?.(choice);
   }
 }

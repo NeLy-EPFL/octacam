@@ -1,8 +1,34 @@
 """Plugin registry + manager behavior."""
 
+import threading
+from dataclasses import replace
+
+import pytest
+
+import octacam.plugins as plugins_mod
+from octacam import firmware as fw
 from octacam.config import OctacamConfig, PluginConfig
-from octacam.plugins import PluginManager, available_plugins, build_plugins, register
-from octacam.plugins.base import Plugin
+from octacam.plugins import available_plugins, build_plugins, plugin_class
+from octacam.plugins.base import Plugin, PluginManager
+from octacam.plugins.flywheel import FlywheelLink
+
+
+class SpyPlugin(Plugin):
+    """A registrable plugin double that keeps the options it was built with."""
+
+    name = "spy"
+
+    def __init__(self, options=None):
+        self.options = options
+
+    @classmethod
+    def from_options(cls, options):
+        return cls(options)
+
+
+@pytest.fixture
+def spy_registered(monkeypatch):
+    monkeypatch.setitem(plugins_mod._PLUGINS, "spy", f"{__name__}:SpyPlugin")
 
 
 def test_build_plugins_default_is_empty():
@@ -35,30 +61,28 @@ def test_legacy_alias_and_new_name_do_not_double_load():
     assert [p.name for p in manager.plugins] == ["flywheel"]
 
 
-def test_register_and_build_with_options():
-    @register("spy_demo")
-    def _factory(options):
-        plugin = Plugin()
-        plugin.name = "spy_demo"
-        plugin.options = options
-        return plugin
-
-    config = OctacamConfig(plugins=[PluginConfig(name="spy_demo", options={"a": 1})])
+def test_build_passes_the_options_to_from_options(spy_registered):
+    config = OctacamConfig(plugins=[PluginConfig(name="spy", options={"a": 1})])
     manager = build_plugins(config)
     assert len(manager.plugins) == 1
     assert manager.plugins[0].options == {"a": 1}
 
 
-def test_cli_plugin_flag_adds_to_config():
-    @register("spy_added")
-    def _factory(options):
-        plugin = Plugin()
-        plugin.name = "spy_added"
-        return plugin
+def test_cli_plugin_flag_adds_to_config(spy_registered):
+    # config has none; --plugin spy adds it
+    manager = build_plugins(OctacamConfig(), enabled=["spy"])
+    assert [p.name for p in manager.plugins] == ["spy"]
+    assert manager.plugins[0].options == {}
 
-    # config has none; --plugin spy_added adds it
-    manager = build_plugins(OctacamConfig(), enabled=["spy_added"])
-    assert [p.name for p in manager.plugins] == ["spy_added"]
+
+def test_plugin_that_fails_to_build_is_skipped(monkeypatch, spy_registered, caplog):
+    def boom(cls, options):
+        raise ValueError("bad options")
+
+    monkeypatch.setattr(SpyPlugin, "from_options", classmethod(boom))
+    config = OctacamConfig(plugins=[PluginConfig(name="spy")])
+    assert build_plugins(config).plugins == []
+    assert "Plugin 'spy' failed to load (bad options)" in caplog.text
 
 
 def test_available_plugins_describes_bundled_flywheel():
@@ -66,21 +90,178 @@ def test_available_plugins_describes_bundled_flywheel():
     # Only in-repo builtins are discoverable; flywheel is one of the bundled plugins.
     assert "flywheel" in infos
     info = infos["flywheel"]
-    assert isinstance(info.available, bool)
+    assert info.available is True
     assert info.summary  # first line of the module docstring
-    # When pyserial is missing (a broken env), the reason is surfaced.
-    if not info.available:
-        assert info.detail
 
 
-def test_dispatch_swallows_plugin_exceptions():
+_BUNDLED = [
+    # name, generates_trigger, default_device, banner_prefix
+    ("flywheel", False, "/dev/ttyACM0", "FLYWHEEL"),
+    ("twophoton", False, "/dev/arduinoCams", "2PHOTON"),
+    ("triggerbox", True, "/dev/ttyACM0", "TRIGGERBOX"),
+]
+
+
+def test_every_bundled_plugin_is_listed():
+    assert [row[0] for row in _BUNDLED] == list(plugins_mod._PLUGINS)
+
+
+@pytest.mark.parametrize(("name", "trigger", "device", "banner"), _BUNDLED)
+def test_a_bundled_plugin_declares_its_facts(name, trigger, device, banner):
+    cls = plugin_class(name)
+    assert cls.name == name
+    assert cls.generates_trigger is trigger
+    assert cls.web_dir is not None and (cls.web_dir / f"{name}.js").is_file()
+    assert cls.default_device == device
+    assert cls.firmware is not None and cls.firmware.banner_prefix == banner
+    # The spec the CLI and doctor read is the one the plugin provisions with.
+    prov = cls.from_options({}).firmware_provisioning()
+    assert prov["needed_build"] == fw.source_build(cls.firmware)
+
+
+@pytest.mark.parametrize(
+    ("method", "hook", "args"),
+    [
+        ("setup_all", "setup", ()),
+        ("teardown_all", "teardown", ()),
+        ("on_preview_start", "on_preview_start", ({},)),
+        ("on_preview_stop", "on_preview_stop", ()),
+        ("on_recording_start", "on_recording_start", ({},)),
+        ("on_first_frame", "on_first_frame", ({},)),
+        ("on_recording_stop", "on_recording_stop", (False,)),
+        ("on_ws_disconnect", "on_ws_disconnect", (1,)),
+    ],
+)
+def test_a_raising_hook_does_not_stop_the_next_plugin(method, hook, args):
+    calls = []
+
+    def boom(self, *args):
+        raise RuntimeError("boom")
+
+    def record(self, *args):
+        calls.append(args)
+
+    plugins = [
+        type("Boom", (Plugin,), {"name": "boom", hook: boom})(),
+        type("Recorder", (Plugin,), {"name": "recorder", hook: record})(),
+    ]
+    if method == "teardown_all":
+        plugins.reverse()  # teardown runs in reverse, so Boom still goes first
+    getattr(PluginManager(plugins), method)(*args)  # must not raise
+    assert len(calls) == 1
+
+
+def test_attach_gives_every_plugin_the_controller_and_the_broadcast():
+    a, b = Plugin(), Plugin()
+    manager = PluginManager([a, b])
+    a.broadcast("topic", {})  # a no-op until attached
+    controller, sent = object(), []
+    manager.attach(controller=controller)
+    manager.attach(broadcast=lambda topic, payload: sent.append(topic))
+    assert a.controller is b.controller is controller  # a later attach keeps it
+    a.broadcast("a_state", {})
+    b.broadcast("b_state", {})
+    assert sent == ["a_state", "b_state"]
+
+
+def test_only_the_trigger_plugin_is_asked_for_the_train_and_priming():
+    asked = []
+
+    class Other(Plugin):
+        name = "other"
+
+        def trigger_train(self, params):
+            asked.append("other.trigger_train")
+
+        def prime_trigger(self, params, pulses):
+            asked.append("other.prime_trigger")
+
+    class Board(Plugin):
+        name = "board"
+        generates_trigger = True
+
+        def trigger_train(self, params):
+            asked.append(("board.trigger_train", params))
+            return {"period_ns": 10_000_000, "count": params["count"]}
+
+        def prime_trigger(self, params, pulses):
+            asked.append(("board.prime_trigger", params, pulses))
+            return True
+
+    assert PluginManager([Other()]).trigger_plugin() is None
+    assert PluginManager([Other()]).trigger_train({}) is None
+    assert PluginManager([Other()]).prime_trigger({}, 4) is False
+    assert asked == []
+    board = Board()
+    manager = PluginManager([Other(), board])
+    assert manager.trigger_plugin() is board
+    params = {"other": {"fps": 1}, "board": {"count": 7, "fps": 50}}
+    assert manager.trigger_train(params)["count"] == 7
+    assert manager.prime_trigger(params, 4) is True
+    # Each gets the board's own slice, and the other plugin is never asked.
+    assert asked == [
+        ("board.trigger_train", {"count": 7, "fps": 50}),
+        ("board.prime_trigger", {"count": 7, "fps": 50}, 4),
+    ]
+
+
+def test_a_raising_trigger_plugin_reads_as_no_train_and_no_priming():
     class Boom(Plugin):
         name = "boom"
+        generates_trigger = True
 
-        def on_first_frame(self, params):
+        def trigger_train(self, params):
             raise RuntimeError("boom")
 
-    PluginManager([Boom()]).dispatch("on_first_frame", None)  # must not raise
+        def prime_trigger(self, params, pulses):
+            raise RuntimeError("boom")
+
+    manager = PluginManager([Boom()])
+    assert manager.trigger_train({"boom": {}}) is None
+    assert manager.prime_trigger({"boom": {}}, 4) is False
+
+
+def test_a_ws_message_goes_to_the_first_plugin_that_claims_it():
+    seen = []
+
+    class Claims(Plugin):
+        def __init__(self, name, claims):
+            self.name, self.claims = name, claims
+
+        def on_ws_message(self, message, client_id):
+            seen.append(self.name)
+            if self.claims == "raise":
+                raise ValueError("bad message")
+            return self.claims
+
+    PluginManager(
+        [Claims("a", False), Claims("b", True), Claims("c", True)]
+    ).on_ws_message({}, 1)
+    assert seen == ["a", "b"]
+    seen.clear()
+    # A raising hook is logged and counts as handled: the message goes no further.
+    PluginManager([Claims("a", "raise"), Claims("b", True)]).on_ws_message({}, 1)
+    assert seen == ["a"]
+
+
+def test_each_hook_gets_its_own_slice():
+    seen = []
+
+    class Slice(Plugin):
+        def __init__(self, name):
+            self.name = name
+
+        def on_recording_start(self, params):
+            seen.append((self.name, params))
+
+    manager = PluginManager([Slice("a"), Slice("b"), Slice("c"), Slice("d")])
+    manager.on_recording_start({"a": {"x": 1}, "b": True, "d": {}})
+    # b's slice is not a table, and c has none: both get None. d's empty table
+    # is a slice (armed with defaults), not None.
+    assert seen == [("a", {"x": 1}), ("b", None), ("c", None), ("d", {})]
+    seen.clear()
+    manager.on_recording_start(None)
+    assert seen == [("a", None), ("b", None), ("c", None), ("d", None)]
 
 
 def test_snapshot_options_lists_every_plugin():
@@ -88,13 +269,10 @@ def test_snapshot_options_lists_every_plugin():
         name = "live"
 
         def snapshot_options(self, params):
-            return {"lights": params["live"]}
+            return {"lights": params["lights"]}
 
     class Unchanged(Plugin):
         name = "unchanged"  # the base hook: nothing differs from the config
-
-    class Legacy:
-        name = "legacy"  # predates the hook and doesn't subclass Plugin
 
     class Boom(Plugin):
         name = "boom"
@@ -102,13 +280,12 @@ def test_snapshot_options_lists_every_plugin():
         def snapshot_options(self, params):
             raise RuntimeError("boom")
 
-    manager = PluginManager([Live(), Unchanged(), Legacy(), Boom()])
+    manager = PluginManager([Live(), Unchanged(), Boom()])
     # Every loaded plugin is keyed (so the snapshot lists it); only a plugin with
     # live changes contributes options, and a failing hook never raises.
-    assert manager.snapshot_options({"live": [1]}) == {
+    assert manager.snapshot_options({"live": {"lights": [1]}}) == {
         "live": {"lights": [1]},
         "unchanged": {},
-        "legacy": {},
         "boom": {},
     }
 
@@ -140,7 +317,7 @@ def test_status_is_ready_wins_over_status_ready_key():
 
 def test_status_detail_failure_preserves_ready():
     # A status() that raises after is_ready() already succeeded must not flip the
-    # plugin to not-ready — only the details are dropped.
+    # plugin to not-ready -- only the details are dropped.
     class Half(Plugin):
         name = "half"
 
@@ -163,61 +340,38 @@ def test_status_is_ready_failure_reports_not_ready():
     assert PluginManager([Broken()]).status() == {"broken": {"ready": False}}
 
 
-def test_plugin_summary_falls_back_to_factory_module_doc():
-    # A third-party entry-point plugin has no octacam.plugins.<name> module, so
-    # sys.modules.get(...) is None. The summary must fall back to the factory
-    # module's docstring, not the truthy NoneType class docstring.
-    from octacam.plugins import _plugin_summary
-
-    @register("spy_summary")
-    def _factory(options):
-        p = Plugin()
-        p.name = "spy_summary"
-        return p
-
-    summary = _plugin_summary("spy_summary")
-    # This module's docstring first line.
-    assert summary == "Plugin registry + manager behavior."
-    assert "NoneType" not in summary
+def test_available_plugins_summarizes_each_from_its_module_docstring(spy_registered):
+    infos = {info.name: info for info in available_plugins()}
+    assert infos["spy"].summary == "Plugin registry + manager behavior."
+    assert infos["spy"].available is True
 
 
-def test_builtin_import_failure_reports_distinct_warning(monkeypatch):
+def test_builtin_import_failure_reports_distinct_warning(monkeypatch, caplog):
     # A known builtin whose module fails to import must NOT be reported as an
     # "Unknown plugin" (which is indistinguishable from a typo); it gets a
     # builtin-specific warning instead.
-    import logging
-
-    import octacam.plugins as plugins_mod
-
-    # Simulate the module never importing: neutralize the import and drop any
-    # already-registered factory so build_plugins sees factory is None.
-    monkeypatch.setattr(plugins_mod, "_import_builtin", lambda name: None)
-    monkeypatch.delitem(plugins_mod._REGISTRY, "flywheel", raising=False)
-
-    # Capture on the octacam logger directly rather than via caplog: another test
-    # (e.g. the CLI's _setup_logging) may leave propagate=False, which would empty
-    # caplog's root-level capture.
-    msgs: list[str] = []
-    handler = logging.Handler()
-    handler.emit = lambda record: msgs.append(record.getMessage())
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    try:
-        config = OctacamConfig(plugins=[PluginConfig(name="flywheel")])
-        manager = build_plugins(config)
-    finally:
-        logger.removeHandler(handler)
+    monkeypatch.setitem(
+        plugins_mod._PLUGINS, "flywheel", "octacam.plugins.no_such_module:Flywheel"
+    )
+    config = OctacamConfig(plugins=[PluginConfig(name="flywheel")])
+    manager = build_plugins(config)
     assert manager.plugins == []
-    assert any("Builtin plugin 'flywheel' failed to import" in m for m in msgs)
-    assert not any("Unknown plugin" in m for m in msgs)
+    assert any(
+        "Builtin plugin 'flywheel' failed to import" in m for m in caplog.messages
+    )
+    assert not any("Unknown plugin" in m for m in caplog.messages)
+    info = {i.name: i for i in available_plugins()}["flywheel"]
+    assert (info.available, info.detail) == (False, "module failed to import")
 
 
-class _FakeLink:
-    """Stand-in for flywheel.SerialLink so tests need no real serial device."""
+class _FakeLink(FlywheelLink):
+    """The flywheel link over no port; `fail` makes open() raise it."""
 
     def __init__(self):
+        super().__init__(lambda: None)
         self._open = False
         self.fail: Exception | None = None
+        self.banner: str | None = None
 
     def open(self, device, baud):
         self._open = False  # the real open() closes any prior link first
@@ -232,8 +386,8 @@ class _FakeLink:
     def is_open(self):
         return self._open
 
-    def identify(self, banner_prefix, timeout=0.5):
-        return None  # no board / no banner in these open-path tests
+    def identify(self, timeout=0.5):
+        return self.banner
 
 
 def test_flywheel_open_reports_success_and_failure():
@@ -308,3 +462,94 @@ def test_setup_teardown_order():
         ("teardown", "b"),  # reverse order on teardown
         ("teardown", "a"),
     ]
+
+
+# --- SerialPlugin: firmware provisioning around the plugin's own link ---------
+
+
+def _flywheel(banner=None):
+    from octacam.plugins.flywheel import FlywheelPlugin
+
+    plugin = FlywheelPlugin(device="/dev/test")
+    plugin._link = link = _FakeLink()
+    link.banner = banner
+    plugin._open()
+    return plugin, link
+
+
+def test_a_flash_holds_the_port_lock_from_close_to_reopen(monkeypatch):
+    plugin, link = _flywheel("FLYWHEEL 1 oldbuild")
+    taken: list[bool] = []
+
+    def upload(spec, port, needed_build, **kwargs):
+        assert not link.is_open  # the port is closed for the upload
+        other = threading.Thread(
+            target=lambda: taken.append(plugin.port_lock.acquire(blocking=False))
+        )
+        other.start()
+        other.join()
+        link.banner = f"FLYWHEEL 1 {needed_build}"
+        return fw.FlashResult(True, "uploaded", build=needed_build)
+
+    monkeypatch.setattr(fw, "flash", upload)
+    assert plugin.flash_firmware().ok
+    assert taken == [False]  # nothing else could seize the port mid-upload
+    # The reopen re-took the (re-entrant) lock and re-identified the board.
+    assert plugin.firmware_check.state is fw.FirmwareState.CURRENT
+
+
+def test_a_flash_whose_reopen_fails_drops_the_stale_check():
+    """A landed upload must not keep reporting the board out of date."""
+    plugin, link = _flywheel("FLYWHEEL 1 oldbuild")
+    assert plugin.firmware_check.needs_flash
+    link.fail = OSError("gone")  # the board does not come back
+    result = plugin.flash_firmware()
+    assert result.ok
+    assert plugin.firmware_check is None
+    assert "could not be reopened" in result.message
+
+
+def test_a_plugin_without_a_source_checkout_never_classifies_or_flashes(monkeypatch):
+    from octacam.plugins.flywheel import FlywheelPlugin
+
+    monkeypatch.setattr(
+        FlywheelPlugin, "firmware", replace(FlywheelPlugin.firmware, sketch_dir=None)
+    )
+    plugin, _link = _flywheel("FLYWHEEL 1 oldbuild")
+    assert plugin.firmware_check is None and plugin.firmware_ok
+    info = plugin.firmware_provisioning()
+    assert (
+        info["state"],
+        info["needed_build"],
+        info["can_flash"],
+        info["needs_flash"],
+    ) == (None, None, False, False)
+    assert info["detail"].startswith("the sketch source was not found")
+    result = plugin.flash_firmware()
+    assert not result.ok and "sketch source was not found" in result.message
+
+
+@pytest.mark.parametrize(
+    ("sketch", "probed", "detail"),
+    [
+        ("missing", True, "the sketch source could not be read"),
+        ("real", False, "the board has not been probed"),
+    ],
+    ids=["unreadable", "unprobed"],
+)
+def test_an_unclassified_board_says_why(monkeypatch, tmp_path, sketch, probed, detail):
+    from octacam.plugins.flywheel import FlywheelPlugin
+
+    if sketch == "missing":
+        monkeypatch.setattr(
+            FlywheelPlugin,
+            "firmware",
+            replace(FlywheelPlugin.firmware, sketch_dir=tmp_path / "gone"),
+        )
+    plugin = FlywheelPlugin(device="/dev/test")
+    plugin._link = _FakeLink()
+    if probed:
+        plugin._open()
+    info = plugin.firmware_provisioning()
+    assert (info["state"], info["needs_flash"]) == (None, False)
+    assert info["detail"].startswith(detail)

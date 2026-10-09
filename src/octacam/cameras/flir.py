@@ -1,244 +1,313 @@
-"""FLIR / Teledyne Spinnaker (PySpin) camera backend.
+"""FLIR / Teledyne Spinnaker backend: one `FlirBackend` over a
+`FlirBinding` of the SDK, either PySpin (here, the `flir` tier) or the
+C API over ctypes (`octacam.cameras.spinnaker_c`, the `spinnaker` tier).
 
-Implements the :class:`CameraBackend` seam over a PySpin ``CameraPtr``. PySpin is
-NOT on PyPI — it ships as a wheel with the Spinnaker SDK installer — so it is an
-optional dependency: this module imports it defensively and surfaces a clean
-:class:`BackendUnavailable` (never a raw ``ImportError``) when it is missing.
-
-Mapping notes vs. the Basler backend:
-
-* Node names are the standard SFNC ones (ExposureTime, Gain, Width, Height,
-  OffsetX, OffsetY), so :data:`PARAM_NODES` is reused; Width/Height/Offset* are
-  integer nodes and ExposureTime/Gain are float nodes.
-* Spinnaker has no pylon ``GrabStrategy`` enum; the equivalent is acquisition
-  mode Continuous plus a stream buffer-handling mode — ``NewestOnly`` for
-  preview (≈ LatestImageOnly) and ``OldestFirst`` for recording (≈ OneByOne).
-* There is no pylon ``FeaturePersistence``/``.pfs``; parameters persist in the
-  camera's native GenApi feature-persistence TSV (``extension = "txt"``; see
-  :mod:`octacam.cameras._genicam_config`), shared with the Spinnaker-C backend.
-* The ``System`` singleton must be released exactly once, after every camera is
-  de-initialized; that teardown is centralized in :func:`teardown`, which
-  :class:`~octacam.cameras.system.CameraSystem` calls via the registry.
+Both share the `.txt` parameter files. Acquisition is Continuous, with the
+stream's NewestOnly buffering for preview and OldestFirst for recording.
 """
 
 import atexit
+import gc
 import logging
+import time
+from abc import abstractmethod
 from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
-from octacam.cameras._genicam_config import GenICamTriggerConfig
-from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
-from octacam.cameras.base import (
-    GEOMETRY_FEATURES,
-    PARAM_NODES,
-    BackendError,
-    FeatureInfo,
-    Frame,
-    NodeInfo,
-    coerce_bool,
-)
-from octacam.cameras.registry import BackendUnavailable
+import numpy as np
 
-try:  # PySpin ships with the Spinnaker SDK and is not pip-installable.
-    import PySpin  # type: ignore
-except ImportError:  # pragma: no cover - exercised only on a non-FLIR box
-    PySpin = None
+from octacam.cameras.base import BackendError, Frame
+from octacam.cameras.genicam import Bounds, GenApi, NodeMapBackend
+from octacam.cameras.registry import BackendSpec, BackendUnavailable, select_serials
 
 log = logging.getLogger("octacam")
 
-TRIGGER_READY_TIMEOUT_MS = 1000
+# Record-grab stream buffers (capped by StreamBufferCountMax): ~1 s at 125 fps
+# instead of the SDK's 9, so a grab thread stalled by a GC pause or a disk hiccup
+# delays frames rather than losing them. They come out of the kernel's shared USB
+# memory (usbcore.usbfs_memory_mb: two full-sensor GS3s need ~1.1 GB at 128), so
+# a pool that cannot start is halved, down to MIN_STREAM_BUFFERS.
+RECORD_STREAM_BUFFERS = 128
+MIN_STREAM_BUFFERS = 16
 
-# Spinnaker node interface types differ per parameter; the rest are floats.
-_INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
+# TL-stream counters a recording reports (lost at the host, dropped from the
+# output queue, delivered incomplete, delivered at all).
+STREAM_STATISTICS = (
+    "StreamLostFrameCount",
+    "StreamDroppedFrameCount",
+    "StreamIncompleteFrameCount",
+    "StreamDeliveredFrameCount",
+)
 
-# The System singleton and its camera list are held for the whole session and
-# released exactly once in teardown(), after every camera has been de-inited.
-_system = None
-_cam_list = None
-
-
-def _spin():
-    """Return the PySpin module, or raise a clean BackendUnavailable."""
-    if PySpin is None:
-        raise BackendUnavailable(
-            "flir",
-            "PySpin (the Spinnaker SDK's Python binding) isn't importable — not on "
-            "PyPI and easily pruned by `uv sync`; reinstall the PySpin wheel to "
-            "restore this tier. FLIR cameras still work via the ctypes `spinnaker` "
-            "tier when libSpinnaker_C.so is present.",
-        )
-    return PySpin
+# A saturated USB bus delivers incomplete images continuously: a grab logs its
+# first, then its running total at most this often (a preview's at debug).
+INCOMPLETE_REPORT_INTERVAL_S = 10.0
 
 
-def ensure_available() -> None:
-    """Raise BackendUnavailable if PySpin/Spinnaker is not installed."""
-    _spin()
+class IncompleteLog:
+    """A camera's discarded incomplete images: each is counted (`total`, for
+    the stream statistics) and a grab's are logged rate-limited, as warnings
+    only in a record grab.
+    """
+
+    def __init__(self, serial: str):
+        self._serial = serial
+        self.total = 0
+        self._record = False
+        self._grab = 0  # this grab's
+        self._logged = 0  # this grab's at the last report
+        self._logged_at = 0.0
+
+    def begin_grab(self, *, record: bool) -> None:
+        self._record = record
+        self._grab = 0
+        self._logged = 0
+
+    def count(self) -> None:
+        self.total += 1
+        self._grab += 1
+        now = time.monotonic()
+        first = self._grab == 1
+        if not first and now - self._logged_at < INCOMPLETE_REPORT_INTERVAL_S:
+            return
+        level = logging.WARNING if self._record else logging.DEBUG
+        if first:
+            log.log(
+                level,
+                "Camera %s delivered an incomplete image; discarded (more in this "
+                "grab are totaled at most every %g s)",
+                self._serial,
+                INCOMPLETE_REPORT_INTERVAL_S,
+            )
+        else:
+            log.log(
+                level,
+                "Camera %s: %d incomplete images discarded in this grab (%d since "
+                "the last report)",
+                self._serial,
+                self._grab,
+                self._grab - self._logged,
+            )
+        self._logged = self._grab
+        self._logged_at = now
 
 
-def _safe(getter):
-    """Best-effort node attribute read (Min/Max/Inc/Unit); None on failure."""
+def _quietly(fn: Callable[..., Any], *args: Any) -> None:
+    """`fn(*args)`, any failure ignored: a release on the way out."""
     try:
-        return getter()
+        fn(*args)
     except Exception:
-        return None
+        pass
 
 
-# --- Full node-map walk (Camera tab) ------------------------------------------
-# The PySpin interface-type / visibility constants live on the module, which may
-# be absent (PySpin not installed), so the maps are built lazily from the passed-in module
-# rather than at import time (unlike the Basler backend, whose pypylon is always
-# present). This mirrors the Basler backend's genicam node-map walk, but over
-# PySpin's C++ node wrappers (CIntegerPtr/CEnumerationPtr/... casts) instead.
-def _iface_kind(spin, itype) -> str | None:
-    """Map a PySpin interface type to a FeatureInfo widget kind (None = skip)."""
-    return {
-        spin.intfIInteger: "int",
-        spin.intfIFloat: "float",
-        spin.intfIBoolean: "bool",
-        spin.intfIEnumeration: "enum",
-        spin.intfIString: "string",
-        spin.intfICommand: "command",
-        spin.intfICategory: "category",
-    }.get(itype)
+class FlirBinding(GenApi):
+    """One binding of the Spinnaker SDK: GenApi node access plus the System,
+    camera and image calls `FlirBackend` makes. A failed call raises
+    `BackendError`; the `is_*` and image queries never raise.
+
+    It holds the System from `enumerate` until `teardown`, and the
+    camera handles it handed out until each is released: the System released
+    with one outstanding aborts the process (a libusb `usbi_mutex_destroy`
+    assertion, exit 134).
+    """
+
+    tier: ClassVar[str]
+
+    def __init__(self) -> None:
+        self._system: Any = None
+        self._cam_list: Any = None
+        self._outstanding: dict[int, Any] = {}  # by id()
+
+    # ---------------------------------------------------------- the System
+    @abstractmethod
+    def _get_system(self) -> Any: ...
+    @abstractmethod
+    def _camera_list(self, system: Any) -> Any: ...
+    @abstractmethod
+    def _cameras(self, cam_list: Any) -> list[Any]: ...
+    @abstractmethod
+    def _clear_camera_list(self, cam_list: Any) -> None: ...
+    @abstractmethod
+    def _release_system(self, system: Any) -> None: ...
+
+    @abstractmethod
+    def _release(self, cam: Any) -> None:
+        """Release one handle the camera list gave out."""
+
+    # ------------------------------------------------------------ a camera
+    @abstractmethod
+    def init(self, cam: Any) -> None: ...
+    @abstractmethod
+    def deinit(self, cam: Any) -> None: ...
+    @abstractmethod
+    def is_initialized(self, cam: Any) -> bool: ...
+    @abstractmethod
+    def is_streaming(self, cam: Any) -> bool: ...
+    @abstractmethod
+    def nodemap(self, cam: Any) -> Any: ...
+    @abstractmethod
+    def stream_nodemap(self, cam: Any) -> Any: ...
+
+    @abstractmethod
+    def tl_device_nodemap(self, cam: Any) -> Any:
+        """The transport layer's device node map, readable without Init."""
+
+    @abstractmethod
+    def device_id(self, cam: Any) -> str:
+        """The SDK's id for a camera without a readable serial number."""
+
+    @abstractmethod
+    def begin_acquisition(self, cam: Any) -> None: ...
+    @abstractmethod
+    def end_acquisition(self, cam: Any) -> None: ...
+
+    # -------------------------------------------------------------- images
+    @abstractmethod
+    def next_image(self, cam: Any, timeout_ms: int) -> Any:
+        """The next image within `timeout_ms`, or None; it must be released."""
+
+    @abstractmethod
+    def image_incomplete(self, image: Any) -> bool:
+        """True also when the status is unreadable: never trust the buffer."""
+
+    @abstractmethod
+    def image_timestamp(self, image: Any) -> int:
+        """The camera timestamp in ns, 0 if unreadable."""
+
+    @abstractmethod
+    def image_array(self, image: Any) -> np.ndarray:
+        """An owned 2-D uint8 copy, safe after release; BackendError for a
+        frame that is not Mono8 (a Mono16 one has the same shape).
+        """
+
+    @abstractmethod
+    def image_release(self, image: Any) -> None: ...
+
+    # ------------------------------------------------------------- session
+    def serial(self, cam: Any) -> str:
+        """DeviceSerialNumber from the TL device node map, else the device id."""
+        try:
+            serial = self.get(
+                self.tl_device_nodemap(cam), "DeviceSerialNumber", "string"
+            )
+        except BackendError:
+            serial = None
+        return serial or self.device_id(cam)
+
+    def model(self, cam: Any) -> str | None:
+        """DeviceModelName, readable without Init, so doctor can label a camera
+        in a live session.
+        """
+        try:
+            return (
+                self.get(self.tl_device_nodemap(cam), "DeviceModelName", "string")
+                or None
+            )
+        except BackendError:
+            return None
+
+    def enumerate(
+        self, requested_serials: list[str] | None = None
+    ) -> list[tuple[str, Any]]:
+        """`[(serial, camera)]` in `select_serials` order, holding the
+        System until `teardown`; handles not handed out are released.
+        """
+        # Release a previous enumeration's System (doctor enumerates twice):
+        # released late, at exit, it aborts the process.
+        if self._system is not None or self._cam_list is not None:
+            self.teardown()
+        self._system = self._get_system()
+        self._cam_list = self._camera_list(self._system)
+        cams = self._cameras(self._cam_list)
+        if not cams:
+            self.teardown()
+            return []
+        log.debug("%s enumerated %d camera(s)", self.tier, len(cams))
+        found = [(self.serial(cam), cam) for cam in cams]
+        by_serial = dict(found)
+        used = select_serials(by_serial, requested_serials)
+        for serial, cam in found:
+            if serial not in used:
+                _quietly(self._release, cam)
+        out = [(serial, by_serial[serial]) for serial in used]
+        for _serial, cam in out:
+            self._outstanding[id(cam)] = cam
+        return out
+
+    def release(self, cam: Any) -> None:
+        """Release a camera's handle once it is closed, before the System."""
+        self._outstanding.pop(id(cam), None)
+        _quietly(self._release, cam)
+
+    def teardown(self) -> None:
+        """Release every handle no close released, then the camera list and the
+        System, last (released earlier, Spinnaker reports cameras in use).
+        Idempotent.
+        """
+        for cam in list(self._outstanding.values()):
+            _quietly(self._release, cam)
+        self._outstanding.clear()
+        if self._cam_list is not None:
+            # A failed start's traceback holds the camera's node maps in a
+            # reference cycle; uncollected, Clear() refuses, and the CameraList's
+            # destructor then aborts the process (std::terminate) at exit.
+            gc.collect()
+            _quietly(self._clear_camera_list, self._cam_list)
+            self._cam_list = None
+        if self._system is not None:
+            _quietly(self._release_system, self._system)
+            self._system = None
 
 
-def _visibility_name(spin, node) -> str:
-    try:
-        return {
-            spin.Beginner: "beginner",
-            spin.Expert: "expert",
-            spin.Guru: "guru",
-            spin.Invisible: "invisible",
-        }.get(node.GetVisibility(), "beginner")
-    except Exception:
-        return "beginner"
+class FlirBackend(NodeMapBackend[FlirBinding]):
+    """One FLIR camera, driven through either Spinnaker binding."""
 
-
-def _flir_enum_entries(spin, enum) -> list[dict] | None:
-    try:
-        out = []
-        for entry in enum.GetEntries():
-            try:
-                symbolic = spin.CEnumEntryPtr(entry).GetSymbolic()
-            except Exception:
-                continue
-            if not symbolic:
-                continue
-            try:
-                available = spin.IsAvailable(entry)
-            except Exception:
-                available = True
-            out.append({"value": symbolic, "display": symbolic, "available": available})
-        return out or None
-    except Exception:
-        return None
-
-
-def _flir_feature(spin, node) -> FeatureInfo | None:
-    """Build a FeatureInfo from a PySpin INode (None = skip category/non-feature)."""
-    kind = _iface_kind(spin, node.GetPrincipalInterfaceType())
-    if kind is None or kind == "category":
-        return None
-    name = node.GetName()
-    readable = spin.IsReadable(node)
-    feature = FeatureInfo(
-        name=name,
-        display_name=_safe(node.GetDisplayName) or name,
-        type=kind,
-        readable=readable,
-        writable=spin.IsWritable(node),
-        visibility=_visibility_name(spin, node),
-        tooltip=(_safe(node.GetToolTip) or _safe(node.GetDescription) or None),
-    )
-    if kind in ("int", "float"):
-        typed = spin.CIntegerPtr(node) if kind == "int" else spin.CFloatPtr(node)
-        if readable:
-            feature.value = _safe(typed.GetValue)
-        feature.min = _safe(typed.GetMin)
-        feature.max = _safe(typed.GetMax)
-        feature.inc = _safe(typed.GetInc)
-        feature.unit = _safe(typed.GetUnit) or None
-    elif kind == "bool":
-        if readable:
-            feature.value = _safe(spin.CBooleanPtr(node).GetValue)
-    elif kind == "enum":
-        enum = spin.CEnumerationPtr(node)
-        if readable:
-            entry = _safe(enum.GetCurrentEntry)
-            feature.value = _safe(entry.GetSymbolic) if entry is not None else None
-        feature.entries = _flir_enum_entries(spin, enum)
-    elif kind == "string" and readable:
-        feature.value = _safe(spin.CStringPtr(node).GetValue)
-    # command: no value
-    return feature
-
-
-class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
-    """A single FLIR camera, driven through PySpin."""
-
-    extension = "txt"
-
-    def __init__(self, cam: Any):
-        # PySpin's CameraPtr is untyped here (the SDK has no stubs); typing it
-        # Any keeps the close()-sets-None lifecycle from tripping the checker.
-        self._cam: Any = cam
-        self._serial = _read_serial(cam)
-        self._original_trigger_source: str | None = None
-        # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
-        # the device TriggerSoftware execute moves into retrieve() on the grab
-        # thread so the shared trigger timer never blocks on this camera.
-        self._init_trigger_handoff()
-
-    @property
-    def serial_number(self) -> str:
-        return self._serial
+    def __init__(self, binding: FlirBinding, cam: Any):
+        super().__init__(binding.serial(cam), binding)
+        self._cam: Any = cam  # the binding's camera handle; None once closed
+        self._stream_nodemap: Any = None
+        # Discarded (never written), but counted for the summary.
+        self._incomplete = IncompleteLog(self._serial)
 
     # ------------------------------------------------------------- lifecycle
 
     def open(self) -> None:
-        spin = _spin()
+        api = self._api
+        api.init(self._cam)
+        self._nodemap = api.nodemap(self._cam)
         try:
-            self._cam.Init()
-        except spin.SpinnakerException as e:
-            # Usually the camera is already in use by another process (a second
-            # `octacam gui` on the rig). Surface it as a BackendError so the
-            # caller reports it cleanly instead of a raw PySpin traceback.
-            raise BackendError(str(e)) from e
-        # Force monochrome so GetNDArray() yields a 2-D uint8 array matching the
-        # GRAY8 video writer.
+            self._stream_nodemap = api.stream_nodemap(self._cam)
+        except BackendError as e:
+            log.debug("No TL stream node map on camera %s: %s", self._serial, e)
+        # Mono8, so a frame is the 2-D uint8 array the GRAY8 writer takes.
         try:
-            self._set_enum("PixelFormat", "Mono8")
+            self.set_node("PixelFormat", "enum", "Mono8")
         except BackendError as e:
             log.warning("Could not set Mono8 on camera %s: %s", self._serial, e)
         self._maximize_link_throughput()
 
     def _maximize_link_throughput(self) -> None:
-        """Raise DeviceLinkThroughputLimit to the device max (best-effort).
+        """Best-effort: raise DeviceLinkThroughputLimit to its max, once at open.
 
-        FLIR ships this node capped below the sensor's real ceiling — on the
-        GS3-U3-41C6NIR it defaults to 350.6 MB/s while the max is 384.4 MB/s. At
-        2048² Mono8 that is the difference between an ~83.6 fps and an ~91.6 fps
-        USB3 transfer ceiling, so at a short exposure the delivered frame rate
-        rises with it (measured on the C-API mirror: ~82 → ~90 fps at 100 µs). A
-        long exposure stays exposure-bound regardless — a software-triggered frame
-        costs transfer + exposure serially on this CCD, so ~65 fps at 4 ms — and a
-        model without the node keeps its default. See spinnaker_c.py for the
-        on-rig characterisation. Set once at open so preview and record benefit.
+        FLIR ships it capped: on the GS3, 350.6 of 384.4 MB/s, an ~84 vs ~92 fps
+        transfer ceiling at 2048^2 Mono8 (measured ~82 -> ~90 fps at 100 us).
         """
-        spin = _spin()
-        node = spin.CIntegerPtr(self._nodemap().GetNode("DeviceLinkThroughputLimit"))
-        if not spin.IsAvailable(node) or not spin.IsWritable(node):
+        api = self._api
+        node = api.node(self._nodemap, "DeviceLinkThroughputLimit")
+        if node is None or not api.writable(node):
+            return
+        value, top = api.value(node, "int"), api.bounds(node, "int")[1]
+        if value is None or top is None or value >= top:
             return
         try:
-            node_max = node.GetMax()
-            if node.GetValue() < node_max:
-                node.SetValue(node_max)
-                log.debug(
-                    "Camera %s: DeviceLinkThroughputLimit -> %d (max)",
-                    self._serial,
-                    node_max,
-                )
-        except spin.SpinnakerException as e:
+            api.write(node, "int", int(top))
+            log.debug(
+                "Camera %s: DeviceLinkThroughputLimit %d -> %d (max)",
+                self._serial,
+                value,
+                top,
+            )
+        except BackendError as e:
             log.debug(
                 "Could not raise DeviceLinkThroughputLimit on camera %s: %s",
                 self._serial,
@@ -249,479 +318,399 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         cam = self._cam
         if cam is None:
             return
+        api = self._api
+        self.trigger.end_grab()
         try:
-            if cam.IsStreaming():
-                cam.EndAcquisition()
+            if api.is_streaming(cam):
+                api.end_acquisition(cam)
         except Exception:
             pass
         try:
-            if cam.IsInitialized():
-                cam.DeInit()
+            if api.is_initialized(cam):
+                api.deinit(cam)
         except Exception:
             pass
-        # Drop the CameraPtr so the System can be released in teardown().
-        self._cam = None
+        api.release(cam)
+        self._cam = self._nodemap = self._stream_nodemap = None
 
     def is_open(self) -> bool:
-        return self._cam is not None and self._cam.IsInitialized()
-
-    def is_grabbing(self) -> bool:
-        # The hand-off flag is authoritative (see BaslerBackend.is_grabbing):
-        # stop_grab flips it and wakes a blocked retrieve before EndAcquisition().
-        return self._cam is not None and self._grabbing
-
-    def grab_locked_features(self) -> frozenset[str]:
-        # FLIR/Teledyne lock only Width/Height during acquisition; the ROI
-        # offsets stay writable while grabbing (live ROI pan), so only the size
-        # nodes need the grab-cycle path.
-        return GEOMETRY_FEATURES
-
-    def width(self) -> int:
-        return int(self._int_node("Width").GetValue())
-
-    def height(self) -> int:
-        return int(self._int_node("Height").GetValue())
-
-    # ----------------------------------------------------- node plumbing
-
-    def _nodemap(self):
-        return self._cam.GetNodeMap()
-
-    def _int_node(self, sfnc: str):
-        return _spin().CIntegerPtr(self._nodemap().GetNode(sfnc))
-
-    def _typed_node(self, name: str):
-        spin = _spin()
-        raw = self._nodemap().GetNode(PARAM_NODES[name])
-        return spin.CIntegerPtr(raw) if name in _INT_PARAMS else spin.CFloatPtr(raw)
-
-    # Every setter below wraps SpinnakerException in BackendError. An
-    # availability/writability check does not cover a *value* the node refuses
-    # (out of range, wrong increment, a dependency not yet satisfied), and the
-    # config applier and node-map walk both guard themselves with `except
-    # BackendError` — a raw PySpin exception escaping here propagates out of
-    # load_params and aborts the whole rig init on one unsettable node.
-    def _set_enum(self, name: str, value: str) -> None:
-        spin = _spin()
-        node = spin.CEnumerationPtr(self._nodemap().GetNode(name))
-        if not spin.IsAvailable(node) or not spin.IsWritable(node):
-            raise BackendError(f"enumeration {name} is not writable")
-        try:
-            entry = node.GetEntryByName(value)
-            if not spin.IsAvailable(entry) or not spin.IsReadable(entry):
-                raise BackendError(f"enumeration {name} has no entry {value!r}")
-            node.SetIntValue(entry.GetValue())
-        except spin.SpinnakerException as e:
-            raise BackendError(str(e)) from e
-
-    def _get_enum(self, name: str) -> str | None:
-        spin = _spin()
-        node = spin.CEnumerationPtr(self._nodemap().GetNode(name))
-        if not spin.IsAvailable(node) or not spin.IsReadable(node):
-            return None
-        try:
-            entry = node.GetCurrentEntry()
-        except spin.SpinnakerException:
-            return None
-        return entry.GetSymbolic() if entry is not None else None
-
-    # Typed-setter seam used by the native-TSV config applier (_genicam_config).
-    def _set_bool(self, name: str, value: bool) -> None:
-        spin = _spin()
-        node = spin.CBooleanPtr(self._nodemap().GetNode(name))
-        if not spin.IsAvailable(node) or not spin.IsWritable(node):
-            raise BackendError(f"boolean {name} is not writable")
-        try:
-            node.SetValue(bool(value))
-        except spin.SpinnakerException as e:
-            raise BackendError(str(e)) from e
-
-    def _get_bool(self, name: str) -> bool | None:
-        spin = _spin()
-        node = spin.CBooleanPtr(self._nodemap().GetNode(name))
-        if not spin.IsAvailable(node) or not spin.IsReadable(node):
-            return None
-        try:
-            return bool(node.GetValue())
-        except spin.SpinnakerException:
-            return None
-
-    def _set_number(self, name: str, value: float, is_int: bool) -> None:
-        spin = _spin()
-        raw = self._nodemap().GetNode(name)
-        node = spin.CIntegerPtr(raw) if is_int else spin.CFloatPtr(raw)
-        if not spin.IsAvailable(node) or not spin.IsWritable(node):
-            raise BackendError(f"node {name} is not writable")
-        try:
-            node.SetValue(int(value) if is_int else float(value))
-        except spin.SpinnakerException as e:
-            raise BackendError(str(e)) from e
-
-    def _get_number(self, name: str, is_int: bool) -> float | int | None:
-        spin = _spin()
-        raw = self._nodemap().GetNode(name)
-        node = spin.CIntegerPtr(raw) if is_int else spin.CFloatPtr(raw)
-        if not spin.IsAvailable(node) or not spin.IsReadable(node):
-            return None
-        try:
-            return node.GetValue()
-        except spin.SpinnakerException:
-            return None
-
-    # ----------------------------------------------------- sensor parameters
-
-    def read_node(self, name: str) -> NodeInfo:
-        spin = _spin()
-        node = self._typed_node(name)
-        if not spin.IsAvailable(node) or not spin.IsReadable(node):
-            raise BackendError(f"node {PARAM_NODES[name]} is not readable")
-        try:
-            value = node.GetValue()
-        except spin.SpinnakerException as e:
-            raise BackendError(str(e)) from e
-        return NodeInfo(
-            value=value,
-            min=_safe(node.GetMin),
-            max=_safe(node.GetMax),
-            inc=_safe(node.GetInc),
-            unit=_safe(node.GetUnit),
-            writable=spin.IsWritable(node),
-        )
-
-    def write_node(self, name: str, value: float) -> None:
-        spin = _spin()
-        node = self._typed_node(name)
-        if not spin.IsAvailable(node) or not spin.IsWritable(node):
-            raise BackendError(f"node {PARAM_NODES[name]} is not writable")
-        try:
-            node.SetValue(int(value) if name in _INT_PARAMS else float(value))
-        except spin.SpinnakerException as e:
-            raise BackendError(str(e)) from e
-
-    # Full device node-map browser (Camera tab): depth-first walk of the GenApi
-    # category tree, exactly like the Basler backend does over pypylon.genicam
-    # (and the Spinnaker C-API backend over ctypes) — same widget kinds, same
-    # per-node bounds/enum-entries, grouped by category.
-    def list_features(self) -> list[FeatureInfo]:
-        if self._cam is None or not self._cam.IsInitialized():
-            return []
-        spin = _spin()
-        try:
-            root = spin.CCategoryPtr(self._nodemap().GetNode("Root"))
-        except spin.SpinnakerException:
-            return []
-        out: list[FeatureInfo] = []
-        self._walk(spin, root, "", out, set())
-        return out
-
-    def _walk(self, spin, category, path: str, out: list, seen: set) -> None:
-        """Depth-first walk of the GenApi category tree, collecting features."""
-        try:
-            features = category.GetFeatures()
-        except spin.SpinnakerException:
-            return
-        for node in features:
-            try:
-                if not spin.IsAvailable(node) or not node.IsFeature():
-                    continue
-                if _visibility_name(spin, node) not in ("beginner", "expert", "guru"):
-                    continue
-                if node.GetPrincipalInterfaceType() == spin.intfICategory:
-                    label = _safe(node.GetDisplayName) or _safe(node.GetName) or path
-                    self._walk(spin, spin.CCategoryPtr(node), label, out, seen)
-                    continue
-                name = node.GetName()
-                if name in seen:
-                    continue
-                seen.add(name)
-                feature = _flir_feature(spin, node)
-                if feature is not None:
-                    feature.category = path or "Other"
-                    out.append(feature)
-            except spin.SpinnakerException as e:
-                log.debug("Skipping node during feature walk: %s", e)
-
-    def read_feature(self, name: str) -> FeatureInfo:
-        spin = _spin()
-        try:
-            node = self._nodemap().GetNode(name)
-        except spin.SpinnakerException as e:
-            raise BackendError(f"no such node: {name}") from e
-        if node is None or not spin.IsAvailable(node):
-            raise BackendError(f"no such node: {name}")
-        feature = _flir_feature(spin, node)
-        if feature is None:
-            raise BackendError(f"node {name} is not an editable feature")
-        # Category is only known from the tree walk; leave it blank on a single
-        # re-read (the client keeps the grouping it already has).
-        return feature
-
-    def write_feature(self, name: str, value: object) -> None:
-        spin = _spin()
-        try:
-            node = self._nodemap().GetNode(name)
-        except spin.SpinnakerException as e:
-            raise BackendError(f"no such node: {name}") from e
-        if node is None:  # GetNode returns None (not a raise) for an absent name
-            raise BackendError(f"no such node: {name}")
-        kind = _iface_kind(spin, node.GetPrincipalInterfaceType())
-        try:
-            if kind == "int":
-                typed = spin.CIntegerPtr(node)
-                node_min = _safe(typed.GetMin)
-                node_inc = _safe(typed.GetInc)
-                snapped = int(round(float(value)))  # type: ignore[arg-type]
-                if node_inc:
-                    base = node_min if node_min is not None else 0
-                    snapped = int(base + round((snapped - base) / node_inc) * node_inc)
-                typed.SetValue(snapped)
-            elif kind == "float":
-                spin.CFloatPtr(node).SetValue(float(value))  # type: ignore[arg-type]
-            elif kind == "bool":
-                spin.CBooleanPtr(node).SetValue(coerce_bool(value))
-            elif kind == "enum":
-                spin.CEnumerationPtr(node).FromString(str(value))
-            elif kind == "string":
-                spin.CStringPtr(node).SetValue(str(value))
-            else:
-                raise BackendError(f"node {name} is not writable ({kind})")
-        except spin.SpinnakerException as e:
-            raise BackendError(str(e)) from e
-
-    def execute_command(self, name: str) -> None:
-        spin = _spin()
-        try:
-            node = self._nodemap().GetNode(name)
-        except spin.SpinnakerException as e:
-            raise BackendError(f"no such node: {name}") from e
-        if node is None:  # GetNode returns None (not a raise) for an absent name
-            raise BackendError(f"no such node: {name}")
-        if node.GetPrincipalInterfaceType() != spin.intfICommand:
-            raise BackendError(f"node {name} is not a command")
-        try:
-            spin.CCommandPtr(node).Execute()
-        except spin.SpinnakerException as e:
-            raise BackendError(str(e)) from e
-
-    # config_values / load_params / save_params and the software-trigger chain
-    # (enable_frame_trigger / set_trigger_source / begin_software_trigger_preview
-    # / trigger_once / begin_freerun / _enable_trigger_overlap) are inherited
-    # unchanged from GenICamTriggerConfig.
-
-    def retrieve_freerun(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None:
-        # Free-run: the camera acquires continuously, so fetch the next image
-        # without waiting on / firing a software trigger.
-        cam = self._cam
-        if cam is None or not self._grabbing:
-            return None
-        return self._fetch_image(cam, timeout_ms, wants_array)
+        return self._cam is not None and self._api.is_initialized(self._cam)
 
     # ------------------------------------------------------------- grabbing
 
-    def _begin_acquisition(self, buffer_mode: str) -> None:
-        spin = _spin()
+    def stream_statistics(self) -> dict[str, int]:
+        """Spinnaker's transport counters (see STREAM_STATISTICS) plus the
+        incomplete images this backend discarded.
+        """
+        out = {"IncompleteImagesDiscarded": self._incomplete.total}
+        if self._stream_nodemap is not None:
+            for name in STREAM_STATISTICS:
+                value = self._api.get(self._stream_nodemap, name, "int")
+                if value is not None:
+                    out[name] = int(value)
+        return out
+
+    def _stream_set(self, name: str, kind: str, value: Any) -> None:
+        """Best-effort write to the TL stream node map."""
         try:
-            self._set_enum("AcquisitionMode", "Continuous")
-            # Buffer handling lives on the transport-layer stream nodemap.
-            snodemap = self._cam.GetTLStreamNodeMap()
-            handling = spin.CEnumerationPtr(
-                snodemap.GetNode("StreamBufferHandlingMode")
-            )
-            entry = handling.GetEntryByName(buffer_mode)
-            if spin.IsAvailable(entry) and spin.IsReadable(entry):
-                handling.SetIntValue(entry.GetValue())
-            self._cam.BeginAcquisition()
-        except spin.SpinnakerException as e:
-            # Name the camera (mirrors the Basler "insufficient resources" hint).
-            log.error("Failed to start streaming on camera %s: %s", self._serial, e)
-            raise BackendError(str(e)) from e
-        self._begin_grab()
+            self._api.put(self._stream_nodemap, name, kind, value)
+        except BackendError as e:
+            log.debug("Could not set %s on camera %s: %s", name, self._serial, e)
+
+    def _set_stream_buffers(self, buffers: int) -> None:
+        """Best-effort: a manual stream buffer count of `buffers` (<= the max)."""
+        self._stream_set("StreamBufferCountMode", "enum", "Manual")
+        node = self._api.node(self._stream_nodemap, "StreamBufferCountManual")
+        top = None if node is None else self._api.bounds(node, "int")[1]
+        self._stream_set(
+            "StreamBufferCountManual",
+            "int",
+            buffers if top is None else min(buffers, int(top)),
+        )
+
+    def _begin_acquisition(self, buffer_mode: str, buffers: int | None = None) -> None:
+        # Only BeginAcquisition is fatal: FLIR defaults to Continuous, and the
+        # stream settings only tune its buffering.
+        self._try_set("AcquisitionMode", "enum", "Continuous")
+        stream = self._stream_nodemap
+        if stream is not None:
+            self._stream_set("StreamBufferHandlingMode", "enum", buffer_mode)
+        while True:
+            if buffers and stream is not None:
+                self._set_stream_buffers(buffers)
+            try:
+                self._api.begin_acquisition(self._cam)
+                break
+            except BackendError as e:
+                if buffers and stream is not None and buffers > MIN_STREAM_BUFFERS:
+                    log.warning(
+                        "Camera %s could not start acquisition with %d stream buffers "
+                        "(%s); retrying with %d. The pool shares the kernel's USB "
+                        "memory with the other cameras: raise usbcore.usbfs_memory_mb "
+                        "to keep the full pool, which absorbs longer host stalls.",
+                        self._serial,
+                        buffers,
+                        e,
+                        buffers // 2,
+                    )
+                    buffers //= 2
+                    continue
+                log.error("Failed to start streaming on camera %s: %s", self._serial, e)
+                raise
+        self.trigger.begin_grab()
 
     def start_grab_preview(self) -> None:
+        self._incomplete.begin_grab(record=False)
         self._begin_acquisition("NewestOnly")
 
     def start_grab_record(self) -> bool:
-        # Spinnaker has no WaitForFrameTriggerReady; the camera arms on the
-        # first software trigger, so report ready once acquisition has begun.
-        self._begin_acquisition("OldestFirst")
+        # Spinnaker has no ready gate: ready once acquisition began (a GS3 still
+        # ignores its first triggers, so the recording primes the cameras).
+        self._incomplete.begin_grab(record=True)
+        self._begin_acquisition("OldestFirst", RECORD_STREAM_BUFFERS)
         return True
 
     def stop_grab(self) -> None:
-        # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
-        # stop, so the grab loop sees "not grabbing" immediately.
-        self._end_grab()
-        if self._cam is not None and self._cam.IsStreaming():
-            try:
-                self._cam.EndAcquisition()
-            except Exception:
-                pass
-
-    def retrieve(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None:
-        spin = _spin()
-        # Wait for a pending software trigger, then fire exactly one device
-        # trigger and fetch exactly one frame on this camera's own grab thread.
-        if not self._wait_pending(timeout_ms):
-            return None
+        self.trigger.end_grab()
         cam = self._cam
-        if cam is None or not self._grabbing:
-            return None
-        # Fire the device trigger here (not on the caught _trigger_all path). The
-        # grab loop does not wrap retrieve() in try/except, so a stop-race or a
-        # trigger failure must return None, never raise — a lost trigger is one
-        # lost frame, the same as the GetNextImage timeout below.
+        if cam is None:
+            return
         try:
-            spin.CCommandPtr(self._nodemap().GetNode("TriggerSoftware")).Execute()
-        except spin.SpinnakerException:
-            return None
-        return self._fetch_image(cam, timeout_ms, wants_array)
+            if self._api.is_streaming(cam):
+                self._api.end_acquisition(cam)
+        except Exception:
+            pass
 
-    def _fetch_image(self, cam, timeout_ms, wants_array) -> Frame | None:
-        # Fetch exactly one image; never raises (a timeout or incomplete frame is
-        # one lost frame, as the grab loop expects).
-        spin = _spin()
+    def _fire_trigger(self) -> bool:
+        if self._nodemap is None:
+            return False
+        node = self._api.node(self._nodemap, "TriggerSoftware")
+        if node is None:
+            return False
         try:
-            image = cam.GetNextImage(timeout_ms)
-        except spin.SpinnakerException:
-            return None  # timeout: the analogue of pylon's empty result
+            self._api.execute(node)
+        except BackendError:
+            return False
+        return True
+
+    def _fetch(
+        self, timeout_ms: int, wants_array: Callable[[], bool], answers_trigger: bool
+    ) -> Frame | None:
+        cam = self._cam
+        if cam is None:
+            return None
+        api = self._api
+        image = api.next_image(cam, timeout_ms)
+        if image is None:
+            return None  # a timeout: no image yet
         try:
-            if image.IsIncomplete():
+            incomplete = api.image_incomplete(image)
+            timestamp = 0 if incomplete else api.image_timestamp(image)
+            if answers_trigger:
+                self.trigger.answered(None if incomplete else timestamp)
+            if incomplete:
+                self._incomplete.count()
                 return None
-            timestamp = image.GetTimeStamp()
-            array = None
-            if wants_array():
-                arr = image.GetNDArray()
-                # Reject anything that is not a single-byte 2-D (Mono8) frame:
-                # a Mono16/Bayer-raw frame is also 2-D (ndim==2) but wider than
-                # one byte, so it would be handed to the GRAY8 writer with the
-                # wrong dtype and corrupt the recording. Mirrors the C backend's
-                # bits-per-pixel==8 guard (which the bare ndim check misses).
-                if arr.ndim != 2 or arr.dtype.itemsize != 1:
-                    log.warning(
-                        "Camera %s delivered a non-Mono8 frame (ndim=%d, dtype=%s);"
-                        " skipping",
-                        self._serial,
-                        arr.ndim,
-                        arr.dtype,
-                    )
-                    return None
-                array = arr.copy()  # own it; the SDK buffer is recycled on Release
-            return (array, timestamp)
+            return (api.image_array(image) if wants_array() else None, timestamp)
+        except BackendError as e:
+            log.warning("Camera %s: bad frame (%s); skipping", self._serial, e)
+            return None
         finally:
-            image.Release()
+            api.image_release(image)  # every image, or the SDK runs out of buffers
 
 
-def _read_serial(cam) -> str:
-    spin = _spin()
-    nodemap = cam.GetTLDeviceNodeMap()
-    node = spin.CStringPtr(nodemap.GetNode("DeviceSerialNumber"))
-    if spin.IsAvailable(node) and spin.IsReadable(node):
-        return node.GetValue()
-    return cam.GetUniqueID()
+# --- the PySpin binding (the `flir` tier) --------------------------------
+
+PySpin: Any = None  # imported by _spin() on first use
 
 
-def read_model(cam) -> str | None:
-    """Best-effort ``DeviceModelName`` from the TL device nodemap (readable pre-Init).
+def _spin() -> Any:
+    """The PySpin module, imported on first use; BackendUnavailable without it."""
+    global PySpin
+    if PySpin is None:
+        try:  # PySpin ships with the Spinnaker SDK and is not pip-installable.
+            import PySpin as module  # type: ignore
+        except ImportError as e:
+            raise BackendUnavailable(
+                "flir",
+                "PySpin (the Spinnaker SDK's Python binding) isn't importable "
+                "\N{EM DASH} not "
+                "on PyPI and easily pruned by `uv sync`; reinstall the PySpin wheel "
+                "to restore this tier. FLIR cameras still work via the ctypes "
+                "`spinnaker` tier when libSpinnaker_C.so is present.",
+            ) from e
+        PySpin = module
+    return PySpin
 
-    The model-name analogue of :func:`_read_serial`: reads a transport-layer node
-    without opening/initializing the camera, so it is safe during a live session
-    (``octacam doctor`` enumerates but never opens). Returns ``None`` when the node
-    is absent or unreadable. Consumed by the doctor enumeration to label cameras.
-    """
+
+def _safe(fn: Callable[[], Any]) -> Any:
+    """`fn()`, or None on any failure (a best-effort read)."""
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def _sdk(fn: Callable[..., Any], *args: Any) -> Any:
+    """`fn(*args)`, a SpinnakerException raised as BackendError."""
     spin = _spin()
     try:
-        nodemap = cam.GetTLDeviceNodeMap()
-        node = spin.CStringPtr(nodemap.GetNode("DeviceModelName"))
-        if spin.IsAvailable(node) and spin.IsReadable(node):
-            return node.GetValue() or None
-    except Exception:
-        pass
-    return None
+        return fn(*args)
+    except spin.SpinnakerException as e:
+        raise BackendError(str(e)) from e
 
 
-def enumerate_flir(
-    requested_serials: list[str] | None = None, *, warn_missing: bool = True
-):
-    """Return ``[(serial, CameraPtr), ...]`` for the requested FLIR cameras.
-
-    Holds the System singleton and camera list for the session (released in
-    :func:`teardown`). Mirrors the Basler enumeration: all detected cameras
-    (sorted) when nothing is requested, else the listed serials in order with a
-    warning for any not connected.
-
-    ``warn_missing=False`` suppresses the per-serial "not found" warning: the
-    auto cascade offers the whole rig's serial list to every tier, so most of
-    those serials legitimately belong to another backend and must not be
-    reported missing here (``CameraSystem._enumerate`` warns once for a serial
-    that no tier claimed).
+class PySpinBinding(FlirBinding):
+    """The Spinnaker SDK through PySpin. Nodes are untyped INodes, cast to their
+    interface (`CIntegerPtr`...) per call. A CameraPtr is released when its
+    last reference drops, so `_release` has nothing to call.
     """
-    spin = _spin()
-    global _system, _cam_list
-    # Release any prior session first. An enumerate-only path (octacam doctor
-    # sweeps the backend list AND the cascade, so it enumerates twice) would
-    # otherwise overwrite _system/_cam_list and orphan the previous System with
-    # its references still active. teardown() is idempotent.
-    if _system is not None or _cam_list is not None:
-        teardown()
-    _system = spin.System.GetInstance()
-    _cam_list = _system.GetCameras()
-    count = _cam_list.GetSize()
-    if count == 0:
-        teardown()
-        return []
-    # Debug, not info: the auto cascade enumerates every tier, so CameraSystem
-    # logs the single attributed "Detected N" summary (see basler backend).
-    log.debug("flir enumerated %d camera(s)", count)
 
-    by_serial: dict[str, object] = {}
-    detected: list[str] = []
-    for i in range(count):
-        cam = _cam_list.GetByIndex(i)
-        serial = _read_serial(cam)
-        detected.append(serial)
-        by_serial[serial] = cam
+    tier = "flir"
 
-    final = sorted(detected) if not requested_serials else list(requested_serials)
-    out = []
-    for serial in final:
-        cam = by_serial.get(serial)
-        if cam is None:
-            if warn_missing:
-                log.warning("Camera with serial number %s not found", serial)
-            continue
-        out.append((serial, cam))
-    return out
+    # ---------------------------------------------------------------- GenApi
+    def node(self, nodemap: Any, name: str) -> Any:
+        return _safe(lambda: nodemap.GetNode(name))  # None for an absent name
+
+    def children(self, category: Any) -> list[Any]:
+        spin = _spin()
+        nodes = _safe(lambda: spin.CCategoryPtr(category).GetFeatures()) or []
+        return [
+            n for n in nodes if _safe(lambda n=n: spin.IsAvailable(n) and n.IsFeature())
+        ]
+
+    def kind(self, node: Any) -> str | None:
+        spin = _spin()
+        kinds = {
+            spin.intfIInteger: "int",
+            spin.intfIFloat: "float",
+            spin.intfIBoolean: "bool",
+            spin.intfIEnumeration: "enum",
+            spin.intfIString: "string",
+            spin.intfICommand: "command",
+            spin.intfICategory: "category",
+        }
+        return _safe(lambda: kinds.get(node.GetPrincipalInterfaceType()))
+
+    def name(self, node: Any) -> str | None:
+        return _safe(lambda: node.GetName())
+
+    def display_name(self, node: Any) -> str | None:
+        return _safe(lambda: node.GetDisplayName())
+
+    def tooltip(self, node: Any) -> str | None:
+        return (
+            _safe(lambda: node.GetToolTip())
+            or _safe(lambda: node.GetDescription())
+            or None
+        )
+
+    def visibility(self, node: Any) -> str:
+        spin = _spin()
+        names = {
+            spin.Beginner: "beginner",
+            spin.Expert: "expert",
+            spin.Guru: "guru",
+            spin.Invisible: "invisible",
+        }
+        return _safe(lambda: names.get(node.GetVisibility())) or "beginner"
+
+    def readable(self, node: Any) -> bool:
+        return bool(_safe(lambda: _spin().IsReadable(node)))
+
+    def writable(self, node: Any) -> bool:
+        return bool(_safe(lambda: _spin().IsWritable(node)))
+
+    def _typed(self, node: Any, kind: str) -> Any:
+        spin = _spin()
+        return {
+            "int": spin.CIntegerPtr,
+            "float": spin.CFloatPtr,
+            "bool": spin.CBooleanPtr,
+            "string": spin.CStringPtr,
+            "enum": spin.CEnumerationPtr,
+        }[kind](node)
+
+    def value(self, node: Any, kind: str) -> Any:
+        typed = self._typed(node, kind)
+        if kind == "enum":
+            entry = _safe(lambda: typed.GetCurrentEntry())
+            return None if entry is None else _safe(lambda: entry.GetSymbolic())
+        return _safe(lambda: typed.GetValue())
+
+    def bounds(self, node: Any, kind: str) -> Bounds:
+        typed = self._typed(node, kind)
+        return (
+            _safe(lambda: typed.GetMin()),
+            _safe(lambda: typed.GetMax()),
+            _safe(lambda: typed.GetInc()),
+            _safe(lambda: typed.GetUnit()) or None,
+        )
+
+    def entries(self, node: Any) -> list[tuple[str, bool]]:
+        spin = _spin()
+        out = []
+        for entry in _safe(lambda: spin.CEnumerationPtr(node).GetEntries()) or ():
+            symbolic = _safe(lambda e=entry: spin.CEnumEntryPtr(e).GetSymbolic())
+            if symbolic:
+                available = _safe(lambda e=entry: spin.IsAvailable(e))
+                out.append((symbolic, True if available is None else bool(available)))
+        return out
+
+    def write(self, node: Any, kind: str, value: Any) -> None:
+        spin = _spin()
+        typed = self._typed(node, kind)
+        if kind == "enum":
+            entry = _sdk(typed.GetEntryByName, value)
+            if (
+                entry is None
+                or not spin.IsAvailable(entry)
+                or not spin.IsReadable(entry)
+            ):
+                raise BackendError(
+                    f"enumeration {self.name(node)} has no entry {value!r}"
+                )
+            _sdk(typed.SetIntValue, entry.GetValue())
+        else:
+            cast = {"int": int, "float": float, "bool": bool, "string": str}[kind]
+            _sdk(typed.SetValue, cast(value))
+
+    def execute(self, node: Any) -> None:
+        _sdk(_spin().CCommandPtr(node).Execute)
+
+    # ------------------------------------------------------- System, cameras
+    def _get_system(self) -> Any:
+        return _sdk(_spin().System.GetInstance)
+
+    def _camera_list(self, system: Any) -> Any:
+        return _sdk(system.GetCameras)
+
+    def _cameras(self, cam_list: Any) -> list[Any]:
+        return [cam_list.GetByIndex(i) for i in range(cam_list.GetSize())]
+
+    def _clear_camera_list(self, cam_list: Any) -> None:
+        cam_list.Clear()
+
+    def _release_system(self, system: Any) -> None:
+        system.ReleaseInstance()
+
+    def _release(self, cam: Any) -> None:
+        pass
+
+    def init(self, cam: Any) -> None:
+        _sdk(cam.Init)
+
+    def deinit(self, cam: Any) -> None:
+        _sdk(cam.DeInit)
+
+    def is_initialized(self, cam: Any) -> bool:
+        return bool(_safe(lambda: cam.IsInitialized()))
+
+    def is_streaming(self, cam: Any) -> bool:
+        return bool(_safe(lambda: cam.IsStreaming()))
+
+    def nodemap(self, cam: Any) -> Any:
+        return _sdk(cam.GetNodeMap)
+
+    def stream_nodemap(self, cam: Any) -> Any:
+        return _sdk(cam.GetTLStreamNodeMap)
+
+    def tl_device_nodemap(self, cam: Any) -> Any:
+        return _sdk(cam.GetTLDeviceNodeMap)
+
+    def device_id(self, cam: Any) -> str:
+        return _sdk(cam.GetUniqueID)
+
+    def begin_acquisition(self, cam: Any) -> None:
+        _sdk(cam.BeginAcquisition)
+
+    def end_acquisition(self, cam: Any) -> None:
+        _sdk(cam.EndAcquisition)
+
+    # ---------------------------------------------------------------- images
+    def next_image(self, cam: Any, timeout_ms: int) -> Any:
+        try:
+            return _sdk(cam.GetNextImage, timeout_ms)
+        except BackendError:
+            return None
+
+    def image_incomplete(self, image: Any) -> bool:
+        incomplete = _safe(lambda: image.IsIncomplete())
+        return incomplete is None or bool(incomplete)
+
+    def image_timestamp(self, image: Any) -> int:
+        return int(_safe(lambda: image.GetTimeStamp()) or 0)
+
+    def image_array(self, image: Any) -> np.ndarray:
+        arr = _sdk(image.GetNDArray)
+        if arr.ndim != 2 or arr.dtype.itemsize != 1:
+            raise BackendError(f"non-Mono8 frame (ndim={arr.ndim}, dtype={arr.dtype})")
+        return arr.copy()
+
+    def image_release(self, image: Any) -> None:
+        _quietly(image.Release)
+
+
+_binding = PySpinBinding()
+
+
+def ensure_available() -> None:
+    """Raise BackendUnavailable if PySpin/Spinnaker is not installed."""
+    _spin()
 
 
 def teardown() -> None:
-    """Release the Spinnaker System singleton, once, after cameras are closed.
-
-    Called by CameraSystem.close() through the registry. Clearing the camera
-    list and releasing the instance must happen after every CameraPtr has been
-    de-initialized and dropped (FlirBackend.close drops its reference), or
-    Spinnaker reports cameras still in use.
-    """
-    global _system, _cam_list
-    if _cam_list is not None:
-        try:
-            _cam_list.Clear()
-        except Exception:
-            pass
-        _cam_list = None
-    if _system is not None:
-        try:
-            _system.ReleaseInstance()
-        except Exception:
-            pass
-        _system = None
+    """Release the PySpin session (`FlirBinding.teardown`)."""
+    _binding.teardown()
 
 
-# Net for enumerate-only paths that never construct a CameraSystem and so never
-# run teardown() — notably octacam doctor/probe/aborted runs, which read serials
-# and drop the CameraPtrs. Without this the System singleton is leaked with its
-# references still active. teardown() is idempotent and a no-op when the SDK was
-# never loaded, so this composes with CameraSystem.close() already calling it.
+# For paths that enumerate without a CameraSystem (doctor, an aborted run).
 atexit.register(teardown)
+
+SPEC = BackendSpec(
+    lambda requested_serials=None: _binding.enumerate(requested_serials),
+    lambda cam: FlirBackend(_binding, cam),
+    ensure_available=ensure_available,
+    read_model=lambda cam: _binding.model(cam),
+    teardown=teardown,
+)

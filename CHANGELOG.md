@@ -7,6 +7,300 @@ and octacam adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 Releases are tagged `vX.Y.Z`; install a specific one with
 `git+https://github.com/NeLy-EPFL/octacam.git@vX.Y.Z`.
 
+## [Unreleased]
+
+### Added
+
+- **`--set KEY=VALUE` on `gui` and `record`** overrides any config key for one
+  launch by its dotted path (`--set record.save_method=raw`), the same flag
+  deeperfly and spintrack take. The value is read as TOML, a list may drop its
+  brackets, `none` restores the default, and an unknown key is a usage error that
+  names the closest one. `--fps`, `--duration` and `--out` still win over it.
+- **Every command takes `-v`/`--verbose`**: debug logging and a full traceback.
+  Without it an unexpected error is one line, and Ctrl-C exits 130.
+- **`gui` takes the next free port** when 8765 is taken and `--port` is left out;
+  a port given with `--port` is still that port or an error.
+- A CLI reference generated from the commands (`docs/cli.md`, kept current by a
+  test), a Citing and credits page, `CITATION.cff`, and CI that runs ruff,
+  pyrefly, the tests and the strict docs build on every push.
+
+- **Every frame is assigned to the trigger pulse that exposed it; missed pulses
+  are detected, filled and reported** — a hardware-triggered camera that misses
+  a pulse delivers no frame for it and nothing in its frame stream said so, so a
+  camera that missed pulses drifted one frame behind the others per miss while
+  its summary reported `dropped: 0` (13 of 21 hexaview recordings: 1–5 missed
+  pulses on one camera, invisible). octacam now places each frame on the trigger
+  clock from the camera's hardware timestamps (from the trigger's sequence
+  number under the software trigger, where each image answers its own trigger
+  even when it arrives late), following the camera clock's drift, folding the
+  Grasshopper3's 128 s timestamp glitch, and reading a grab stall's burst of
+  buffered frames as late delivery rather than a clock jump. On an octacam-driven
+  train (`software`/`managed`) a missed pulse — and a frame the writer queue
+  refused during a transient stall — is filled with a repeat of the previous
+  frame, so **video frame k is pulse k in every camera**. A *sustained* encoder or
+  disk shortfall is not padded (a fill costs as much as a real frame): once a
+  camera has refused more than a queue's worth of frames, further refused frames
+  are skipped and reported (`writer_skipped`), the recording's `sync` fails, and
+  `pulse_index` maps its frames. The summary (schema 4) lists each camera's
+  `missed_pulse_indices`, `writer_dropped`, `late_pulse_indices` (e.g. a camera
+  that fired on the pulse's falling edge), `extra_frames`, the camera SDK's own
+  transport counters (`stream`), `writer_skipped`, the `pulse_train`, whether the
+  take `completed`, and a cross-camera `sync` verdict including a start-offset
+  check (between cameras with the same model, geometry and exposure — others get
+  an informational note); `dropped` now counts every fill.
+  `timestamps.npz` gains per-frame `missed`, `pulse_index` and `arrival_ns`.
+  Misses surface live as GUI events and in each tile's *dropped* counter. On an
+  `external` trigger (a source octacam does not drive) misses are reported, not
+  filled.
+- **`octacam check`** — screens recording folders or directory trees for missed
+  pulses, unequal frame counts, start offsets between cameras, late exposures and
+  camera-clock jumps; exits 1 on a problem, including a recording it cannot read.
+  New recordings are checked from their own accounting (the summary alone
+  suffices, and its `sync` verdict counts); recordings made before this release
+  are re-derived from their `timestamps.npz` (host-clock series are skipped), and
+  a start offset is found by lining up the trigger source's timing events that
+  reach every camera.
+
+### Changed
+
+- **Breaking: `octacam record --output` is now `--out`** (`-o` is unchanged), as
+  in deeperfly and spintrack.
+- **Breaking: the root `-l`/`--log-level` option is gone**; logging is INFO, and
+  each command's `-v`/`--verbose` turns on DEBUG.
+- **Python 3.14 is the supported version** (was 3.10 and up;
+  `requires-python = ">=3.14,<3.15"`), so `uv tool install` picks a Python every
+  dependency ships wheels for. Every dependency is at its latest release
+  (numpy 2.5, OpenCV 5, FastAPI 0.143, Typer 0.27, pypylon 26.8, ...);
+  `uvicorn[standard]` replaces the separate `websockets`.
+- With 3.14 alone, annotations are lazy (PEP 649): the quotes around
+  `TYPE_CHECKING`-only names and `tests/test_typing_hygiene.py`, which enforced them
+  for 3.12-3.13, are gone.
+- `octacam --version` prints `octacam <version>`, and help is rendered from
+  Markdown. Help, README and docs name positional arguments in lowercase, as the
+  usage line prints them (`config_dir`).
+- Type checking moved from pyright to pyrefly, with no errors and no baseline;
+  ruff adds docstring (Google), bugbear and line-length rules, and the code is
+  formatted with `ruff format` and ASCII-only.
+
+- `PUT /api/settings` reports a bad value as one message naming the field, in any
+  state (only a valid change answers 409 during a take). It no longer coerces
+  `true`/`2.0`/`"3"` into the integer settings or accepts `null` for a setting
+  that has no "auto" value.
+- `octacam record`'s firmware prompt on a terminal uses `octacam flash`'s wording.
+- `octacam config --backend ""` means auto, like every other backend selector.
+- `octacam benchmark --json` (and the GUI's benchmark payload) no longer reports
+  `transfer_bound` or `freerun_max_fps`; use `bottleneck == "transfer"` and
+  `ceilings.freerun_min`. It gains `bottleneck_label`, the wording the CLI and the
+  Benchmark tab now share. `--sink` and `--record-form` list their choices in
+  `--help`.
+- The benchmark's progress bar (CLI and Benchmark tab) shows the time left. Its
+  `diagnostics_progress` WebSocket message now carries `phase`, `detail`,
+  `elapsed_s`, `step_s` and `total_s`.
+- `octacam process` refuses to transcode a raw video whose summary names a pixel
+  format other than Mono8, instead of decoding it as Mono8.
+- An invalid `[[visualization]]` layout is reported with the validation reason.
+- `octacam process` accepts a `recording_summary.json` path for its recording,
+  like `octacam check`, and warns once, not twice, about a recording without a
+  config snapshot.
+- `octacam record` and `octacam benchmark` on a rig where no camera opens exit
+  with the GUI's "Could not open the cameras" message.
+- **Basler cameras get `TriggerOverlap=ReadOut` best-effort** when their frame
+  trigger is armed, through the same trigger setup as FLIR and pycameleon cameras
+  (which also sets `AcquisitionFrameRateAuto=Off` for a free-run rate cap). The
+  Basler Camera tab groups features by category display name, and a FLIR (PySpin)
+  parameter file's header names the camera model.
+- Plugin log lines start with the plugin's name.
+- The GUI's digit shortcuts follow the tab bar's order (a plugin tab's digit
+  depends on which plugins are loaded), and a plugin tab's firmware banner sits
+  right under its link status.
+- **A recording folder now shows just its videos; everything else goes into an
+  `octacam_recording/` subfolder** — the `recording_summary.json`, the opt-in
+  `timestamps.npz`, the `octacam_config.toml` config snapshot and every camera
+  and auxiliary parameter file used to sit flat beside the videos. The per-camera
+  videos (`.mkv`/`.raw`, then `.mp4`) and `grid.mp4` stay in the recording
+  folder, and the summary's per-camera `file` entries still name them relative to
+  it. The subfolder is a complete config directory, and
+  `octacam gui <recording folder>` still relaunches the recording's setup from
+  it. `octacam process` transfers the subfolder with the videos. **Older flat
+  recordings keep working with every command** (`check`, `process` — transcode,
+  grid, transfer — and relaunching): readers accept both layouts, and a
+  recursive search never takes an `octacam_recording/` subfolder for a recording
+  of its own. Recording into a folder that holds an older flat take leaves that
+  take's files in place; the new take's subfolder is what gets read.
+- **triggerbox firmware: a re-arm at the same fps keeps the frame clock's phase
+  and takes effect at the next frame edge** — outputs that stay in the spec
+  carry their level across the edge, so no output gets an early, late or extra
+  edge, and only pins leaving the spec are parked LOW. Editing a light in the
+  tab during a managed preview therefore no longer disturbs the trigger under
+  cameras already exposing on it (the same dark ramp as the fix below, in the
+  preview). A changed fps or an arm from idle still starts a fresh clock at
+  once, and `duration_ms` / pulse-train t0 restart with the new spec. Boards
+  report *outdated* until reflashed: `octacam flash <config>` or the tab's
+  *Flash firmware* button.
+- **Internal restructuring** (for contributors; no behavior change beyond these
+  entries): a `cli/` package, `take.py`/`cameras/take.py` (one recording, one
+  camera's), `recording_format.py`, `process.py`, `ffmpeg.py`/`transcode.py`, one
+  GenICam layer and FLIR backend, a `SerialPlugin` base. CLAUDE.md has the map.
+
+### Removed
+
+- Registering plugins through an `octacam.plugins` entry-point group (it was
+  undocumented and unused).
+- **`GET /api/config/configs`, `GET /api/diagnostics/last` and the triggerbox and
+  twophoton `GET /api/<plugin>/status` routes**, which no client called. A
+  browser that connects still gets the last benchmark report over the WebSocket,
+  and the plugin tabs read their status from `/api/system`.
+- **The legacy `/api/cameras/{index}/params` camera API** (`GET`/`PUT` and
+  `POST …/params/reset`), its `camera_params` WebSocket message, and the
+  per-camera `params` field of `/api/system`. The Camera tab uses
+  `/api/cameras/{index}/features`; building `params` read every camera over USB
+  on each browser connect.
+- **The `octacam.camera` module**: import from `octacam.cameras`.
+
+### Fixed
+
+- **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
+  error, which made a request for a missing feature or command a 500; it is a
+  clean "no such node" again.
+- File handles that leaked on error paths: a truncated `timestamps.npz` in
+  `octacam check`, an HTTP error in the update check, and ffmpeg's stderr pipe when
+  its reader thread failed to start.
+
+- **Saved configs, recording config snapshots and camera parameter files were
+  owner-only (0600)**, and `octacam process` copied that mode onto the storage
+  share; they now get the umask's permissions like every other octacam output.
+- **`octacam process` crashed on a `recording_summary.json` that is valid JSON
+  but not an object**; it now warns and skips that recording.
+- **flywheel: a serial port that died mid-session still read as ready**; the
+  board now shows as not ready and offers a reconnect, like triggerbox and
+  twophoton.
+- **`octacam flash` without the sketch source reported every board up to date**:
+  it now reports the build as unknown (or incompatible from the banner) and a
+  flash request exits non-zero.
+- **`octacam record --yes` still asked on a terminal before reflashing** a board
+  running an old build of its sketch, although `--yes` says "Don't prompt". A
+  blank or foreign board is still never flashed unasked.
+- **`-c:v:0`/`-codec:v:0` encoder spellings with `-pix_fmt gray` still wrote 4:0:0
+  H.264** (flat gray in NVIDIA hardware decoders); they get full-range 4:2:0 too.
+- The `doctor --probe-serial` help no longer claims ports held by a running
+  session are skipped (on Linux and macOS they are probed).
+- **Encoder args with bad shell quoting were accepted by the Record tab**, and
+  every camera's writer then failed at record start; they are refused when entered.
+- **`octacam doctor --backend auto` (or `all`) reported an unknown backend**
+  instead of every tier and the cascade's selection.
+- **A benchmark started just after a recording could run while the trigger board
+  was being re-armed for preview**, pulsing the trigger line through the
+  free-run benchmark: it is now refused until the recording has fully finished.
+- **A capture writer whose thread failed to start leaked its ffmpeg process**;
+  the camera's recording start now fails cleanly.
+- **Two full-sensor FLIR Grasshopper3s could not record together**: each asked
+  for 128 stream buffers, more than the kernel's default 1000 MB of USB memory
+  holds, and both failed to start ("Could not start acquisition"). A pool that
+  does not fit is now halved (down to 16) with a warning naming
+  `usbcore.usbfs_memory_mb`.
+- **octacam aborted at exit after a FLIR camera failed to start** (exit code
+  134, "something still holds a reference to the camera").
+- **A take that lost a camera at start still read as synchronized**: a camera
+  whose recording did not start now fails the summary's `sync` verdict.
+- **`octacam flash` could reset a board the GUI was using** when the config
+  directory was given as a relative path: the rig instance lock is now keyed on
+  the resolved path, so every spelling of one rig shares one lock.
+- **`octacam record` and `octacam benchmark` left the cameras open** when they
+  stopped before recording (a declined prompt, no camera opened, a parameter
+  load failure).
+- **The GUI did not show an incomplete rig**: a persistent warning now names each
+  configured camera that did not open, and why.
+- **FLIR (PySpin) preview and recording failed to start** when AcquisitionMode or
+  the stream buffer mode could not be set; like the ctypes Spinnaker backend,
+  only a refused BeginAcquisition fails the start now.
+- **A Basler camera raised `AttributeError`** when its trigger source was set after
+  it had been closed.
+- **The Benchmark tab showed queue peaks "of 20"**: the benchmark now uses and
+  reports `record.writer_queue_size`, and an NVENC benchmark reports its NVENC
+  encoder arguments.
+
+- **Recorded videos played as flat gray frames in VLC on NVIDIA machines.**
+  The default `-pix_fmt gray` wrote monochrome 4:0:0 H.264. NVIDIA's hardware
+  decoder (NVDEC/VDPAU, which VLC picks by default) decodes it as a uniform
+  gray frame, while software decoders read it correctly. Videos are now written
+  as full-range 4:2:0 (`yuv420p` with neutral chroma), and software decoders
+  return the same pixel values. The defaults and every bundled rig config now
+  say `yuv420p`. A libx264/libx265 `-pix_fmt gray` in an older config or
+  recording snapshot is also written as `yuv420p`, so `octacam process` turns
+  existing recordings into MP4s that play everywhere. Frames with an odd width
+  or height stay 4:0:0, since 4:2:0 cannot encode them.
+- **A recording's config snapshot lost the View tab's rotation and flips.** A
+  display-form recording bakes each camera's live rotate/flip into its video,
+  but the snapshot kept the rig file's values. Relaunching from the recording
+  then showed and recorded the cameras unrotated. The snapshot's `[[cameras]]`
+  now carry the live transform for every camera the rig config lists.
+- **The note about unchecked start alignment read like an error.** Cameras
+  that differ in model, frame size, pixel format or exposure deliver a pulse at
+  different delays, so their start alignment is not compared. On a rig whose
+  cameras differ only in ROI, every take ended with a long, generic "was not
+  checked" message. The note now says plainly that it is informational and
+  names what differs (e.g. `frame size: top 1024×2048, bottom 2048×1024`).
+- **octacam crashed at exit (segmentation fault, exit code 139) on a machine with
+  a system pylon install** — every `octacam record`, and pytest, after all outputs
+  were written. pylon's GenTL transport layer loaded the system pylon's GenTL
+  producers from `GENICAM_GENTL64_PATH` (set by the pylon installer's
+  `/etc/profile.d/basler-gentl-path.sh`); they pulled `/opt/pylon`'s `libuxapi`
+  into the process beside pypylon's own copy of the same library, and their
+  unload at exit jumped into unmapped code. octacam drives Basler cameras only
+  through pylon's native transport layers, so it now loads them with
+  `GENICAM_GENTL64_PATH` hidden (restored right after). Besides the clean exit,
+  pypylon's USB transport layer now binds its own bundled `libuxapi`, not the
+  system copy.
+- **FLIR Grasshopper3 recordings lost their first two pulses, and could start a
+  frame apart** — a GS3 ignores the first two hardware triggers after every
+  acquisition start (measured: three 13-pulse trains in one acquisition give 11,
+  13, 13 frames; waiting up to 300 ms after `BeginAcquisition` changes nothing,
+  and `AcquisitionStatus[FrameTriggerWait]` reports ready after 0.2 ms). So every
+  recording's frame 0 was the board's pulse 2, and while the record grab still
+  started under the preview's pulses, two cameras starting either side of a pulse
+  ended up one frame apart for the whole take (hexaview 260916/Fly4). The
+  cameras are now primed with sacrificial pulses (camera lines only, lights
+  dark) whose frames are discarded, so frame 0 is the train's first pulse.
+  Priming repeats its four pulses until every camera has answered one: on its
+  first acquisition after a power-up a GS3 ignored more than four. A camera that
+  still answers none within a second is warned about.
+- **A recording stops on the trigger train's pulse count** — each camera stopped
+  on its own frame count, so a camera that missed pulses caught up on pulses past
+  the end of the train and matched the others' count while its frames were
+  shifted. A counted train now ends when every camera has its last pulse, or once
+  the train is over; a camera that missed the last pulses is padded to it.
+- **A recording counts exactly the pulses the triggerbox emits** — the run ended
+  on a millisecond clock exactly on a frame edge, racing it, and at a period that
+  does not divide the duration (90 fps) it emitted one pulse more. The host now
+  plans the run from the firmware's semantics: it ends right after the last
+  frame's camera pulses and strobes, and the recording counts what is emitted.
+  Above ~400 fps the count may differ by a few pulses from `round(fps × duration)`;
+  from ~650 fps the firmware's millisecond run clock cannot end a train exactly,
+  and octacam warns.
+- **Triggerbox status tokens arrive within USB latency** — the reader waited for
+  64 bytes or its 0.2 s timeout, so the board's `R`/`D`/`C` reached the host up to
+  200 ms late. The preview cancel before a recording now waits for the board's
+  acknowledgement.
+- **Incomplete images are counted, not silently discarded** — on the FLIR (PySpin
+  and C-API) backends and on the Basler hardware-trigger path; FLIR record grabs
+  also use a 128-buffer stream pool (the SDK default of 9 is 72 ms at 125 fps).
+  Each FLIR grab logs its first incomplete image, then a running total at most
+  every 10 s (debug level in preview).
+- **A GUI recording under a managed (triggerbox) preview no longer opens with a
+  dark ramp** — the first frames of every recording came out dim and brightened
+  back to normal over the next ~7 frames (the hexaview "IR lights flash once at
+  record start"). The preview arm kept pulsing the cameras while they switched
+  into the record grab, and the recording arm then restarted the board's frame
+  clock at an arbitrary phase. A camera in overlapped readout
+  (`TriggerOverlap=ReadOut`) delays such an exposure to the end of the previous
+  readout while the strobe stays locked to the trigger edge, so the exposures
+  slid out from under the strobe and crept back by one period-minus-readout
+  (~0.3 ms) per frame. The start now stops the preview grab, cancels the preview
+  arm, and only then starts the record grab and arms the board, as headless
+  `octacam record` always did (whose frame 0 is the train's first pulse once
+  the cameras are primed — see above). A concurrent start, benchmark, settings
+  edit or preview restart is refused during that hand-off.
+
 ## [0.3.3] - 2026-09-18
 
 ### Fixed

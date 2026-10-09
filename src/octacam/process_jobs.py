@@ -1,21 +1,11 @@
-"""Detached ``octacam process`` jobs — spawn, track, attach, pause, cancel.
+"""Detached `octacam process` jobs: spawn, track, attach, pause, cancel; and
+the run side every process run uses (its reporter and the pause gate).
 
-``octacam process`` normally runs in the foreground and dies with its terminal
-(a dropped ``ssh`` session kills a long transcode). ``--detach`` instead re-execs
-a fresh ``octacam process`` in its own session (``start_new_session=True``) with
-stdout/stderr redirected to a per-job ``log.txt``; the child writes a
-``status.json`` it updates as it runs and holds an ``flock`` liveness marker for
-its whole lifetime. ``octacam jobs`` (list/attach/pause/resume/cancel) and the
-``attach`` viewer are plain readers/tailers of those files — no daemon, no IPC.
-
-The design reuses octacam's crash-safe idioms verbatim: the ``flock``-marker
-liveness pattern and atomic temp+``os.replace`` writes from
-:mod:`octacam.session_cache` (a marker/lock we *can* take is dead, so liveness
-needs no PID bookkeeping), and the ``Popen`` idiom from :mod:`octacam.writer`.
-
-Crucially the worker re-execs the ordinary ``process`` command, which imports no
-camera SDK — so a detached job cannot hit the pypylon/genicam native-teardown
-crash that only affects camera-owning processes.
+`--detach` re-execs `octacam process` in its own session, so it survives a
+dropped `ssh`, with its output in a per-job `log.txt`. The worker keeps a
+`status.json` current and holds `job.lock` (an flock) for its lifetime: a
+lock that can be taken means a dead worker. `octacam jobs` only reads and
+tails those files; there is no daemon.
 """
 
 from __future__ import annotations
@@ -32,18 +22,19 @@ import signal
 import subprocess
 import sys
 import time
-import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from octacam import session_cache
+from octacam.files import atomic_write_text, flock_held
 
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from octacam.transfer import TransferCallback
-    from octacam.writer import ProgressCallback
+    from octacam.transcode import ProgressCallback, TranscodeProgress
+    from octacam.transfer import TransferCallback, TransferProgress
 
 log = logging.getLogger("octacam")
 
@@ -62,12 +53,10 @@ LOCK_FILENAME = "job.lock"
 PAUSE_FILENAME = "pause.flag"
 STATUS_SCHEMA = 1
 RETENTION_DAYS = 30
-# A job whose lock is not held but whose status never reached a terminal state is
-# treated as crashed — but a just-spawned "starting" job whose child hasn't taken
-# the lock yet gets this grace window first.
+# An unlocked, unfinished job has crashed, except a "starting" one this young
+# (its re-exec'd child has not taken the lock yet).
 _STALE_STARTING_AGE_S = 30.0
-# Throttle progress-driven status writes so per-ffmpeg-block callbacks don't thrash
-# the disk; transitions (phase/file/pause) force an immediate write regardless.
+# Progress writes are throttled to this; transitions write at once.
 _STATUS_WRITE_MIN_INTERVAL_S = 1.0
 _FOLLOW_INTERVAL_S = 0.5
 
@@ -79,7 +68,7 @@ _FOLLOW_INTERVAL_S = 0.5
 
 @dataclass
 class JobStatus:
-    """A detached job's public state, persisted as ``status.json``."""
+    """A detached job's public state, persisted as `status.json`."""
 
     job_id: str
     state: str = STARTING  # starting|running|done|failed|cancelled
@@ -105,7 +94,7 @@ class JobStatus:
 
     @classmethod
     def from_dict(cls, data: object) -> JobStatus | None:
-        """Build from parsed JSON, tolerantly — bad/partial data returns None."""
+        """Build from parsed JSON; None for bad or partial data."""
         if not isinstance(data, dict):
             return None
         job_id = data.get("job_id")
@@ -142,11 +131,6 @@ def _pause_path(jd: Path) -> Path:
     return jd / PAUSE_FILENAME
 
 
-def new_job_id() -> str:
-    """A sortable id grouping one detached run, like session ids."""
-    return f"{datetime.datetime.now().strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
-
-
 def _now_iso() -> str:
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -157,50 +141,37 @@ def _now_iso() -> str:
 
 
 def write_status(jd: Path, status: JobStatus) -> None:
-    """Atomically write ``status.json`` (temp + os.replace). Best-effort."""
+    """Atomically write `status.json`. Best-effort."""
     status.updated = _now_iso()
     try:
-        jd.mkdir(parents=True, exist_ok=True)
-        tmp = jd / f".{STATUS_FILENAME}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-        tmp.write_text(json.dumps(status.to_dict(), indent=2) + "\n")
-        os.replace(tmp, _status_path(jd))
+        atomic_write_text(
+            _status_path(jd), json.dumps(status.to_dict(), indent=2) + "\n"
+        )
     except OSError as e:
         log.debug("Could not write job status in %s (%s)", jd, e)
 
 
 def read_status(jd: Path) -> JobStatus | None:
-    """Read ``status.json``; missing/corrupt/partial returns None (never raises)."""
+    """Read `status.json`; missing/corrupt/partial returns None (never raises)."""
     try:
         raw = _status_path(jd).read_text()
     except OSError:
         return None
     try:
         data = json.loads(raw)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
     return JobStatus.from_dict(data)
 
 
-def _flock_is_live(path: Path) -> bool:
-    """True when another process holds the exclusive flock on ``path``."""
-    try:
-        handle = open(path)
-    except OSError:
-        return False  # no lock file -> nobody is holding it
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return True  # held elsewhere -> live
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return False
-    finally:
-        handle.close()
-
-
 def is_live(jd: Path) -> bool:
-    """True while the job's worker process is running (holds ``job.lock``)."""
-    return _flock_is_live(_lock_path(jd))
+    """True while the job's worker process is running (holds `job.lock`); a
+    lock the filesystem cannot probe counts as held.
+    """
+    try:
+        return flock_held(_lock_path(jd)) is not False
+    except OSError:
+        return False  # no lock file: nobody holds it
 
 
 def is_manually_paused(jd: Path) -> bool:
@@ -208,11 +179,8 @@ def is_manually_paused(jd: Path) -> bool:
 
 
 def _reconcile(jd: Path, status: JobStatus) -> JobStatus:
-    """Turn a non-terminal status whose worker is gone into ``failed``.
-
-    Reconcile-on-read: never mutates the file, only the in-memory object returned
-    to a caller. A ``starting`` job gets a short grace so a just-spawned child
-    that hasn't taken the lock yet isn't reported dead.
+    """Mark an unfinished status whose worker is gone `failed`, in memory
+    only (a `starting` job gets `_STALE_STARTING_AGE_S` of grace).
     """
     if status.state in _TERMINAL or is_live(jd):
         return status
@@ -237,13 +205,21 @@ def _cleanup_dir(jd: Path) -> None:
         shutil.rmtree(jd)
 
 
+def _job_dirs() -> list[Path]:
+    """Every job directory on disk; none when the jobs directory is unreadable."""
+    try:
+        return [jd for jd in jobs_dir().iterdir() if jd.is_dir()]
+    except OSError:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Spawner (parent side)
 # ---------------------------------------------------------------------------
 
 
 def _reserve_job_dir() -> Path:
-    base = new_job_id()
+    base = session_cache.new_session_id()
     name = base
     suffix = 1
     while True:
@@ -263,15 +239,18 @@ def spawn_detached(
     argv_tail: list[str],
     folders: list[Path],
     session_id: str | None = None,
-    log_level: str = "info",
+    verbose: bool = False,
 ) -> JobStatus:
-    """Re-exec ``octacam process <argv_tail>`` as a detached background job.
+    """Re-exec `octacam process <argv_tail>` as a detached background job, with
+    `--verbose` when `verbose`.
 
-    ``argv_tail`` must already carry absolute paths (the child runs from ``$HOME``
-    with no inherited cwd). Returns the initial :class:`JobStatus`. POSIX-only.
+    `argv_tail` must already carry absolute paths (the child runs from `$HOME`
+    with no inherited cwd). Returns the initial `JobStatus`. POSIX-only.
     """
     if os.name != "posix":
-        raise RuntimeError("Detached processing (--detach) is only supported on Linux/macOS.")
+        raise RuntimeError(
+            "Detached processing (--detach) is only supported on Linux/macOS."
+        )
     jd = _reserve_job_dir()
     status = JobStatus(
         job_id=jd.name,
@@ -281,28 +260,25 @@ def spawn_detached(
         folders=[str(f) for f in folders],
         argv=list(argv_tail),
     )
-    # Write the initial status *before* spawning so a job always has one, even if
-    # the child never manages to start.
+    # Before spawning, so a job has a status even if its child never starts.
     write_status(jd, status)
     cmd = [
         sys.executable,
         "-m",
         "octacam",
-        "--log-level",
-        log_level,
         "process",
+        *(["--verbose"] if verbose else []),
         *argv_tail,
         "--_job-dir",
         str(jd),
     ]
     try:
-        log_fd = open(_log_path(jd), "ab")
+        # The detached child inherits the log file.
+        log_fd = open(_log_path(jd), "ab")  # noqa: SIM115
     except OSError as e:
         _cleanup_dir(jd)
         raise RuntimeError(f"Could not open the job log: {e}") from e
-    # The child's stdout/stderr are a pipe to log.txt, not a tty, so rich would
-    # strip color. Force it on so the log carries ANSI and `jobs attach` can
-    # replay it in color (a NO_COLOR in the environment still wins in rich).
+    # The log keeps rich's colors for `jobs attach` (NO_COLOR still wins).
     env = os.environ.copy()  # carries OCTACAM_CACHE_DIR to the child
     env.setdefault("FORCE_COLOR", "1")
     try:
@@ -329,12 +305,41 @@ def spawn_detached(
 
 
 # ---------------------------------------------------------------------------
-# Worker side (used by the detached child running `octacam process --_job-dir`)
+# Run side: the reporter, a detached child's worker, the pause gate
 # ---------------------------------------------------------------------------
 
 
-class JobReporter:
-    """Best-effort status/log updates written by the running worker."""
+class NullReporter:
+    """Where a run reports its progress. This one drops every report: no
+    detached job records the run, and nothing pauses it by hand.
+    """
+
+    def begin_phase(self, phase: str, total: int) -> None:
+        pass
+
+    def item_started(
+        self, index: int, total: int, path: str | os.PathLike[str]
+    ) -> None:
+        pass
+
+    def item_done(self) -> None:
+        pass
+
+    def set_paused(self, flag: bool, reason: str | None) -> None:
+        pass
+
+    def manually_paused(self) -> bool:
+        return False
+
+    def transcode_progress(self, index: int, total: int) -> ProgressCallback | None:
+        return None
+
+    def transfer_progress(self, index: int, total: int) -> TransferCallback | None:
+        return None
+
+
+class JobReporter(NullReporter):
+    """A detached job's progress, written (best effort) to its status.json."""
 
     def __init__(self, jd: Path, status: JobStatus) -> None:
         self._dir = jd
@@ -360,7 +365,9 @@ class JobReporter:
         log.info("Phase: %s (%d item(s))", phase, total)
         self._flush(force=True)
 
-    def item_started(self, index: int, total: int, path: str | os.PathLike[str]) -> None:
+    def item_started(
+        self, index: int, total: int, path: str | os.PathLike[str]
+    ) -> None:
         name = Path(path).name
         self._status.files_total = total
         self._status.current_file = name
@@ -378,16 +385,17 @@ class JobReporter:
         self._status.paused_reason = reason
         self._flush(force=True)
 
+    def manually_paused(self) -> bool:
+        return is_manually_paused(self._dir)
+
     def transcode_progress(self, index: int, total: int) -> ProgressCallback:
-        """A writer.ProgressCallback refining within-file transcode percent."""
+        """A transcode.ProgressCallback refining within-file transcode percent."""
         base = index - 1
 
-        def _cb(prog: object) -> None:
-            frac = 0.0
-            frames = getattr(prog, "frame", 0)
-            tf = getattr(prog, "total_frames", None)
-            if tf:
-                frac = min(1.0, frames / tf)
+        def _cb(prog: TranscodeProgress) -> None:
+            frac = (
+                min(1.0, prog.frame / prog.total_frames) if prog.total_frames else 0.0
+            )
             self._set_percent(base + frac, total)
             self._flush()
 
@@ -397,13 +405,10 @@ class JobReporter:
         """A transfer.TransferCallback tracking the current file + folder percent."""
         base = index - 1
 
-        def _cb(prog: object) -> None:
-            self._status.current_file = getattr(prog, "filename", None)
-            count = max(getattr(prog, "file_count", 1), 1)
-            fi = getattr(prog, "file_index", 1)
-            size = getattr(prog, "file_size", 0) or 0
-            done = getattr(prog, "bytes_done", 0)
-            within = (fi - 1 + (done / size if size else 0.0)) / count
+        def _cb(prog: TransferProgress) -> None:
+            self._status.current_file = prog.filename
+            file_frac = prog.bytes_done / prog.file_size if prog.file_size else 0.0
+            within = (prog.file_index - 1 + file_frac) / max(prog.file_count, 1)
             self._set_percent(base + within, total)
             self._flush()
 
@@ -419,7 +424,9 @@ class Worker:
         self._lock = lock_handle
         self.reporter = JobReporter(jd, status)
 
-    def finish(self, state: str, exit_code: int | None, error: str | None = None) -> None:
+    def finish(
+        self, state: str, exit_code: int | None, error: str | None = None
+    ) -> None:
         self.status.state = state
         self.status.exit_code = exit_code
         self.status.error = error
@@ -450,7 +457,7 @@ class JobLockError(RuntimeError):
 
 
 def worker_start(jd: Path) -> Worker:
-    """Attach the current process to ``jd`` as its worker: lock + mark running."""
+    """Attach the current process to `jd` as its worker: lock + mark running."""
     status = read_status(jd) or JobStatus(job_id=jd.name)
     status.pid = os.getpid()
     status.state = RUNNING
@@ -458,17 +465,13 @@ def worker_start(jd: Path) -> Worker:
         status.started = _now_iso()
     lock_handle = None
     try:
-        lock_handle = open(_lock_path(jd), "a+")
+        # The handle outlives this block: it holds the lock.
+        lock_handle = open(_lock_path(jd), "a+")  # noqa: SIM115
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
     except OSError as e:
-        # Do not fall back to running "unmarked". Every liveness check keys off
-        # this flock — is_live(), _reconcile(), resolve_job(require_live=True),
-        # _is_finished() — so a worker without it is invisible to all of them at
-        # once: `jobs list` reports it FAILED while ffmpeg burns CPU, pause /
-        # resume / cancel all refuse it (leaving `kill` as the only way to stop
-        # it), and _is_finished() reads True, so `octacam cache clear --all`
-        # rmtree's the directory the worker is still writing log.txt/status.json
-        # into. An unmanageable job is worse than no job: fail loudly instead.
+        # Never run unlocked: every liveness check keys off this flock, so the
+        # job would read as failed while it runs, refuse pause and cancel, and
+        # have its directory removed by `cache clear --all` under it.
         if lock_handle is not None:
             with contextlib.suppress(OSError):
                 lock_handle.close()
@@ -482,6 +485,63 @@ def worker_start(jd: Path) -> Worker:
     return Worker(jd, lock_handle, status)
 
 
+@contextlib.contextmanager
+def worker(jd: Path | None) -> Iterator[NullReporter]:
+    """The run's reporter. A detached job's run (*jd*) holds the job lock and
+    ends as done, cancelled (a Ctrl-C, 130) or failed (the exit message, else
+    the exception). Raises JobLockError when the lock cannot be taken.
+    """
+    if jd is None:
+        yield NullReporter()
+        return
+    job = worker_start(jd)
+    try:
+        yield job.reporter
+    except KeyboardInterrupt:
+        job.finish(CANCELLED, 130)
+        raise
+    except SystemExit as e:
+        job.finish(FAILED, 1, e.code if isinstance(e.code, str) else "process failed")
+        raise
+    except BaseException as e:
+        job.finish(FAILED, 1, repr(e))
+        raise
+    job.finish(DONE, 0)
+
+
+def pause_gate(
+    reporter: NullReporter, *, unit: str, ignore_capture: bool = False
+) -> None:
+    """Block at a work-unit boundary while a gui/record holds the cameras or the
+    job is paused by hand, polling every second.
+
+    A cancel or Ctrl-C interrupts the sleep. The capture pause has no timeout,
+    so `ignore_capture` is the operator's only way past it.
+    """
+    announced = False
+    while True:
+        reasons = []
+        if not ignore_capture and session_cache.capture_active():
+            reasons.append("capture-active")
+        if reporter.manually_paused():
+            reasons.append("manual")
+        if not reasons:
+            break
+        reason = "+".join(reasons)
+        if not announced:
+            log.info(
+                "Paused before next %s \N{EM DASH} %s. Resumes automatically.",
+                unit,
+                reason,
+            )
+            announced = True
+        reporter.set_paused(True, reason)
+        time.sleep(1.0)
+    if announced:
+        reporter.set_paused(False, None)
+        log.info("Resumed processing.")
+
+
 # ---------------------------------------------------------------------------
 # Admin / read API
 # ---------------------------------------------------------------------------
@@ -491,13 +551,7 @@ def list_jobs() -> list[JobStatus]:
     """All jobs (reconciled + pruned), newest first."""
     prune()
     out: list[JobStatus] = []
-    try:
-        entries = list(jobs_dir().iterdir())
-    except OSError:
-        return out
-    for jd in entries:
-        if not jd.is_dir():
-            continue
+    for jd in _job_dirs():
         status = read_status(jd)
         if status is None:
             continue
@@ -520,7 +574,9 @@ def latest_job() -> JobStatus | None:
     return jobs[0] if jobs else None
 
 
-def resolve_job(id_or_none: str | None, *, require_live: bool = False) -> JobStatus | None:
+def resolve_job(
+    id_or_none: str | None, *, require_live: bool = False
+) -> JobStatus | None:
     """Resolve an explicit job id, or the most recent (live) job when None."""
     if id_or_none is None:
         return latest_live_job() if require_live else latest_job()
@@ -566,15 +622,11 @@ def resume(status: JobStatus) -> bool:
         return False
 
 
-def prune(retention_days: int = RETENTION_DAYS) -> None:
+def prune() -> None:
     """Remove finished job dirs older than the retention window. Best-effort."""
-    cutoff = time.time() - retention_days * 86400
-    try:
-        entries = list(jobs_dir().iterdir())
-    except OSError:
-        return
-    for jd in entries:
-        if not jd.is_dir() or is_live(jd):
+    cutoff = time.time() - RETENTION_DAYS * 86400
+    for jd in _job_dirs():
+        if is_live(jd):
             continue
         try:
             mtime = _status_path(jd).stat().st_mtime
@@ -588,22 +640,14 @@ def prune(retention_days: int = RETENTION_DAYS) -> None:
 
 
 def _is_finished(jd: Path) -> bool:
-    """True when a job dir is safe to remove: genuinely finished or crashed-past-grace.
-
-    Uses the same reconcile-on-read rule as :func:`list_jobs` rather than the raw
-    flock, so a job in its ``starting`` grace window is never treated as finished.
-    That window matters here: ``spawn_detached`` writes ``status.json`` and returns,
-    but the re-exec'd child only creates and flocks ``job.lock`` much later (after a
-    full interpreter + CLI startup), so for ~a second :func:`is_live` reads False on
-    a job that is very much alive — and an ungraced clear would delete it out from
-    under the arming worker. A live job (lock held) or one still ``starting`` inside
-    the grace is kept; a terminal or crashed-past-grace one is removable.
+    """Whether a job directory is safe to remove: finished, or crashed past the
+    grace `_reconcile` gives a `starting` job (whose child takes the
+    lock only after a full interpreter startup).
     """
     status = read_status(jd)
     if status is not None:
         return _reconcile(jd, status).state in _TERMINAL
-    # No readable status yet — junk, unless the dir was only just reserved (the
-    # brief window in spawn_detached before the first status write).
+    # No status yet: junk, unless spawn_detached only just reserved the directory.
     if is_live(jd):
         return False
     try:
@@ -613,50 +657,32 @@ def _is_finished(jd: Path) -> bool:
     return age >= _STALE_STARTING_AGE_S
 
 
-def clear_finished() -> tuple[int, int]:
-    """Remove every finished job directory now; return (removed, kept).
+def _partition() -> tuple[list[Path], list[Path]]:
+    """(live, finished) job directories, judged by `_is_finished`."""
+    live: list[Path] = []
+    finished: list[Path] = []
+    for jd in _job_dirs():
+        (finished if _is_finished(jd) else live).append(jd)
+    return live, finished
 
-    Like :func:`prune` but ignores the retention window — used by
-    ``octacam cache clear --all`` to drop finished job logs immediately. A live or
-    still-arming job (see :func:`_is_finished`) is never touched; ``kept`` counts
-    those left in place.
+
+def clear_finished() -> tuple[int, int]:
+    """Remove every finished job directory regardless of age; return (removed, kept).
+
+    A live or still-arming job (see `_is_finished`) is kept.
     """
-    removed = kept = 0
-    try:
-        entries = list(jobs_dir().iterdir())
-    except OSError:
-        return 0, 0
-    for jd in entries:
-        if not jd.is_dir():
-            continue
-        if _is_finished(jd):
-            _cleanup_dir(jd)
-            removed += 1
-        else:
-            kept += 1
-    return removed, kept
+    live, finished = _partition()
+    for jd in finished:
+        _cleanup_dir(jd)
+    return len(finished), len(live)
 
 
 def job_dir_counts() -> tuple[int, int]:
-    """(live, finished) job-directory counts on disk, without pruning.
-
-    Uses the same predicate as :func:`clear_finished`, so ``finished`` is exactly
-    what a ``cache clear --all`` would remove and ``live`` what it would keep (a
-    still-arming ``starting`` job counts as live).
+    """(live, finished) job-directory counts: what `clear_finished` would
+    keep and remove.
     """
-    live = finished = 0
-    try:
-        entries = list(jobs_dir().iterdir())
-    except OSError:
-        return 0, 0
-    for jd in entries:
-        if not jd.is_dir():
-            continue
-        if _is_finished(jd):
-            finished += 1
-        else:
-            live += 1
-    return live, finished
+    live, finished = _partition()
+    return len(live), len(finished)
 
 
 # ---------------------------------------------------------------------------
@@ -673,15 +699,10 @@ def render_state(status: JobStatus) -> str:
 def _age(started: str) -> str:
     try:
         dt = datetime.datetime.fromisoformat(started)
-        if dt.tzinfo is None:
-            # A status.json from an older octacam (or a hand-edited one) can carry
-            # a naive timestamp. Subtracting it from an aware "now" raises
-            # TypeError — and that subtraction used to sit outside this guard, so
-            # one odd job crashed `octacam jobs list` for *every* job. Read a naive
-            # stamp as local time, which is what wrote it.
+        if dt.tzinfo is None:  # a hand-edited status: read as local time
             dt = dt.astimezone()
         secs = int((datetime.datetime.now().astimezone() - dt).total_seconds())
-    except (ValueError, TypeError, OverflowError, OSError):
+    except ValueError, TypeError, OverflowError, OSError:
         return "-"
     if secs < 60:
         return f"{secs}s"
@@ -721,7 +742,7 @@ def render_table(jobs: list[JobStatus], console: Console | None = None) -> None:
 
 
 class _LogFollower:
-    """Line-buffered tail of a job's ``log.txt`` (tolerant of truncation)."""
+    """Line-buffered tail of a job's `log.txt` (tolerant of truncation)."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -757,7 +778,7 @@ class _LogFollower:
         return parts
 
     def drain(self) -> list[str]:
-        """Remaining lines incl. any final partial — call once the job has ended."""
+        """Remaining lines incl. any final partial -- call once the job has ended."""
         out = self.lines()
         if self._partial:
             out.append(self._partial)
@@ -766,11 +787,9 @@ class _LogFollower:
 
 
 def _print_log_line(console: Console, line: str) -> None:
-    """Replay one worker log line, preserving its ANSI color, never as markup.
-
-    Worker logs carry their own SGR codes (the child forces color), so rebuild the
-    styled text from ANSI rather than letting rich parse ``[transcode 1/6]`` as
-    markup."""
+    """Replay one worker log line from its ANSI codes, never as rich markup
+    (`[transcode 1/6]` would parse as a tag).
+    """
     from rich.text import Text
 
     try:
@@ -803,13 +822,14 @@ def _make_progress(console: Console):
 
 
 def _bar_description(status: JobStatus) -> str:
-    if status.paused and status.state == RUNNING:
-        return f"paused ({status.paused_reason or 'paused'})"
-    if status.phase:
-        if status.current_file:
-            return f"{status.phase}: {status.current_file}"
-        return status.phase
-    return status.state
+    state = render_state(status)
+    if state != status.state or not status.phase:  # paused, or between phases
+        return state
+    return (
+        f"{status.phase}: {status.current_file}"
+        if status.current_file
+        else status.phase
+    )
 
 
 def _bar_counts(status: JobStatus) -> str:
@@ -832,24 +852,17 @@ def _print_final(status: JobStatus, console: Console) -> None:
     elif status.state == CANCELLED:
         console.print(f"[yellow]Job {status.job_id} was cancelled.[/]")
     else:
-        console.print(f"[red]Job {status.job_id} failed: {status.error or 'unknown error'}[/]")
+        console.print(
+            f"[red]Job {status.job_id} failed: {status.error or 'unknown error'}[/]"
+        )
 
 
 def _attach_exit_code(status: JobStatus) -> int:
-    """0 for a job that finished cleanly, non-zero for one that did not.
-
-    :func:`attach` used to ``return 0`` unconditionally, so
-    ``octacam jobs attach <id>`` reported success for a failed or cancelled job
-    and a script had no way to tell (``octacam jobs attach X && deploy`` ran on a
-    failure). Detaching with Ctrl-C, and a job still running, stay 0 — neither
-    says anything about the outcome.
-    """
+    """0 for a job that finished cleanly or still runs, else non-zero."""
     if status.state == FAILED:
         code = status.exit_code
-        # Only a real 1..255 exit status is passed through. A job reconciled as
-        # "worker exited without finishing" carries -1, and a signalled child a
-        # negative signal number; handing either to sys.exit() would surface as
-        # 255, which reads like a different failure. Everything else maps to 1.
+        # Only a real exit status passes through: a reconciled crash (-1) or a
+        # signal (negative) would surface from sys.exit() as 255.
         if isinstance(code, int) and 1 <= code <= 255:
             return code
         return 1
@@ -859,12 +872,8 @@ def _attach_exit_code(status: JobStatus) -> int:
 
 
 def attach(status: JobStatus, console: Console | None = None) -> int:
-    """Follow a detached job's log + a live progress bar until it ends.
-
-    Returns the job's outcome as an exit code: 0 when it finished cleanly,
-    non-zero when it failed or was cancelled (see :func:`_attach_exit_code`).
-    Ctrl-C detaches the viewer (returns 0); it never cancels the job. An
-    already-finished job replays its log, prints the outcome, and returns.
+    """Follow a job's log with a progress bar until it ends; return its exit
+    code (`_attach_exit_code`). Ctrl-C detaches (0), never cancels.
     """
     from rich.console import Console
 
@@ -873,7 +882,7 @@ def attach(status: JobStatus, console: Console | None = None) -> int:
     jd = job_dir(status.job_id)
     console.print(
         f"[bold]Attached to job {status.job_id}[/] ({render_state(status)}). "
-        "Press Ctrl-C to stop watching — this does NOT cancel the job."
+        "Press Ctrl-C to stop watching \N{EM DASH} this does NOT cancel the job."
     )
     follower = _LogFollower(_log_path(jd))
     # Replay whatever the log already holds before starting the live bar.
@@ -889,8 +898,10 @@ def attach(status: JobStatus, console: Console | None = None) -> int:
     detached = False
     final = fresh
     with _make_progress(console) as progress:
-        task = progress.add_task(_bar_description(fresh), total=100.0, counts=_bar_counts(fresh))
-        _update_bar(progress, task, fresh)  # seed completed% (update takes a float)
+        task = progress.add_task(
+            _bar_description(fresh), total=100.0, counts=_bar_counts(fresh)
+        )
+        _update_bar(progress, task, fresh)
         try:
             while True:
                 for line in follower.lines():
@@ -912,7 +923,7 @@ def attach(status: JobStatus, console: Console | None = None) -> int:
             detached = True
     if detached:
         console.print(
-            f"\n[dim]Detached from job {status.job_id} — it keeps running. "
+            f"\n[dim]Detached from job {status.job_id} \N{EM DASH} it keeps running. "
             f"Reattach: octacam jobs attach {status.job_id}[/]"
         )
         return 0

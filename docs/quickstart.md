@@ -34,7 +34,7 @@ octacam doctor <config_dir> # …and validate a specific rig config
 `doctor` lists detected cameras and bundled plugins, and checks the encoder,
 storage, and runtime for problems — cross-checking the cameras a config declares
 against the ones actually attached. It never opens a camera, so it is safe to
-run while a session is live. See [`doctor` in the CLI reference](reference/cli.md#doctor).
+run while a session is live. See [`doctor` in the CLI reference](cli.md#octacam-doctor).
 
 ## 3. What is a config directory?
 
@@ -71,9 +71,10 @@ Prefer no browser (a script, or a remote box)? Record headlessly:
 octacam record <config_dir> --duration 10 --fps 100
 ```
 
-Either way, each recording writes its videos, a `recording_summary.json`, and a
-snapshot of its config (with each camera's parameters) into its own folder, so
-the same setup can be relaunched later. See [Recording](guide/recording.md).
+Either way, each recording writes its videos into its own folder, with a
+`recording_summary.json` and a snapshot of its config (with each camera's
+parameters) in that folder's `octacam_recording/` subfolder, so the same setup
+can be relaunched later. See [Recording](guide/recording.md#recording-outputs).
 
 ## 5. Archive everything
 

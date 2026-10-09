@@ -1,5 +1,4 @@
-/* 2-photon plugin styles. Served from /plugins/twophoton/ and injected by the
-   plugin loader. Uses the global :root CSS variables defined in core style.css. */
+/* 2-photon tab styles; the colors are core style.css's :root variables. */
 
 /* 2-photon Arduino state chip */
 .twophoton-state {

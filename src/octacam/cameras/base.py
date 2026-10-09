@@ -1,88 +1,74 @@
 """Vendor-neutral camera core.
 
-The concrete :class:`Camera` owns everything that does not touch a camera SDK:
-the preview/record grab loops, the lock-free display handoff
-(:class:`LatestFrame`), timestamp/FPS tracking, drop accounting, the video
-writer wiring, the geometry/reset grab-cycling, and the start/stop/join
-lifecycle. The thin, SDK-specific seam is the :class:`CameraBackend` protocol —
-each vendor (Basler, FLIR, the in-memory fake) implements those ~20 primitives
-and nothing else, so the fragile loop/lifecycle code is written exactly once.
-
-Backends raise :class:`BackendError` for SDK-level failures; the core catches it
-where the original pypylon code caught ``genicam.GenericException`` and converts
-it to ``ValueError`` at the points that previously did.
+`Camera` owns everything that does not touch an SDK: its parameters and
+node map, the preview grab loop, the display hand-off and its recordings, each a
+`CameraTake`. Each vendor implements the
+`CameraBackend` seam and raises `BackendError` for SDK failures,
+which `Camera`'s setters turn into `ValueError`.
 """
 
 import logging
+import numbers
 import threading
 import time
-from collections.abc import Callable
+from abc import ABC, abstractmethod
+from collections import deque
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import ClassVar, Protocol
+from typing import ClassVar
 
 import numpy as np
 
-from octacam.transform import DisplayTransform, apply_display_transform
-from octacam.writer import AsyncFrameWriter, VideoFormat
+from octacam.cameras._trigger_handoff import SoftwareTrigger
+from octacam.cameras.take import GRAB_TIMEOUT_MS, CameraTake
+from octacam.pulses import PulseClock
+from octacam.transform import DisplayTransform
+from octacam.writer import VideoFormat
 
 log = logging.getLogger("octacam")
 
-GRAB_TIMEOUT_MS = 100
-# Default depth of each camera's writer queue (frames buffered between the grab
-# loop and the encoder). The grab loop never blocks: a frame that arrives while
-# the queue is full is dropped. The bound must absorb a *transient* encoder
-# stall (e.g. several GPU NVENC sessions warming up together) without dropping,
-# while capping worst-case memory (depth x frame bytes x cameras). 64 frames is
-# ~0.8 s of headroom at 80 fps; rigs can override it via record.writer_queue_size
-# (raise it for high camera counts / bursty encoders, lower it to save memory).
+# Default writer queue depth (record.writer_queue_size overrides it). The grab
+# loop never blocks: a frame arriving at a full queue is refused and filled (see
+# AsyncFrameWriter.write). 64 frames (~0.8 s at 80 fps) absorbs a transient
+# encoder stall, such as several NVENC sessions warming up, while bounding memory.
 WRITER_QUEUE_SIZE = 64
-# Upper bound on the per-frame timestamp series kept during *preview* (the GUI's
-# idle steady state, never periodically restarted): preview only needs the last
-# few for the rolling fps readout, so the series is trimmed to this many instead
-# of growing without bound. Recording keeps the full, untrimmed series.
+# The preview keeps this many timestamps, for the fps readout.
 PREVIEW_TIMESTAMPS_MAX = 64
+# The fps readout is the rate over this many frame intervals.
+FPS_WINDOW = 6
 
-# Editable sensor parameters, mapped from the GUI's snake_case names to their
-# GenICam node names. These SFNC names (ExposureTime, Gain, Width, ...) are the
-# standard ones shared by Basler and FLIR/Spinnaker, so every GenICam backend
-# reuses this mapping. GEOMETRY_PARAMS can only be written while the camera is
-# NOT grabbing (the SDK raises otherwise), so set_geometry cycles the preview;
-# LIVE_PARAMS are writable on a running camera.
+# octacam's parameter names -> SFNC node names (Camera.read_param). The geometry
+# ones are writable only while not grabbing (set_geometry cycles the preview).
 GEOMETRY_PARAMS = {"width": "Width", "height": "Height"}
-LIVE_PARAMS = {
+PARAM_NODES = {
+    **GEOMETRY_PARAMS,
     "exposure": "ExposureTime",
     "gain": "Gain",
     "offset_x": "OffsetX",
     "offset_y": "OffsetY",
 }
-PARAM_NODES = {**GEOMETRY_PARAMS, **LIVE_PARAMS}
 
-# --- Full-node-map (Camera tab) policy, in SFNC node names ---------------------
-# The two ROI-size nodes: the SDK refuses these writes while grabbing, so a write
-# is routed through set_geometry (which cycles the preview). Every other feature
-# is written live.
+# --- Camera-tab policy, in SFNC node names -------------------------------------
+# ROI size, refused mid-grab on every camera, so written through set_geometry.
 GEOMETRY_FEATURES = frozenset({"Width", "Height"})
-# The ROI-origin nodes and the per-axis center flag that auto-computes each. When
-# a flag is on the node is derived from the sensor size and the ROI size, so the
-# UI locks the field and octacam owns the value.
+# ROI origins and the center flag that derives each (the UI then locks the field).
 OFFSET_FEATURES = {"OffsetX": "center_x", "OffsetY": "center_y"}
-# Nodes octacam drives itself at runtime; surfaced in the Camera tab read-only so
-# an operator can see the value but cannot break preview/recording by editing it.
-# PixelFormat is forced to Mono8 (the GRAY8 writer); DeviceLinkThroughputLimit is
-# maximised at open() on the FLIR/Spinnaker backends (the other backends do not
-# touch it) and is kept read-only everywhere so it can't be edited into a
-# bandwidth mismatch; the Trigger* chain and AcquisitionMode are reprogrammed by
-# the preview/record/benchmark grab paths; TLParamsLocked is transport state.
-RUNTIME_MANAGED_FEATURES = frozenset({
-    "PixelFormat",
-    "DeviceLinkThroughputLimit",
-    "TLParamsLocked",
-    "TriggerSelector",
-    "TriggerMode",
-    "TriggerSource",
-    "TriggerOverlap",
-    "AcquisitionMode",
-})
+# Nodes octacam programs itself, shown read-only so an edit cannot break preview
+# or recording: Mono8 (the GRAY8 writer), the link throughput (maxed at open on
+# FLIR), the trigger chain and AcquisitionMode (set by every grab path) and
+# TLParamsLocked (transport state).
+RUNTIME_MANAGED_FEATURES = frozenset(
+    {
+        "PixelFormat",
+        "DeviceLinkThroughputLimit",
+        "TLParamsLocked",
+        "TriggerSelector",
+        "TriggerMode",
+        "TriggerSource",
+        "TriggerOverlap",
+        "AcquisitionMode",
+    }
+)
 
 
 class BackendError(Exception):
@@ -90,30 +76,15 @@ class BackendError(Exception):
 
 
 @dataclass
-class NodeInfo:
-    """One sensor parameter's current value, bounds, unit, and writability."""
-
-    value: float | int
-    min: float | None = None
-    max: float | None = None
-    inc: float | None = None
-    unit: str | None = None
-    writable: bool = False
-
-
-@dataclass
 class FeatureInfo:
-    """One node from the full device node map, for the Camera tab's browser.
+    """One node of the device node map, for the Camera tab's browser.
 
-    ``type`` is the widget kind — ``"int"``/``"float"`` (number box with
-    min/max/inc), ``"bool"`` (checkbox), ``"enum"`` (dropdown of ``entries``),
-    ``"string"`` (text), ``"command"`` (button), or ``"category"`` (a group
-    header). ``value`` is ``None`` for command/category nodes and for an enum
-    holds the current symbolic string. ``entries`` lists an enum's selectable
-    symbolics (each ``{"value", "display", "available"}``). ``category`` is the
-    enclosing GenApi category, used to group the browser. ``managed`` is set by
-    the Camera core for nodes octacam drives itself (see
-    :data:`RUNTIME_MANAGED_FEATURES`) so the UI locks them with a note.
+    `type` is the widget kind: int, float, bool, enum (`entries` of
+    `{"value", "display", "available"}`), string, command or category.
+    `value` is None for command and category nodes; for an enum it is the
+    current symbolic. `category` comes only from a node-map walk: a
+    single-node read leaves it blank, and the client keeps its grouping.
+    `managed` marks a node octacam drives (`RUNTIME_MANAGED_FEATURES`).
     """
 
     name: str
@@ -144,8 +115,6 @@ class FeatureInfo:
             "visibility": self.visibility,
             "managed": self.managed,
         }
-        # Only include the type-specific keys that apply, keeping the payload
-        # small and the client's rendering unambiguous.
         for key in ("min", "max", "inc", "unit", "tooltip", "entries"):
             v = getattr(self, key)
             if v is not None:
@@ -153,156 +122,164 @@ class FeatureInfo:
         return d
 
 
-# --- Curated feature fallback --------------------------------------------------
-# For a backend that cannot introspect its full node map (the pycameleon floor
-# and the Spinnaker C-API tier), the Camera tab degrades to the six PARAM_NODES,
-# built as FeatureInfo from the backend's existing read_node/write_node. The
-# basler backend and the fake override this with a full GenApi node-map walk.
-_SFNC_TO_SNAKE = {sfnc: snake for snake, sfnc in PARAM_NODES.items()}
-_CURATED_CATEGORY = {
-    "Width": "ImageFormatControl",
-    "Height": "ImageFormatControl",
-    "OffsetX": "ImageFormatControl",
-    "OffsetY": "ImageFormatControl",
-    "ExposureTime": "AcquisitionControl",
-    "Gain": "AnalogControl",
-}
-
-
-def curated_list_features(backend) -> list["FeatureInfo"]:
-    """The six PARAM_NODES as FeatureInfo (fallback for non-introspectable SDKs)."""
-    out: list[FeatureInfo] = []
-    for snake, sfnc in PARAM_NODES.items():
-        try:
-            info = backend.read_node(snake)
-        except BackendError:
-            continue
-        out.append(_curated_feature(sfnc, info))
-    return out
-
-
-def _curated_feature(sfnc: str, info: "NodeInfo") -> "FeatureInfo":
-    kind = "int" if _SFNC_TO_SNAKE.get(sfnc) in ("width", "height", "offset_x", "offset_y") else "float"
-    return FeatureInfo(
-        name=sfnc,
-        display_name=sfnc,
-        type=kind,
-        category=_CURATED_CATEGORY.get(sfnc, "Other"),
-        value=info.value,
-        min=info.min,
-        max=info.max,
-        inc=info.inc,
-        unit=info.unit,
-        readable=True,
-        writable=info.writable,
-    )
-
-
-def curated_read_feature(backend, name: str) -> "FeatureInfo":
-    snake = _SFNC_TO_SNAKE.get(name)
-    if snake is None:
-        raise BackendError(f"{name} is not available on this backend")
-    return _curated_feature(name, backend.read_node(snake))
-
-
-def curated_write_feature(backend, name: str, value: object) -> None:
-    snake = _SFNC_TO_SNAKE.get(name)
-    if snake is None:
-        raise BackendError(f"{name} is not editable on this backend")
-    is_int = snake in ("width", "height", "offset_x", "offset_y")
-    backend.write_node(snake, int(float(value)) if is_int else float(value))
-
-
-# A retrieved frame: the (owned) image array — or None when the caller did not
-# ask for it (preview drops the copy when the display slot is full) — plus the
-# camera/host timestamp in nanoseconds.
+# A retrieved frame: the owned image (None when the caller did not want it) and
+# its timestamp in ns (0 when the camera supplied none).
 Frame = tuple[np.ndarray | None, int]
 
 
-class CameraBackend(Protocol):
-    """The SDK-specific seam the concrete :class:`Camera` drives.
+class CameraBackend(ABC):
+    """One physical camera behind its SDK, as `Camera` drives it.
 
-    Implementations wrap a single physical camera. Methods that touch the
-    device raise :class:`BackendError` on SDK failure.
+    Device methods raise `BackendError` on SDK failure. The retrieve
+    methods never raise: None on a device error or a stop race, since an
+    exception would kill the grab thread and orphan its writer. `trigger` is
+    the camera's software-trigger hand-off; its grab flag is `is_grabbing`.
     """
 
-    extension: ClassVar[str]
+    extension: ClassVar[str]  # the parameter-file suffix, no dot
+
+    def __init__(self, serial: str):
+        self._serial = serial
+        self.trigger = SoftwareTrigger(serial)
 
     @property
-    def serial_number(self) -> str: ...
-    def open(self) -> None: ...
-    def close(self) -> None: ...
-    def is_open(self) -> bool: ...
-    def is_grabbing(self) -> bool: ...
-    def width(self) -> int: ...
-    def height(self) -> int: ...
+    def serial_number(self) -> str:
+        return self._serial
 
-    def read_node(self, name: str) -> NodeInfo: ...
-    def write_node(self, name: str, value: float) -> None: ...
+    def is_grabbing(self) -> bool:
+        return self.trigger.grabbing
 
-    # Full device node map (Camera tab). A backend that cannot introspect its
-    # node map returns an empty list from ``list_features`` and the Camera tab
-    # falls back to the curated PARAM_NODES quick controls. ``name`` is a GenApi
-    # (SFNC or vendor) node name; ``value`` is coerced to the node's type by the
-    # backend. All four raise :class:`BackendError` on SDK failure.
-    def list_features(self) -> list[FeatureInfo]: ...
-    def read_feature(self, name: str) -> FeatureInfo: ...
-    def write_feature(self, name: str, value: object) -> None: ...
-    def execute_command(self, name: str) -> None: ...
+    def trigger_once(self) -> None:
+        """Offer one software trigger. No device call: `retrieve` fires it on
+        the camera's own thread (see `octacam.cameras._trigger_handoff`).
+        """
+        self.trigger.offer()
 
-    # The SFNC node names this camera can write only while it is NOT grabbing
-    # (the SDK/firmware locks them during acquisition). Width/Height are locked
-    # on every GenICam camera; some vendors (Basler) additionally lock the ROI
-    # offsets, while others (FLIR/Teledyne) leave them live-writable. The shared
-    # Camera layer presents these editable whenever the camera is open and routes
-    # their writes through a preview grab cycle. Defaults to Width/Height.
-    def grab_locked_features(self) -> frozenset[str]: ...
+    def configure_trigger_period(self, period_s: float | None) -> None:
+        self.trigger.configure_period(period_s)
 
-    def load_params(self, config_str: str) -> None: ...
-    def save_params(self) -> str: ...
+    def restart_trigger_sequence(self) -> None:
+        self.trigger.restart_sequence()
 
-    # Parse a saved per-camera config text (this backend's native format) into a
-    # ``{node_name: value_string}`` map, used by the per-field "reset to config"
-    # button. An unparseable/empty text yields ``{}``.
-    def config_values(self, config_str: str) -> dict[str, str]: ...
+    @property
+    def last_trigger_index(self) -> int | None:
+        """The trigger the latest retrieved image answers (see
+        `SoftwareTrigger.last_index`).
+        """
+        return self.trigger.last_index
 
-    def enable_frame_trigger(self) -> None: ...
-    def set_trigger_source(self, use_software: bool) -> None: ...
-    def begin_software_trigger_preview(self) -> None: ...
-    def trigger_once(self) -> None: ...
+    def grab_locked_features(self) -> frozenset[str]:
+        """Nodes writable only while not grabbing; Camera writes them through a
+        preview grab cycle.
+        """
+        return GEOMETRY_FEATURES
 
-    # Free-run (continuous, no per-frame trigger). Used by the benchmark to
-    # measure the external-trigger-equivalent acquisition ceiling (``fps=None``,
-    # uncapped) and by free-run *preview* (``fps`` set, capping the rate at the
-    # target so the preview matches an fps-equal recording's bandwidth).
-    # ``begin_freerun`` returns False when the backend cannot arm free-run so the
-    # caller skips it, and ``retrieve_freerun`` fetches the next produced frame.
-    def begin_freerun(self, fps: float | None = None) -> bool: ...
-    def retrieve_freerun(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None: ...
+    def stream_statistics(self) -> dict[str, int]:
+        """The SDK's transport counters, where it has any."""
+        return {}
 
-    def start_grab_preview(self) -> None: ...
-    def start_grab_record(self) -> bool: ...
-    def stop_grab(self) -> None: ...
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None: ...
+    ) -> Frame | None:
+        """One software-triggered frame: fire a claimed trigger, then fetch at
+        most one image, which answers the oldest outstanding trigger.
+        """
+        fire = self.trigger.claim(timeout_ms)
+        if fire is None or not self.trigger.grabbing:
+            return None
+        if fire and not self._fire_trigger():
+            self.trigger.unfired()
+            return None
+        return self._fetch(
+            self.trigger.fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
+        )
 
-    # Optional external-trigger record fetch. The record loop discovers it with
-    # ``getattr(backend, "retrieve_external", None)`` and falls back to
-    # ``retrieve_freerun`` when a backend does not define it, so a real hardware
-    # backend (whose externally-triggered frames arrive on their own) simply omits
-    # it. Only a backend that models the external source itself — the in-memory
-    # fake, via its trigger counter — implements it, so an external recording with
-    # no pulses correctly yields nothing. Declared here to document the seam the
-    # core relies on; it is not required for structural conformance.
+    def retrieve_freerun(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
+        """One frame the camera made on its own clock (free run, or a hardware
+        trigger): the un-gated fetch.
+        """
+        if not self.trigger.grabbing:
+            return None
+        return self._fetch(timeout_ms, wants_array, answers_trigger=False)
+
     def retrieve_external(
         self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None: ...
+    ) -> Frame | None:
+        """One frame of an externally triggered recording: the un-gated fetch."""
+        return self.retrieve_freerun(timeout_ms, wants_array)
+
+    @abstractmethod
+    def _fire_trigger(self) -> bool:
+        """Fire one device software trigger; False if the device refused it."""
+
+    @abstractmethod
+    def _fetch(
+        self, timeout_ms: int, wants_array: Callable[[], bool], answers_trigger: bool
+    ) -> Frame | None:
+        """At most one image within `timeout_ms`, its array only if
+        `wants_array()`; None on a timeout or an unusable image. With
+        `answers_trigger`, any image the SDK hands over, incomplete too, is
+        reported to `trigger.answered` (with its timestamp if that counts ns).
+        """
+
+    @abstractmethod
+    def open(self) -> None: ...
+    @abstractmethod
+    def close(self) -> None: ...
+    @abstractmethod
+    def is_open(self) -> bool: ...
+    @abstractmethod
+    def width(self) -> int: ...
+    @abstractmethod
+    def height(self) -> int: ...
+
+    # The node map (Camera tab), by GenApi node name; the backend coerces
+    # `value` to the node's type.
+    @abstractmethod
+    def list_features(self) -> list[FeatureInfo]: ...
+    @abstractmethod
+    def read_feature(self, name: str) -> FeatureInfo: ...
+    @abstractmethod
+    def write_feature(self, name: str, value: object) -> None: ...
+    @abstractmethod
+    def execute_command(self, name: str) -> None: ...
+
+    @abstractmethod
+    def load_params(self, config_str: str) -> None: ...
+    @abstractmethod
+    def save_params(self) -> str: ...
+
+    # Saved config text -> {node: value string} ({} if unparseable), for the
+    # per-field reset.
+    @abstractmethod
+    def config_values(self, config_str: str) -> dict[str, str]: ...
+
+    @abstractmethod
+    def enable_frame_trigger(self) -> None: ...
+    @abstractmethod
+    def set_trigger_source(self, use_software: bool) -> None: ...
+    @abstractmethod
+    def begin_software_trigger_preview(self) -> None: ...
+
+    # Free run: uncapped with `fps=None` (the benchmark's ceiling), else capped
+    # at `fps` (free-run preview). False when the backend cannot arm it.
+    @abstractmethod
+    def begin_freerun(self, fps: float | None = None) -> bool: ...
+
+    # Streaming: a start calls trigger.begin_grab() once the SDK streams, a stop
+    # calls trigger.end_grab() before the native stop. A record start that
+    # returns False has left the camera not grabbing.
+    @abstractmethod
+    def start_grab_preview(self) -> None: ...
+    @abstractmethod
+    def start_grab_record(self) -> bool: ...
+    @abstractmethod
+    def stop_grab(self) -> None: ...
 
 
-def snap_value(value: float, info: NodeInfo) -> float:
+def snap_value(value: float, info: FeatureInfo) -> float:
     """Clamp to [min, max] and round to the node's increment grid."""
     lo, hi, inc = info.min, info.max, info.inc
     if inc:
@@ -316,13 +293,7 @@ def snap_value(value: float, info: NodeInfo) -> float:
 
 
 def coerce_bool(value: object) -> bool:
-    """Coerce an arbitrary config/feature value to ``bool``.
-
-    A real ``bool`` passes through unchanged; a number is truthy when non-zero;
-    anything else is parsed as a string flag (``"1"``/``"true"``/``"yes"``/``"on"``,
-    case-insensitive). Shared by every backend's boolean feature write and the
-    native GenApi TSV config applier so the coercion is defined once.
-    """
+    """A config/feature value as bool: numbers by non-zero, text by 1/true/yes/on."""
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -330,21 +301,29 @@ def coerce_bool(value: object) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
-class LatestFrame:
-    """Single-slot frame handoff to the GUI (FrameForDisplay in C++).
+def coerce_float(value: object) -> float:
+    """A config/feature value as float: a number or numeric text, else TypeError."""
+    if isinstance(value, (numbers.Real, str)):
+        return float(value)
+    raise TypeError(f"not a number: {value!r}")
 
-    The producer stores a frame only when the previous one has been consumed,
-    so producer-side copies happen at most at the GUI refresh rate.
+
+class LatestFrame:
+    """Single-slot frame hand-off to the GUI, and the fps readout shown beside it.
+
+    The producer stores a frame only once the previous one was consumed, so its
+    copies happen at most at the GUI refresh rate.
     """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._frame: np.ndarray | None = None
+        self.fps = 0.0
 
     @property
     def wants_frame(self) -> bool:
-        # Racy peek, but with a single producer a stale True only costs one
-        # extra attempt and a stale False one skipped preview frame.
+        # Racy peek: with one producer a stale value costs one extra attempt or
+        # one skipped preview frame.
         return self._frame is None
 
     def push(self, frame: np.ndarray) -> bool:
@@ -363,87 +342,59 @@ class LatestFrame:
             frame, self._frame = self._frame, None
             return frame
 
+    def refresh_fps(self, timestamps: Sequence[int]) -> None:
+        """Set `fps` from the last FPS_WINDOW intervals of `timestamps`
+        (ns), the series a pushed frame ends.
+        """
+        last = len(timestamps) - 1
+        start = max(0, last - FPS_WINDOW)
+        span = timestamps[last] - timestamps[start] if last > 0 else 0
+        self.fps = (last - start) * 1e9 / span if span > 0 else 0.0
+
 
 class Camera:
-    """Vendor-neutral camera: grab loops, display handoff, recording lifecycle.
+    """Vendor-neutral camera: parameters, node map, preview and recordings.
 
-    All device access goes through ``self._backend`` (a :class:`CameraBackend`).
+    All device access goes through `self._backend` (a `CameraBackend`).
     """
 
     def __init__(self, backend: CameraBackend):
         self._backend = backend
-        # The serial number comes from enumeration, so it is available before
-        # open(). Keeping open() out of the constructor lets CameraSystem open
-        # every camera concurrently (see CameraSystem._run_parallel).
+        # The serial comes from enumeration: open() stays out of the constructor
+        # so CameraSystem can open the cameras in parallel.
         self.serial_number: str = backend.serial_number
         self.name: str = self.serial_number
         self.width = 0
         self.height = 0
-        # The persisted display orientation (rotation/flips), applied to the
-        # video when recording in "display" form. Set from config at load time;
-        # identity until then.
         self.display_transform = DisplayTransform()
-        # Auto-center the ROI: when set, OffsetX/OffsetY are derived from the
-        # sensor size and the ROI size and recomputed on every geometry change,
-        # so the ROI stays centered. Set from config at load time (see
-        # CameraSystem.apply_display_config).
+        # Keep the ROI centered: derive OffsetX/OffsetY on every geometry change.
         self.center_x = False
         self.center_y = False
-        # First-seen value of each node, captured lazily in list_features(). A
-        # node outside the saved config file is never written by octacam, so its
-        # first-read value is the camera's factory/power-on default — the
-        # fallback for a per-field reset when the config has no saved value.
+        # First-seen value per node. octacam never writes a node outside the
+        # saved config, so this is its power-on default: the reset's fallback.
         self._default_cache: dict[str, object] = {}
         self.frame_for_display = LatestFrame()
-        self._video_writer: AsyncFrameWriter | None = None
-        self._recorded_frame_size: tuple[int, int] | None = None
+        # The recording the camera runs, or its last until the preview restarts
+        # (so the preview never shows a stale recording's counts).
+        self.take: CameraTake | None = None
+        self.preview_timestamps: deque[int] = deque(maxlen=PREVIEW_TIMESTAMPS_MAX)
         self._stop_flag = threading.Event()
         # Serializes external node access (read/set/save and the W/H grab
         # cycle) against itself; the preview loop stays lock-free.
         self._param_lock = threading.RLock()
         self._thread: threading.Thread | None = None
-        self._timestamps: list[int] = []
-        self._dropped: list[bool] = []
-        self._dropped_count = 0
-        # Frames whose backend timestamp was 0 and fell back to host time_ns.
-        # A per-recording provenance signal (see timestamp_source in the summary):
-        # normally 0 (all hardware) or == frames (host-only backend like
-        # pycameleon); anything in between flags a stray-zero anomaly. (The fake
-        # deliberately supplies a nonzero host-derived timestamp, so it never
-        # falls back and is classified "hardware".)
-        self._host_fallback_count = 0
-        self._resulting_fps = 0.0
-        self._started = False
-
-    @property
-    def _camera(self):
-        """Back-compat/test shim: the underlying SDK camera handle, if any.
-
-        Only meaningful for the Basler backend (whose ``raw`` is the pylon
-        ``InstantCamera``); other backends expose no such handle.
-        """
-        return getattr(self._backend, "raw", None)
 
     @property
     def backend(self) -> CameraBackend:
-        """The underlying :class:`CameraBackend` (for diagnostics/advanced drivers).
-
-        The normal grab/record lifecycle goes through this ``Camera``'s own
-        methods; this read-only accessor exists so the diagnostics engine
-        (:mod:`octacam.diagnostics`) can drive the *real* acquisition path
-        (``trigger_once``/``retrieve``) in its own instrumented measurement
-        loops without reaching into a private attribute. It must not be used to
-        bypass the recording state machine during normal operation.
+        """The backend, for the diagnostics engine's own grab loops; never use it
+        to bypass the recording state machine.
         """
         return self._backend
 
     @property
     def extension(self) -> str:
-        """The parameter-file suffix this camera's backend persists (no dot).
-
-        Per-camera (``pfs`` for Basler, ``txt`` — the native GenApi persistence
-        TSV — for the FLIR/GenICam backends) so a rig mixing vendors reads and
-        writes each camera's sensor params in its own native format.
+        """The backend's parameter-file suffix (no dot): a mixed rig keeps each
+        camera's params in its native format.
         """
         return type(self._backend).extension
 
@@ -452,79 +403,9 @@ class Camera:
         self._backend.open()
 
     @property
-    def started(self) -> bool:
-        return self._started
-
-    @property
-    def resulting_fps(self) -> float:
-        return self._resulting_fps
-
-    @property
-    def frames_recorded(self) -> int:
-        return len(self._timestamps)
-
-    @property
-    def dropped_count(self) -> int:
-        return self._dropped_count
-
-    @property
-    def dropped_indices(self) -> list[int]:
-        """Frame indices that were dropped (encoder/queue could not accept)."""
-        return [i for i, dropped in enumerate(self._dropped) if dropped]
-
-    @property
-    def frame_timestamps(self) -> list[int]:
-        """Per-frame timestamps (ns) of the last recording — hardware when the
-        backend supplied one, else host ``time.time_ns()`` (see
-        :attr:`host_fallback_count`). A copy, so the caller can't mutate state."""
-        return list(self._timestamps)
-
-    @property
-    def frame_dropped(self) -> list[bool]:
-        """Per-frame dropped flags of the last recording (parallel to
-        :attr:`frame_timestamps`). A copy."""
-        return list(self._dropped)
-
-    @property
-    def host_fallback_count(self) -> int:
-        """How many of the recorded frames fell back to host time because the
-        backend reported no hardware timestamp."""
-        return self._host_fallback_count
-
-    @property
-    def start_timestamp_ns(self) -> int | None:
-        """Timestamp of the first recorded frame, or None if none were grabbed."""
-        return self._timestamps[0] if self._timestamps else None
-
-    @property
-    def mean_fps(self) -> float:
-        """Average fps across the whole recording (vs the rolling resulting_fps)."""
-        timestamps = self._timestamps
-        if len(timestamps) < 2:
-            return 0.0
-        span_ns = timestamps[-1] - timestamps[0]
-        return (len(timestamps) - 1) * 1e9 / span_ns if span_ns else 0.0
-
-    @property
-    def recorded_frame_size(self) -> tuple[int, int] | None:
-        """The (width, height) actually written for the last recording.
-
-        Equals the sensor size, or the transform's output size when the
-        display transform was baked in (a 90°/270° rotation swaps the axes).
-        """
-        return self._recorded_frame_size
-
-    @property
     def pixel_format(self) -> str:
-        """Pixel format of recorded frames. Mono8 is the invariant across every
-        backend today (FLIR forces it; Basler/fake frames are GRAY8); it is
-        recorded into recording_summary.json so a later transcode of a raw dump
-        knows how to interpret the byte stream."""
+        """Mono8 on every backend; in the summary so a raw dump can be decoded."""
         return "Mono8"
-
-    @property
-    def writer_failed(self) -> bool:
-        return self._video_writer is not None and self._video_writer.failed
 
     def load_params(self, config_str: str) -> None:
         self._backend.load_params(config_str)
@@ -539,11 +420,9 @@ class Camera:
         if name not in PARAM_NODES:
             raise ValueError(f"Unknown camera parameter: {name}")
         with self._param_lock:
-            info = self._backend.read_node(name)
-            # Geometry is "editable" whenever the camera is open even though
-            # IsWritable is False mid-preview (set_geometry cycles the grab);
-            # for live params the raw writability is meaningful (e.g. a model
-            # without Gain control).
+            info = self._backend.read_feature(PARAM_NODES[name])
+            # Geometry is editable while open (set_geometry cycles the grab); a
+            # live param's own writability counts (a model without Gain).
             writable = (
                 self._backend.is_open() if name in GEOMETRY_PARAMS else info.writable
             )
@@ -557,41 +436,29 @@ class Camera:
                 "writable": writable,
             }
 
-    def read_params(self) -> dict[str, dict]:
-        """Descriptors for every editable param the camera actually exposes."""
-        params: dict[str, dict] = {}
-        for name in PARAM_NODES:
-            try:
-                params[name] = self.read_param(name)
-            except BackendError:
-                continue  # node unavailable on this model
-        return params
-
-    def set_live_param(self, name: str, value: float) -> dict:
-        """Set a param writable on a running camera (exposure/gain/offset)."""
-        if name not in LIVE_PARAMS:
-            raise ValueError(f"{name} cannot be set live")
+    def trigger_window_us(self) -> tuple[float, float | None]:
+        """`(trigger delay, exposure)` in us: the exposure a trigger opens, for
+        a strobe sized to cover it. A delay the camera lacks reads 0, an
+        unreadable exposure None.
+        """
         with self._param_lock:
-            info = self._backend.read_node(name)
-            target = snap_value(float(value), info)
-            if isinstance(info.value, int):
-                target = int(round(target))
             try:
-                self._backend.write_node(name, target)
-            except BackendError as e:
-                raise ValueError(str(e)) from None
-        return self.read_param(name)
+                exposure: float | None = coerce_float(
+                    self._backend.read_feature("ExposureTime").value
+                )
+            except Exception:
+                exposure = None
+            try:
+                delay = self._backend.read_feature("TriggerDelay").value
+            except Exception:
+                delay = None
+        return (float(delay) if isinstance(delay, (int, float)) else 0.0, exposure)
 
     def set_geometry(
         self, *, width: int | None = None, height: int | None = None
-    ) -> dict:
-        """Set Width/Height, transparently cycling this camera's preview grab.
-
-        The SDK refuses Width/Height writes while grabbing, so the preview loop
-        is stopped and (if it was running) restarted around the write. The
-        cached size and the display placeholder are refreshed so downstream
-        consumers (preview encoder, GUI) immediately see the new ROI. Preview
-        is always restored, even when the device rejects the value.
+    ) -> None:
+        """Set Width/Height with the preview grab cycled around the write (the
+        SDK refuses it mid-grab); the preview restarts even on a rejected value.
         """
         with self._param_lock:
             was_grabbing = self._backend.is_grabbing()
@@ -601,74 +468,27 @@ class Camera:
             error: ValueError | None = None
             try:
                 if height is not None:
-                    info = self._backend.read_node("height")
-                    self._backend.write_node("height", int(snap_value(height, info)))
+                    info = self._backend.read_feature("Height")
+                    self._backend.write_feature("Height", int(snap_value(height, info)))
                 if width is not None:
-                    info = self._backend.read_node("width")
-                    self._backend.write_node("width", int(snap_value(width, info)))
+                    info = self._backend.read_feature("Width")
+                    self._backend.write_feature("Width", int(snap_value(width, info)))
             except BackendError as e:
                 error = ValueError(str(e))
             self.width = self._backend.width()
             self.height = self._backend.height()
-            # A ROI resize changes each offset's valid range, so re-center any
-            # auto-centered axis while still stopped — AFTER refreshing the
-            # cached size, since centering derives the offset from it. Best-effort:
-            # a device that rejects it keeps its offset.
+            # A resize changes each offset's range: re-center while stopped, after
+            # refreshing the cached size it reads. Best-effort.
             if error is None:
                 self._recenter_offsets_locked()
             self.frame_for_display.pop()
             self.frame_for_display.push(
                 np.zeros((self.height, self.width), dtype=np.uint8)
             )
-            params = self.read_params()  # read while stopped for clean values
             if was_grabbing:
                 self.start_preview()
             if error is not None:
                 raise error
-        return {"width": self.width, "height": self.height, "params": params}
-
-    def reset_params(self, config_str: str) -> dict:
-        """Re-apply this camera's config snapshot, cycling the preview grab.
-
-        Restores every sensor parameter to the value the active config shipped
-        (exactly what load_config applied at startup). The full reload includes
-        Width/Height, which the SDK refuses mid-grab, so the preview is stopped
-        and restored around the write, as set_geometry does. An empty
-        ``config_str`` (no saved params for this camera) leaves the camera
-        untouched and just reports its current parameters.
-        """
-        with self._param_lock:
-            if not config_str:
-                return {
-                    "width": self.width,
-                    "height": self.height,
-                    "params": self.read_params(),
-                }
-            was_grabbing = self._backend.is_grabbing()
-            if was_grabbing:
-                self.stop()
-                self.join()
-            self.frame_for_display.pop()  # drop stale frame so it reshapes
-            error: ValueError | None = None
-            try:
-                self.load_params(config_str)
-            except BackendError as e:
-                # A config the device rejects (wrong model/firmware, hand-edited,
-                # out-of-range value) must not strand the preview: mirror
-                # set_geometry and always restore it, refreshing the placeholder
-                # to the current ROI, before re-raising as a ValueError.
-                error = ValueError(str(e))
-                self.width = self._backend.width()
-                self.height = self._backend.height()
-                self.frame_for_display.push(
-                    np.zeros((self.height, self.width), dtype=np.uint8)
-                )
-            params = self.read_params()  # read while stopped for clean values
-            if was_grabbing:
-                self.start_preview()
-            if error is not None:
-                raise error
-        return {"width": self.width, "height": self.height, "params": params}
 
     def save_params(self) -> str:
         """Full config text of the current parameters (round-trips load_params)."""
@@ -679,67 +499,44 @@ class Camera:
 
     # ------------------------------------------------- full device node map
 
-    def _grab_locked_features(self) -> frozenset[str]:
-        """SFNC nodes this camera can write only while not grabbing.
-
-        Declared by the backend (Width/Height universally; Basler also locks the
-        ROI offsets during acquisition). The Camera tab presents these editable
-        whenever the camera is open and routes their writes through a grab cycle.
-        A backend that predates the seam falls back to Width/Height."""
-        getter = getattr(self._backend, "grab_locked_features", None)
-        return frozenset(getter()) if getter else GEOMETRY_FEATURES
-
-    def _annotate(self, feature: FeatureInfo, grab_locked: frozenset[str]) -> FeatureInfo:
-        """Apply octacam's cross-backend policy to one raw backend feature.
-
-        Marks runtime-managed nodes read-only (so the operator sees them but
-        cannot break preview/recording); locks an offset node whose axis is
-        auto-centered; and keeps a grab-locked node (one the SDK refuses to write
-        mid-preview — Width/Height everywhere, plus the ROI offsets on vendors
-        like Basler that lock them during acquisition) editable while the camera
-        is open, since set_feature cycles the grab to write it. A node the SDK
-        reports writable mid-grab (e.g. a FLIR offset) keeps that live writability
-        untouched."""
+    def _annotate(
+        self, feature: FeatureInfo, grab_locked: frozenset[str]
+    ) -> FeatureInfo:
+        """Apply octacam's policy to one backend feature: managed nodes and an
+        auto-centered offset are read-only, a grab-locked node is editable while
+        open (set_feature cycles the grab).
+        """
         if feature.name in RUNTIME_MANAGED_FEATURES:
             feature.managed = True
             feature.writable = False
-        elif feature.name in OFFSET_FEATURES and getattr(self, OFFSET_FEATURES[feature.name]):
+        elif feature.name in OFFSET_FEATURES and getattr(
+            self, OFFSET_FEATURES[feature.name]
+        ):
             feature.writable = False  # octacam derives it; UI shows locked
         elif feature.name in grab_locked:
             feature.writable = self._backend.is_open()
         if feature.value is not None:
-            # Cache the first-seen value as the factory-default fallback (see
-            # _default_cache); managed nodes are never reset so are irrelevant.
             self._default_cache.setdefault(feature.name, feature.value)
         return feature
 
     def list_features(self) -> list[dict]:
-        """Every node the backend exposes, annotated with octacam's policy.
-
-        Returns ``[]`` for a backend that cannot introspect its node map; the
-        Camera tab then falls back to the curated PARAM_NODES quick controls."""
+        """Every node the backend exposes, annotated with octacam's policy."""
         with self._param_lock:
             features = self._backend.list_features()
-            grab_locked = self._grab_locked_features()
+            grab_locked = self._backend.grab_locked_features()
         return [self._annotate(f, grab_locked).as_dict() for f in features]
 
     def read_feature(self, name: str) -> dict:
         """One node's current descriptor, annotated with octacam's policy."""
         with self._param_lock:
             feature = self._backend.read_feature(name)
-            grab_locked = self._grab_locked_features()
+            grab_locked = self._backend.grab_locked_features()
         return self._annotate(feature, grab_locked).as_dict()
 
     def _centered_offset(self, node_name: str) -> int | None:
-        """The offset value that centers the ROI on ``node_name``'s axis.
-
-        Sensor size comes from ``WidthMax``/``HeightMax`` when the model exposes
-        it, else from the offset node's own max (which the SDK reports as
-        ``sensor - size``). Returns None if the offset node is unavailable."""
+        """The offset that centers the ROI on `node_name`'s axis, or None."""
         try:
-            info = self._backend.read_node(
-                "offset_x" if node_name == "OffsetX" else "offset_y"
-            )
+            info = self._backend.read_feature(node_name)
         except BackendError:
             return None
         size = self.width if node_name == "OffsetX" else self.height
@@ -765,19 +562,17 @@ class Camera:
             target = self._centered_offset(node_name)
             if target is None:
                 continue
-            snake = "offset_x" if node_name == "OffsetX" else "offset_y"
             try:
-                self._backend.write_node(snake, target)
+                self._backend.write_feature(node_name, target)
             except BackendError as e:
-                log.debug("Could not center %s on %s: %s", node_name, self.serial_number, e)
+                log.debug(
+                    "Could not center %s on %s: %s", node_name, self.serial_number, e
+                )
 
     def _run_stopped(self, fn: Callable[[], None]) -> None:
-        """Run ``fn`` with the preview grab stopped, restoring it afterwards.
-
-        Caller holds ``_param_lock``. For node writes the SDK refuses mid-grab
-        (a Basler ROI offset, like Width/Height): the preview is stopped and — if
-        it was running — restarted around ``fn``, whose exception still propagates
-        after the restart (mirrors set_geometry's restore-on-error guarantee)."""
+        """Run `fn` with the preview grab stopped (caller holds `_param_lock`);
+        the preview restarts even if `fn` raises.
+        """
         was_grabbing = self._backend.is_grabbing()
         if was_grabbing:
             self.stop()
@@ -790,6 +585,7 @@ class Camera:
 
     def _write_feature_stopped(self, name: str, value: object) -> None:
         """Write a node the backend locks mid-grab, cycling the preview around it."""
+
         def _write() -> None:
             try:
                 self._backend.write_feature(name, value)
@@ -799,43 +595,36 @@ class Camera:
         self._run_stopped(_write)
 
     def set_center(self, axis: str, enabled: bool) -> dict:
-        """Toggle ROI auto-centering on an axis and re-center it immediately.
-
-        ``axis`` is ``"x"`` or ``"y"``. Enabling derives the offset now (and on
-        every later geometry change); disabling frees the field. Backends that
-        lock the offsets mid-grab (Basler) need the preview cycled around the
-        write; where the offsets stay live-writable (FLIR) it happens in place."""
+        """Toggle ROI auto-centering on axis `"x"` or `"y"`; enabling
+        re-centers now.
+        """
         if axis not in ("x", "y"):
             raise ValueError(f"Unknown center axis: {axis}")
         with self._param_lock:
             setattr(self, f"center_{axis}", bool(enabled))
             if enabled:
-                if OFFSET_FEATURES.keys() & self._grab_locked_features():
+                if OFFSET_FEATURES.keys() & self._backend.grab_locked_features():
                     self._run_stopped(self._recenter_offsets_locked)
                 else:
                     self._recenter_offsets_locked()
         return {"center_x": self.center_x, "center_y": self.center_y}
 
     def set_feature(self, name: str, value: object) -> None:
-        """Write one arbitrary node, routing grab-locked nodes through a grab cycle.
-
-        Rejects nodes octacam manages and offset nodes on an auto-centered axis.
-        ROI size (Width/Height) and any other node the backend locks mid-grab
-        (e.g. a Basler ROI offset) are written with the preview grab cycled; a
-        geometry resize also recomputes any auto-centered offset. Everything else
-        is written live on the running camera."""
+        """Write one node, cycling the grab for a grab-locked one; managed nodes
+        and auto-centered offsets are refused.
+        """
         if name in RUNTIME_MANAGED_FEATURES:
             raise ValueError(f"{name} is managed by octacam and cannot be edited")
         if name in OFFSET_FEATURES and getattr(self, OFFSET_FEATURES[name]):
             raise ValueError(f"{name} is auto-centered; disable centering to set it")
         if name == "Width":
-            self.set_geometry(width=int(float(value)))  # type: ignore[arg-type]
+            self.set_geometry(width=int(coerce_float(value)))
             return
         if name == "Height":
-            self.set_geometry(height=int(float(value)))  # type: ignore[arg-type]
+            self.set_geometry(height=int(coerce_float(value)))
             return
         with self._param_lock:
-            if name in self._grab_locked_features():
+            if name in self._backend.grab_locked_features():
                 self._write_feature_stopped(name, value)
             else:
                 try:
@@ -844,11 +633,8 @@ class Camera:
                     raise ValueError(str(e)) from None
 
     def reset_feature(self, name: str, config_str: str) -> None:
-        """Reset one node to its saved-config value, else its factory default.
-
-        The config's value for ``name`` wins; a node absent from the config
-        falls back to the value first read this session (its factory/power-on
-        state, since octacam never wrote it). A node with neither is left as-is.
+        """Reset a node to its saved-config value, else its first-seen value (see
+        `_default_cache`); with neither it is left as is.
         """
         if name in RUNTIME_MANAGED_FEATURES:
             raise ValueError(f"{name} is managed by octacam and cannot be reset")
@@ -873,10 +659,8 @@ class Camera:
     # ----------------------------------------------------------- triggering
 
     def enable_frame_trigger(self) -> None:
-        """Arm the FrameStart software trigger, as start_preview does.
-
-        Needed before headless recording: the config files ship with
-        TriggerMode Off, and without it a software trigger is ignored.
+        """Arm the FrameStart trigger: a headless recording needs it, since the
+        config files ship TriggerMode Off.
         """
         self._backend.enable_frame_trigger()
 
@@ -889,33 +673,18 @@ class Camera:
     # ------------------------------------------------------------- grabbing
 
     def start_preview(self, mode: str = "software", fps: float | None = None) -> None:
-        """Start live preview in one of three trigger modes.
+        """Start preview, clocked as the recording will be.
 
-        ``mode`` selects how the cameras are clocked during preview so it can
-        approximate how the recording will be triggered:
-
-        * ``"software"`` — octacam's FrameStart software trigger (driven by the
-          shared software-trigger timer the controller starts), synchronized across
-          cameras; frames fetched via the software-trigger hand-off.
-        * ``"free_running"`` — the camera free-runs with its rate capped at ``fps``
-          (so preview draws the same bandwidth, and reports the same rate, as an
-          fps-matched recording). Approximates a truly external / unmanaged trigger
-          octacam cannot drive.
-        * ``"managed"`` — the cameras run in *hardware*-trigger mode waiting for an
-          octacam-driven external source (a trigger plugin the controller arms);
-          frames fetched un-gated like an external recording.
-
-        ``free_running`` and ``managed`` fetch without firing a software trigger
-        (mirroring :meth:`start_record`'s external path); neither uses the shared
-        software-trigger timer.
+        `"software"`: the controller's software trigger, through the hand-off.
+        `"free_running"`: free run capped at `fps`, drawing an fps-matched
+        recording's bandwidth (stands in for an external trigger octacam cannot
+        drive). `"managed"`: hardware-trigger mode, clocked by a trigger plugin.
         """
         self._stop_flag.clear()
         if not self._backend.is_open():
             return
         if mode == "free_running":
-            # begin_freerun returns False when the backend cannot arm free-run;
-            # fall back to a software-trigger preview so preview shows frames
-            # instead of grabbing forever in a mode the camera was never armed for.
+            # A backend that cannot free-run previews on the software trigger.
             if not self._backend.begin_freerun(fps):
                 mode = "software"
                 self._backend.begin_software_trigger_preview()
@@ -925,10 +694,11 @@ class Camera:
         else:
             mode = "software"
             self._backend.begin_software_trigger_preview()
-        self._timestamps.clear()
-        self._dropped.clear()
-        self._dropped_count = 0  # so preview never shows a stale recording count
-        self._host_fallback_count = 0
+        self.take = None
+        self.preview_timestamps.clear()
+        self._backend.configure_trigger_period(
+            None
+        )  # no recording counts preview triggers
         self._backend.start_grab_preview()
         self._thread = threading.Thread(
             target=self._preview_loop, args=(mode,), daemon=True
@@ -940,217 +710,65 @@ class Camera:
         save_path: str,
         fps: float,
         video_format: VideoFormat,
+        clock: PulseClock,
+        *,
         record_form: str = "display",
-        software_trigger: bool = True,
         queue_size: int = WRITER_QUEUE_SIZE,
-        max_frames: int | None = None,
+        hold: bool = False,
     ) -> bool:
-        """Start recording; returns True iff the record loop was launched.
-
-        ``record_form`` selects "display" (bake the camera's display transform
-        into the video) or "sensor" (raw, untransformed). The per-frame timestamp
-        series is always accumulated (it feeds recording_summary.json); the
-        controller decides whether to persist it. ``software_trigger``
-        picks the grab path: the software-trigger hand-off (this process drives each
-        frame) when True, or a plain fetch of externally-triggered frames when
-        False. An external trigger never bumps the hand-off counter, so gating the
-        record loop on it (``retrieve``) would capture nothing — external recording
-        must use the un-gated ``retrieve_freerun`` fetch instead. ``queue_size``
-        bounds the writer queue that buffers frames between the grab loop and the
-        encoder (see :data:`WRITER_QUEUE_SIZE`). ``max_frames`` caps the grab loop
-        at a fixed number of frames so every camera captures the same count (None
-        = uncapped; see :meth:`_record_loop`).
+        """Record into `save_path` as a fresh `take` counted against
+        `clock` (`record_form` and `hold` as for
+        `CameraTake`); True iff its record loop was
+        launched.
         """
-        self._stop_flag.clear()
-        self._started = False
+        self.take = CameraTake(
+            self,
+            clock,
+            video_format=video_format,
+            queue_size=queue_size,
+            record_form=record_form,
+            hold=hold,
+        )
         if not self._backend.is_open():
             return False
-        self._timestamps.clear()
-        self._dropped.clear()
-        self._dropped_count = 0
-        self._host_fallback_count = 0
+        return self.take.start(save_path, fps)
 
-        bake = record_form == "display" and not self.display_transform.is_identity
-        transform = self.display_transform if bake else None
-
-        sensor_size = (self._backend.width(), self._backend.height())
-        frame_size = (
-            self.display_transform.output_size(*sensor_size) if bake else sensor_size
-        )
-        self._recorded_frame_size = frame_size
-        self._video_writer = video_format.create_writer(max(1, queue_size))
-        if not self._video_writer.open(save_path, fps, frame_size):
-            log.error("Failed to open video writer for: %s", save_path)
-            return False
-
-        # The writer (ffmpeg child + threads) is now live; close it on ANY
-        # failure below so a failed start (e.g. "insufficient resources")
-        # cannot orphan the child process and its threads.
-        try:
-            if not self._backend.start_grab_record():
-                log.error(
-                    "Failed to start grabbing for recording on camera %s",
-                    self.serial_number,
-                )
-                self._video_writer.close()
-                return False
-        except Exception:
-            self._video_writer.close()
-            raise
-
-        self._thread = threading.Thread(
-            target=self._record_loop,
-            args=(transform, software_trigger, max_frames),
-            daemon=True,
-        )
-        self._thread.start()
-        return True
-
-    def stop(self) -> None:
+    def stop(self, fill_to: int | None = None) -> None:
+        """Stop the grab loop. `fill_to` (a completed train's count) pads a
+        recording camera that missed the last pulses, so it ends aligned.
+        """
         self._stop_flag.set()
+        if self.take is not None:
+            self.take.stop(fill_to)
 
     def join(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             self._thread.join()
         self._thread = None
+        if self.take is not None:
+            self.take.join()
 
     def close(self) -> None:
         self.stop()
         self.join()
         self._backend.close()
 
-    # ------------------------------------------------------- grab loop bodies
-
-    def _store_timestamp(self, timestamp: int) -> None:
-        if not timestamp:  # backend supplied no hardware timestamp for this frame
-            self._host_fallback_count += 1
-            timestamp = time.time_ns()
-        self._timestamps.append(timestamp)
-
-    def _update_resulting_fps(self, n_frames: int = 6) -> None:
-        timestamps = self._timestamps
-        if len(timestamps) < 2 or n_frames < 1:
-            self._resulting_fps = 0.0
-            return
-        last = len(timestamps) - 1
-        start = last - n_frames if last > n_frames else 0
-        delta_ns = timestamps[last] - timestamps[start]
-        self._resulting_fps = (last - start) * 1e9 / delta_ns if delta_ns else 0.0
+    # ------------------------------------------------------------ preview
 
     def _preview_loop(self, mode: str = "software") -> None:
         backend = self._backend
-        # Match the fetch to the arm chosen in start_preview: the software-trigger
-        # hand-off for "software", else the un-gated free-run fetch. Both
-        # free_running and managed use retrieve_freerun — a free-running or
-        # plugin/hardware-triggered camera produces frames on its own, so preview
-        # just grabs the next one. (Unlike _record_loop's external path, preview
-        # does NOT use retrieve_external: that gates on a software-trigger pulse to
-        # model an unpulsed external *recording*, which would wrongly freeze a
-        # managed preview that is clocked by the plugin, not the software timer.)
+        # Free-running and plugin-clocked cameras make frames on their own: the
+        # un-gated fetch (not retrieve_external, whose wait for a software pulse
+        # would freeze a managed preview).
         retrieve = backend.retrieve if mode == "software" else backend.retrieve_freerun
         while not self._stop_flag.is_set() and backend.is_grabbing():
-            # Materialize the (copying) array only when the display slot is
-            # free, keeping the per-frame copy off the steady state. The
-            # timestamp is recorded for every successful grab regardless.
+            # Copy the array only when the display slot is free.
             frame = retrieve(
                 GRAB_TIMEOUT_MS, lambda: self.frame_for_display.wants_frame
             )
             if frame is not None:
                 array, timestamp = frame
-                self._store_timestamp(timestamp)
-                # Preview runs indefinitely, so bound the series (the fps readout
-                # only reads the last few) instead of leaking a timestamp per frame.
-                if len(self._timestamps) > PREVIEW_TIMESTAMPS_MAX:
-                    del self._timestamps[0]
+                self.preview_timestamps.append(timestamp or time.time_ns())
                 if array is not None and self.frame_for_display.push(array):
-                    self._update_resulting_fps()
+                    self.frame_for_display.refresh_fps(self.preview_timestamps)
         backend.stop_grab()
-
-    def _record_loop(
-        self,
-        transform: DisplayTransform | None = None,
-        software_trigger: bool = True,
-        max_frames: int | None = None,
-    ) -> None:
-        backend = self._backend
-        # With an external trigger the frames arrive on their own; the
-        # software-trigger hand-off (retrieve) would block forever waiting for a
-        # pending count that only the software trigger timer bumps. Fetch
-        # externally-triggered frames without firing a software trigger instead:
-        # real backends just grab the next produced frame (retrieve_freerun); a
-        # backend that models the external source itself (the fake, via its
-        # trigger counter) provides retrieve_external.
-        if software_trigger:
-            retrieve = backend.retrieve
-        else:
-            retrieve = getattr(backend, "retrieve_external", None) or (
-                backend.retrieve_freerun
-            )
-        frame_count = 0
-        while not self._stop_flag.is_set() and backend.is_grabbing():
-            # Stop at the intended frame count so every camera captures the same
-            # number: octacam clocks software/managed triggers for a fixed number
-            # of pulses (max_frames = round(fps x duration)), but each camera's
-            # grab loop is independent, so without this the teardown race lets one
-            # camera retrieve a trailing pulse the others don't (e.g. 801 vs 800).
-            # A camera that can't keep up never reaches max_frames and is bounded
-            # instead by the monitor's deadline (the existing short-capture path).
-            # max_frames is None for a truly external trigger (unknown pulse count).
-            if max_frames is not None and frame_count >= max_frames:
-                break
-            frame = retrieve(GRAB_TIMEOUT_MS, _ALWAYS)
-            if frame is None:
-                continue
-            array, timestamp = frame
-            if array is None:  # record always requests the array; defensive
-                continue
-            self._store_timestamp(timestamp)
-
-            # Bake the display orientation into the recorded frame when asked;
-            # the preview still gets the raw array (the browser applies the
-            # transform via CSS), and identity/sensor recordings pay nothing.
-            to_write = apply_display_transform(array, transform) if transform else array
-            written = self._video_writer.write(to_write)  # pyright: ignore[reportOptionalMemberAccess]
-            if not written:
-                self._dropped_count += 1
-                log.warning(
-                    "Frame %d dropped for camera %s",
-                    frame_count,
-                    self.serial_number,
-                )
-            self._dropped.append(not written)
-
-            if self.frame_for_display.push(array):
-                self._update_resulting_fps()
-
-            self._started = True
-            frame_count += 1
-        backend.stop_grab()
-        self._video_writer.close()  # pyright: ignore[reportOptionalMemberAccess]
-        self._reconcile_unwritten_frames()
-
-        dropped_count = sum(self._dropped)
-        log.info(
-            "Camera %s: %d frames recorded, %d frames dropped",
-            self.serial_number,
-            frame_count,
-            dropped_count,
-        )
-
-    def _reconcile_unwritten_frames(self) -> None:
-        """If the sink died, frames accepted into the queue after the failure
-        were discarded rather than written. Mark that trailing run of
-        accepted frames as dropped so the timestamp series reflects what reached
-        the file.
-        """
-        if self._video_writer is None or not self._video_writer.failed:
-            return
-        written = self._video_writer.frames_written
-        accepted = [i for i, dropped in enumerate(self._dropped) if not dropped]
-        for index in accepted[written:]:
-            self._dropped[index] = True
-            self._dropped_count += 1
-
-
-def _ALWAYS() -> bool:
-    return True

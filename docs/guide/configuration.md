@@ -8,8 +8,9 @@ A **config directory** describes one rig. It holds:
   `<serial>.txt` (the native GenApi feature-persistence TSV) for FLIR/GenICam,
   written by the GUI's *Save…* dialog.
 
-Every recording folder is also a config directory: it holds a snapshot of the
-setup it was recorded with (see
+Every recording folder also holds a config directory: its `octacam_recording/`
+subfolder is a snapshot of the setup it was recorded with, and
+`octacam gui <recording folder>` launches from it (see
 [Recording](recording.md#the-embedded-config-snapshot)).
 
 Everything below is optional and has a sensible default — an empty or missing
@@ -73,7 +74,7 @@ directory = "/data/octacam"
 relative_directory = "%y%m%d-genotype/Fly1/001-bhv"   # strftime template
 
 save_method = "ffmpeg"         # ffmpeg | raw
-ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"
+ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p"
 save_transformed = true
 save_timestamps = false
 ```
@@ -88,9 +89,9 @@ save_timestamps = false
 | `directory` | `"./"` | Base save directory. |
 | `relative_directory` | `""` | Sub-path appended to `directory`; a `strftime` template (e.g. `%y%m%d/…`), so trials sort into a date/subject/trial tree. |
 | `save_method` | `"ffmpeg"` | `ffmpeg` (encoded video) or `raw` (a `.raw` byte dump per camera). |
-| `ffmpeg_params` | ultrafast x264, see above | Encoder args used at record time. |
+| `ffmpeg_params` | ultrafast x264, see above | Encoder args used at record time. octacam writes Mono8 frames as full-range 4:2:0 (`yuv420p`, neutral chroma), so the pixel values are unchanged. An older `-pix_fmt gray` (monochrome 4:0:0) is also written as `yuv420p` for libx264/libx265, because NVIDIA hardware decoders (VLC's default on an NVIDIA machine) show 4:0:0 H.264 as flat gray frames. Frames with an odd width or height stay 4:0:0, since 4:2:0 can't encode them. |
 | `save_transformed` | `true` | Bake each camera's rotation/flips into the file (see [Recording](recording.md#transformed-vs-raw-frames)). |
-| `save_timestamps` | `false` | Also write a single compressed per-frame timestamp file (`timestamps.npz`) covering all cameras. |
+| `save_timestamps` | `false` | Also write a single compressed per-frame timestamp file (`timestamps.npz`, in the recording's `octacam_recording/` subfolder) covering all cameras. |
 
 ## `[transcode]`
 
@@ -99,7 +100,7 @@ Usually a slower, higher-quality preset than the record-time params.
 
 ```toml
 [transcode]
-ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
+ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt yuv420p"
 ```
 
 ## `[transfer]`
@@ -202,4 +203,13 @@ cameras and resolves the save/transfer paths:
 octacam doctor <config_dir>
 ```
 
-See [`doctor`](../reference/cli.md#doctor).
+See [`doctor`](../cli.md#octacam-doctor).
+
+## Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `PYLON_CAMEMU` | Number of emulated Basler cameras (run without hardware). |
+| `OCTACAM_CACHE_DIR` | Override the octacam cache location (recording list, job logs, markers; default `~/.cache/octacam`). Inspect/clear it with `octacam cache`. |
+| `OCTACAM_FFMPEG` | Path to an ffmpeg binary to use instead of the bundled one. |
+| `OCTACAM_BASLER_CREATE_TIMEOUT` | Seconds to wait for a Basler camera to answer during enumeration (default `15`). A camera that misses the deadline is skipped with an explanation and the rest of the rig still comes up; raise this only for a rig with a genuinely slow camera. |

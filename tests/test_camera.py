@@ -1,12 +1,9 @@
 """Camera sensor-parameter read/set/save tests (pure-unit + emulator)."""
 
-import os
-
-os.environ.setdefault("PYLON_CAMEMU", "2")
-
 import pytest
 
-from octacam.camera import CameraSystem, _normalize_pfs_triggers
+from octacam.cameras import CameraSystem
+from octacam.cameras.basler import _normalize_pfs_triggers
 
 EMULATED_SERIALS = ["0815-0000", "0815-0001"]
 
@@ -44,7 +41,7 @@ def test_normalize_pfs_triggers_keeps_source_when_unknown():
 
 @pytest.fixture
 def previewing_system(tmp_path):
-    system = CameraSystem(EMULATED_SERIALS)
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
     assert len(system) == 2, "PYLON_CAMEMU=2 expected"
     system.load_config(tmp_path)  # no .pfs: emulator defaults
     system.start_preview()
@@ -52,16 +49,11 @@ def previewing_system(tmp_path):
     system.close()
 
 
-def test_read_params_shape(previewing_system):
+def test_read_param_shape(previewing_system):
     cam = previewing_system.camera_at(0)
-    params = cam.read_params()
-    assert set(params) >= {
-        "width",
-        "height",
-        "exposure",
-        "gain",
-        "offset_x",
-        "offset_y",
+    params = {
+        name: cam.read_param(name)
+        for name in ("width", "height", "exposure", "gain", "offset_x", "offset_y")
     }
     width = params["width"]
     assert (
@@ -78,76 +70,27 @@ def test_read_param_rejects_unknown(previewing_system):
         previewing_system.camera_at(0).read_param("bogus")
 
 
-def test_set_live_param_echoes_and_snaps(previewing_system):
-    cam = previewing_system.camera_at(0)
-    desc = cam.set_live_param("exposure", 1234.0)
-    assert desc["name"] == "exposure"
-    assert cam.read_param("exposure")["value"] == desc["value"]
-    # out-of-range is clamped to the node max, not crashed
-    high = cam.set_live_param("offset_x", 10**9)["value"]
-    assert high <= cam.read_param("offset_x")["max"]
-
-
-def test_set_live_param_rejects_geometry_name(previewing_system):
-    with pytest.raises(ValueError):
-        previewing_system.camera_at(0).set_live_param("width", 640)
-
-
 def test_set_geometry_resizes_and_keeps_previewing(previewing_system):
     cam = previewing_system.camera_at(0)
-    assert cam._camera.IsGrabbing()
-    result = cam.set_geometry(width=640, height=480)
-    assert (result["width"], result["height"]) == (640, 480)
+    assert cam.backend.is_grabbing()
+    cam.set_geometry(width=640, height=480)
     assert (cam.width, cam.height) == (640, 480)
     # display placeholder reshaped to the new ROI; preview resumed
     frame = cam.frame_for_display.pop()
     assert frame is not None and frame.shape == (480, 640)
-    assert cam._camera.IsGrabbing()
+    assert cam.backend.is_grabbing()
     # the other camera is unaffected
-    assert previewing_system.camera_at(1)._camera.IsGrabbing()
+    assert previewing_system.camera_at(1).backend.is_grabbing()
 
 
 def test_save_params_round_trips_and_normalizes_trigger(previewing_system):
     cam = previewing_system.camera_at(0)
-    cam.set_live_param("exposure", 2222.0)
+    cam.set_feature("ExposureTime", 2222.0)
     pfs = cam.save_params()
     assert "TriggerMode\t{TriggerSelector=FrameStart}\tOff" in pfs
     # reloads cleanly through the existing load path
     cam.load_params(pfs)
     assert abs(cam.read_param("exposure")["value"] - 2222.0) < 1.0
-
-
-def test_reset_params_restores_pfs_and_keeps_previewing(previewing_system):
-    cam = previewing_system.camera_at(0)
-    baseline = cam.save_params()  # snapshot the config's saved state
-    original = cam.read_param("exposure")["value"]
-    cam.set_live_param("exposure", original + 1000.0)
-    assert abs(cam.read_param("exposure")["value"] - original) > 1.0
-
-    result = cam.reset_params(baseline)
-    assert cam._camera.IsGrabbing()  # preview restored after the grab cycle
-    assert abs(result["params"]["exposure"]["value"] - original) < 1.0
-    assert abs(cam.read_param("exposure")["value"] - original) < 1.0
-
-
-def test_reset_params_invalid_pfs_keeps_previewing(previewing_system):
-    cam = previewing_system.camera_at(0)
-    assert cam._camera.IsGrabbing()
-    # A .pfs the device rejects surfaces as ValueError but must never strand
-    # the live preview (mirrors set_geometry's restore-on-error guarantee).
-    with pytest.raises(ValueError):
-        cam.reset_params("this is not a valid feature stream\n")
-    assert cam._camera.IsGrabbing()
-    assert cam.frame_for_display.pop() is not None  # still serving frames
-
-
-def test_reset_params_empty_is_noop(previewing_system):
-    cam = previewing_system.camera_at(0)
-    cam.set_live_param("exposure", 1777.0)
-    # No .pfs for this camera: reset leaves the live value (and preview) intact.
-    result = cam.reset_params("")
-    assert cam._camera.IsGrabbing()
-    assert abs(result["params"]["exposure"]["value"] - 1777.0) < 1.0
 
 
 def test_save_all_params_covers_every_camera(previewing_system):
@@ -197,7 +140,7 @@ def test_set_feature_live_and_geometry(previewing_system):
     assert abs(cam.read_feature("ExposureTime")["value"] - 3210.0) < 2.0
     # A Width write cycles the grab and keeps previewing.
     cam.set_feature("Width", 512)
-    assert cam._camera.IsGrabbing()
+    assert cam.backend.is_grabbing()
     assert cam.read_feature("Width")["value"] == 512
 
 
@@ -255,9 +198,27 @@ def test_offset_editable_and_written_via_grab_cycle(previewing_system):
     cam.set_feature("Width", 512)
     by = {f["name"]: f for f in cam.list_features()}
     assert by["OffsetX"]["writable"] is True
-    # A write cycles the grab (like Width/Height), lands, and preview resumes —
+    # A write cycles the grab (like Width/Height), lands, and preview resumes --
     # a plain mid-grab write would be rejected by the SDK.
     cam.set_feature("OffsetX", 16)
-    assert cam._camera.IsGrabbing()
+    assert cam.backend.is_grabbing()
     off = cam.read_feature("OffsetX")
     assert abs(off["value"] - 16) <= (off["inc"] or 1)
+
+
+# ------------------------------------------------ a closed camera's triggers
+
+
+@pytest.mark.parametrize(
+    ("backend", "serials"), [("basler", EMULATED_SERIALS), ("fake", ["FAKE-0"])]
+)
+def test_trigger_setup_on_a_closed_camera_is_a_no_op(tmp_path, backend, serials):
+    # close() drops the device handle; a recording start racing a shutdown must
+    # find the trigger setup a no-op, not an AttributeError on that handle.
+    system = CameraSystem(serials, backend=backend)
+    assert len(system) == len(serials)
+    system.load_config(tmp_path)
+    system.close()
+    system.enable_frame_trigger()
+    system.set_trigger_source(True)
+    system.set_trigger_source(False)

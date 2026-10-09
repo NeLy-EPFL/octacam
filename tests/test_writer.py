@@ -1,23 +1,26 @@
-"""Writer tests: ffmpeg/raw sinks, transcode roundtrip, failure paths."""
+"""Capture writers: ffmpeg/raw sinks, fills, failure paths."""
 
+import subprocess
 import time
 
 import numpy as np
 import pytest
+from helpers import wait_until
 
-from octacam.config import RecordConfig
+from octacam.transcode import transcode_file
 from octacam.writer import (
     DEFAULT_CRF,
     FORMATS,
     AsyncFrameWriter,
     FfmpegVideoWriter,
     RawVideoWriter,
-    _color_range_args,
-    _merge_vf,
-    build_encode_args,
-    default_save_method,
-    find_ffmpeg,
-    transcode_raw,
+    WriteResult,
+)
+
+WRITTEN, REFUSED, SKIPPED = (
+    WriteResult.WRITTEN,
+    WriteResult.REFUSED,
+    WriteResult.SKIPPED,
 )
 
 WIDTH, HEIGHT = 64, 48
@@ -57,7 +60,7 @@ def test_ffmpeg_writer_lossless_roundtrip(tmp_path):
     )
     assert writer.open(str(out), 30.0, (WIDTH, HEIGHT))
     for frame in frames:
-        assert writer.write(frame)
+        assert writer.write(frame) is WRITTEN
         time.sleep(0.002)  # pace like a camera; a 0-delay burst would
         # legitimately overflow the bounded queue (drop-on-full)
     writer.close()
@@ -68,18 +71,6 @@ def test_ffmpeg_writer_lossless_roundtrip(tmp_path):
     for src, dec in zip(frames, decoded, strict=True):
         # cv2 decodes to BGR; every channel equals the gray source
         assert np.array_equal(dec[:, :, 0], src)
-
-
-def test_ffmpeg_writer_remux_mp4(tmp_path):
-    out = tmp_path / "test.mkv"
-    writer = FfmpegVideoWriter(remux_mp4=True)
-    assert writer.open(str(out), 30.0, (WIDTH, HEIGHT))
-    for frame in synthetic_frames(10):
-        writer.write(frame)
-        time.sleep(0.002)
-    writer.close()
-    assert not out.exists()
-    assert len(read_all_frames(tmp_path / "test.mp4")) == 10
 
 
 def test_ffmpeg_writer_failure_is_reported(tmp_path):
@@ -97,11 +88,11 @@ def test_ffmpeg_writer_failure_is_reported(tmp_path):
     assert not out.exists()
 
 
-def test_ffmpeg_open_reaps_child_when_stderr_thread_fails(tmp_path, monkeypatch):
-    # If the stderr-drain thread fails to start after Popen (e.g. thread
-    # exhaustion), _open_sink must reap the ffmpeg child before re-raising —
-    # otherwise open() returns False, close() short-circuits on _thread is None,
-    # and the process/pipes leak.
+@pytest.mark.parametrize("exc", [RuntimeError, KeyboardInterrupt])
+def test_ffmpeg_open_reaps_child_when_stderr_thread_fails(tmp_path, monkeypatch, exc):
+    # A thread that fails to start after Popen (e.g. thread exhaustion, or a
+    # Ctrl-C landing there) must not orphan the ffmpeg child: close() skips a
+    # writer whose thread never ran.
     import octacam.writer as writer_mod
 
     created = []
@@ -119,7 +110,7 @@ def test_ffmpeg_open_reaps_child_when_stderr_thread_fails(tmp_path, monkeypatch)
             pass
 
         def start(self):
-            raise RuntimeError("can't start new thread")
+            raise exc("can't start new thread")
 
     monkeypatch.setattr(writer_mod.threading, "Thread", BoomThread)
 
@@ -127,11 +118,34 @@ def test_ffmpeg_open_reaps_child_when_stderr_thread_fails(tmp_path, monkeypatch)
     writer = FfmpegVideoWriter(
         ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray"
     )
-    assert writer.open(str(out), 30.0, (WIDTH, HEIGHT)) is False
-    assert created, "expected an ffmpeg child to have been spawned"
-    assert created[0].poll() is not None  # reaped: killed + waited, not orphaned
+    if issubclass(exc, Exception):
+        assert writer.open(str(out), 30.0, (WIDTH, HEIGHT)) is False
+    else:
+        with pytest.raises(exc):
+            writer.open(str(out), 30.0, (WIDTH, HEIGHT))
+    # The first find_ffmpeg() in a process also runs the bundled ffmpeg -version.
+    (proc,) = [p for p in created if "pipe:0" in p.args]
+    assert proc.poll() is not None  # reaped: killed + waited, not orphaned
     assert writer._proc is None
     writer.close()  # no-op (writer thread never started), must not raise
+
+
+def test_open_releases_the_sink_when_the_writer_thread_fails(tmp_path, monkeypatch):
+    import octacam.writer as writer_mod
+
+    class BoomThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(writer_mod.threading, "Thread", BoomThread)
+    writer = RawVideoWriter()
+    assert writer.open(str(tmp_path / "cam.raw"), 30.0, (WIDTH, HEIGHT)) is False
+    assert writer._file is None
+    assert writer.write(np.zeros((HEIGHT, WIDTH), np.uint8)) is REFUSED
+    writer.close()
 
 
 def test_raw_writer_and_transcode_roundtrip(tmp_path):
@@ -140,7 +154,7 @@ def test_raw_writer_and_transcode_roundtrip(tmp_path):
     writer = RawVideoWriter()
     assert writer.open(str(out), 25.0, (WIDTH, HEIGHT))
     for frame in frames:
-        assert writer.write(frame)
+        assert writer.write(frame) is WRITTEN
         time.sleep(0.002)
     writer.close()
 
@@ -150,8 +164,9 @@ def test_raw_writer_and_transcode_roundtrip(tmp_path):
     assert out.stat().st_size == len(frames) * WIDTH * HEIGHT
 
     # Geometry must be supplied explicitly to transcode a raw dump.
-    mkv = transcode_raw(
+    mkv = transcode_file(
         out,
+        tmp_path / "cam.mkv",
         ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
         width=WIDTH,
         height=HEIGHT,
@@ -178,13 +193,13 @@ def test_drop_on_full_then_drain_on_close(tmp_path):
     writer = _SlowSink(max_queue_size=2)
     assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
     results = [writer.write(frame) for frame in synthetic_frames(10)]
-    assert not all(results)  # the slow sink forces drops
+    assert REFUSED in results  # the slow sink forces drops
     writer.close()
-    assert len(writer.written) == sum(results)  # queued frames were drained
+    assert len(writer.written) == results.count(WRITTEN)  # queued frames were drained
 
 
 def test_format_registry_creates_writers():
-    for _name, video_format in FORMATS.items():
+    for video_format in FORMATS.values():
         assert video_format.create_writer(2) is not None
         assert video_format.extension
         assert video_format.label
@@ -220,141 +235,41 @@ def test_frames_written_reflects_actual_writes_on_failure():
     assert writer.frames_written == 3
 
 
-def test_build_encode_args_derives_input_and_splices_params_verbatim():
-    args = build_encode_args(
-        "ffmpeg",
-        "o.mkv",
-        30.0,
-        64,
-        48,
-        "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray",
+def test_capture_pipes_rawvideo_into_the_configured_encoder(tmp_path, monkeypatch):
+    # The input geometry is derived, the params reach ffmpeg through output_args
+    # (gray becomes full-range 4:2:0), and frames go unbuffered down the stdin pipe.
+    import octacam.writer as writer_mod
+
+    launched = []
+    real_popen = writer_mod.subprocess.Popen
+
+    def recording_popen(args, **kwargs):
+        launched.append((args, kwargs))
+        return real_popen(args, **kwargs)
+
+    monkeypatch.setattr(writer_mod.subprocess, "Popen", recording_popen)
+    out = tmp_path / "cam.mkv"
+    writer = FfmpegVideoWriter(
+        ffmpeg_params="-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"
     )
-    # Derived input args from the frame geometry.
-    assert args[args.index("-video_size") + 1] == "64x48"
+    assert writer.open(str(out), 30.0, (WIDTH, HEIGHT))
+    for frame in synthetic_frames(3):
+        assert writer.write(frame) is WRITTEN
+    writer.close()
+    assert not writer.failed, writer.error_tail
+    # The first find_ffmpeg() in a process also runs the bundled ffmpeg -version.
+    ((args, kwargs),) = [launch for launch in launched if "pipe:0" in launch[0]]
+    assert args[args.index("-video_size") + 1] == f"{WIDTH}x{HEIGHT}"
     assert args[args.index("-framerate") + 1] == "30"
     assert args[args.index("-pixel_format") + 1] == "gray"  # input pix fmt
     assert args[args.index("-i") + 1] == "pipe:0"
-    # Encoder args spliced verbatim from ffmpeg_params.
     assert args[args.index("-crf") + 1] == "18"
     assert args[args.index("-preset") + 1] == "ultrafast"
-    assert args[-1] == "o.mkv"
-
-
-def test_build_encode_args_uses_source_and_input_pix_fmt():
-    args = build_encode_args(
-        "ffmpeg",
-        "o.mkv",
-        10.0,
-        8,
-        6,
-        "-c:v libx264 -pix_fmt gray",
-        source="in.raw",
-        input_pix_fmt="gray",
-    )
-    assert args[args.index("-i") + 1] == "in.raw"
-
-
-def test_merge_vf_transform_first_then_user_filter():
-    # The single -vf ffmpeg allows must merge the octacam transform with any
-    # user -vf inside ffmpeg_params, transform first (rotate/flip) then user.
-    tokens = ["-c:v", "libx264", "-vf", "eq=contrast=2", "-crf", "18"]
-    cleaned, merged = _merge_vf("transpose=1", tokens)
-    assert "-vf" not in cleaned
-    assert merged == "transpose=1,eq=contrast=2"
-
-    # -filter:v is treated the same as -vf.
-    cleaned, merged = _merge_vf("", ["-filter:v", "hflip"])
-    assert cleaned == []
-    assert merged == "hflip"
-
-    # No user filter: just the transform survives.
-    _, merged = _merge_vf("vflip", ["-c:v", "libx264"])
-    assert merged == "vflip"
-
-
-def test_build_encode_args_merges_user_vf_after_transform():
-    args = build_encode_args(
-        "ffmpeg",
-        "o.mkv",
-        30.0,
-        64,
-        48,
-        "-c:v libx264 -vf eq=contrast=2 -pix_fmt gray",
-        vf="transpose=1",
-    )
-    assert args[args.index("-vf") + 1] == "transpose=1,eq=contrast=2"
-
-
-def test_color_range_args_only_for_limited_range_yuv():
-    # YUV pixel formats default to limited/TV range (luma squeezed into 16-235);
-    # we force full range so 0-255 frames survive. gray (4:0:0) and the yuvj*
-    # aliases are already full range and need no flag.
-    assert _color_range_args("yuv420p") == ["-color_range", "pc"]
-    assert _color_range_args("yuv444p") == ["-color_range", "pc"]
-    assert _color_range_args("gray") == []
-    assert _color_range_args("yuvj420p") == []
-
-
-def test_build_encode_args_forces_full_range_for_yuv_only():
-    common = dict(ffmpeg="ffmpeg", output="o.mp4", fps=30.0, width=64, height=48)
-    yuv = build_encode_args(
-        ffmpeg_params="-c:v libx264 -crf 0 -preset ultrafast -pix_fmt yuv420p",
-        **common,
-    )
-    assert yuv[yuv.index("-color_range") + 1] == "pc"
-    # The full-range conversion filter is injected into the merged -vf.
-    assert "scale=out_range=full" in yuv[yuv.index("-vf") + 1]
-
-    # gray is already full range: no stray -color_range flag, no injected filter.
-    gray = build_encode_args(
-        ffmpeg_params="-c:v libx264 -crf 0 -preset ultrafast -pix_fmt gray",
-        **common,
-    )
-    assert "-color_range" not in gray
-    assert "-vf" not in gray
-
-
-def test_yuv420p_transcode_preserves_full_range(tmp_path):
-    # Regression: a 0-255 ramp transcoded to yuv420p (lossless) must come back
-    # spanning the full range, NOT clamped into limited range's 16-235. Decodes
-    # straight to full-range gray and inspects the actual luma span.
-    import subprocess
-
-    w, h = 256, 16
-    ramp = np.tile(np.arange(256, dtype=np.uint8), (h, 1))
-    raw = tmp_path / "ramp.raw"
-    raw.write_bytes(ramp.tobytes())
-
-    out = transcode_raw(
-        raw,
-        ffmpeg_params="-c:v libx264 -crf 0 -preset veryslow -pix_fmt yuv420p",
-        output=tmp_path / "ramp.mp4",
-        width=w,
-        height=h,
-        fps=10.0,
-    )
-
-    dec = subprocess.run(
-        [
-            find_ffmpeg(),
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(out),
-            "-f",
-            "rawvideo",
-            "-pixel_format",
-            "gray",
-            "pipe:1",
-        ],
-        capture_output=True,
-        check=True,
-    ).stdout
-    back = np.frombuffer(dec, dtype=np.uint8)[: w * h].reshape(h, w)
-    # The old limited-range default clamped to [16, 235]; full range reaches the
-    # extremes (lossless crf 0, so this is effectively exact).
-    assert back.min() <= 2 and back.max() >= 253, (int(back.min()), int(back.max()))
+    assert args[args.index("-pix_fmt") + 1] == "yuv420p"  # never 4:0:0 H.264
+    assert args[args.index("-color_range") + 1] == "pc"
+    assert "scale=out_range=full" in args[args.index("-vf") + 1]
+    assert args[-1] == str(out)
+    assert kwargs["stdin"] is subprocess.PIPE and kwargs["bufsize"] == 0
 
 
 def test_capture_default_crf_is_18():
@@ -365,86 +280,159 @@ def test_capture_default_crf_is_18():
     assert "-crf 18" in FORMATS["ffmpeg"].ffmpeg_params
 
 
-def test_default_save_method_resolution():
-    assert default_save_method(RecordConfig()) == "ffmpeg"  # default
-    assert default_save_method(RecordConfig(save_method="raw")) == "raw"
-    assert default_save_method(RecordConfig(save_method="ffmpeg")) == "ffmpeg"
+class _ListSink(AsyncFrameWriter):
+    def _open_sink(self, filename, fps, frame_size):
+        self.written = []
+
+    def _write_frame(self, frame):
+        self.written.append(frame)
+
+    def _close_sink(self):
+        pass
 
 
-def test_default_save_method_unknown_falls_back_to_ffmpeg():
-    # A stray/unknown save_method must never stop a recording; it falls back to
-    # ffmpeg. (RecordConfig's lenient validation coerces a bad Literal back to
-    # the default, so exercise the resolver directly with a bare object too.)
-    class _Bogus:
-        save_method = "bogus"
-
-    assert default_save_method(_Bogus()) == "ffmpeg"
-
-
-def test_transcode_raw_without_geometry_raises(tmp_path):
-    # A .raw stream carries no geometry: without width/height/fps the frame
-    # layout is unknown and transcoding must raise (there is no sidecar to read).
-    raw = tmp_path / "orphan.raw"
-    raw.write_bytes(b"\x00" * (WIDTH * HEIGHT))
-    with pytest.raises(FileNotFoundError):
-        transcode_raw(raw)
-    # Supplying only a partial geometry is still insufficient.
-    with pytest.raises(FileNotFoundError):
-        transcode_raw(raw, width=WIDTH, height=HEIGHT)
+def test_fill_before_repeats_the_previous_frame():
+    # A missed trigger pulse rides on the next frame: the writer repeats the
+    # frame before it, so the file keeps one frame per pulse.
+    writer = _ListSink(max_queue_size=10)
+    assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
+    a, b, c = synthetic_frames(3)
+    assert writer.write(a) is WRITTEN
+    assert writer.write(b, fill_before=2) is WRITTEN
+    assert writer.write(c) is WRITTEN
+    writer.close(fill_after=1)
+    assert [id(f) for f in writer.written] == [id(a), id(a), id(a), id(b), id(c), id(c)]
+    assert writer.frames_written == 6
 
 
-def test_ffmpeg_probes_and_transcode_never_grab_the_tty(tmp_path, monkeypatch):
-    # Regression: an ffmpeg with the controlling terminal on stdin flips the tty
-    # to no-echo/cbreak (to watch for keypresses) and only restores on a clean
-    # exit. `octacam doctor`'s NVENC probes launch encodes (probe_nvenc_max_sessions
-    # runs 12 concurrent ones — their save/restore reliably races echo off), and a
-    # timeout-killed encode never restores at all, leaving the user's shell with
-    # invisible input. Every probe/transcode launch must keep ffmpeg off the tty:
-    # -nostdin in the args AND stdin=subprocess.DEVNULL. (The record path is
-    # exempt — it feeds frames through a stdin PIPE — and is not covered here.)
-    import subprocess
-    from types import SimpleNamespace
+def test_a_leading_fill_repeats_the_first_frame():
+    # Nothing written yet (the camera missed the train's first pulse): the fill
+    # repeats the frame it precedes rather than inventing one.
+    writer = _ListSink(max_queue_size=10)
+    assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
+    (a,) = synthetic_frames(1)
+    assert writer.write(a, fill_before=2) is WRITTEN
+    writer.close()
+    assert [id(f) for f in writer.written] == [id(a)] * 3
 
-    import octacam.writer as writer_mod
 
-    def assert_off_tty(cmd, kwargs, what):
-        assert "-nostdin" in cmd, f"{what}: missing -nostdin in {cmd}"
-        assert kwargs.get("stdin") is subprocess.DEVNULL, (
-            f"{what}: stdin not redirected to DEVNULL (kwargs={kwargs})"
-        )
+def test_a_fill_is_never_dropped_on_its_own():
+    # The fill travels with its frame: if the queue is full both are refused
+    # together (the caller re-owes them on the next write), never the fill alone.
+    writer = _SlowSink(max_queue_size=1)
+    assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
+    frames = synthetic_frames(6)
+    owed, accepted = 0, 0
+    for frame in frames:
+        if writer.write(frame, fill_before=owed) is WRITTEN:
+            accepted += 1 + owed
+            owed = 0
+        else:
+            owed += 1
+    writer.close(fill_after=owed)
+    assert len(writer.written) == len(frames)
 
-    # 1. ffmpeg_encoder_works — a single real encode via subprocess.run.
-    writer_mod._ENCODER_OK.clear()
-    runs: list[tuple[list, dict]] = []
 
-    def fake_run(cmd, **kwargs):
-        runs.append((cmd, kwargs))
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+class _GatedSink(AsyncFrameWriter):
+    """Writes a frame only once the test lets it through."""
 
-    monkeypatch.setattr(writer_mod.subprocess, "run", fake_run)
-    assert writer_mod.ffmpeg_encoder_works("/fake/ffmpeg", "h264_nvenc") is True
-    assert runs, "encoder probe should have launched ffmpeg"
-    assert_off_tty(runs[0][0], runs[0][1], "ffmpeg_encoder_works")
+    def _open_sink(self, filename, fps, frame_size):
+        import threading
 
-    # 2. probe_nvenc_max_sessions — up to 12 concurrent encodes via Popen.
-    monkeypatch.setattr(writer_mod, "find_ffmpeg", lambda **_: "/fake/ffmpeg")
-    launches: list[tuple[list, dict]] = []
+        self.gate = threading.Semaphore(0)
+        self.entered = 0  # frames the sink has taken, written or held at the gate
+        self.written = []
 
-    class FakeProc:
-        def __init__(self, cmd, **kwargs):
-            launches.append((cmd, kwargs))
+    def _write_frame(self, frame):
+        self.entered += 1
+        self.gate.acquire()
+        self.written.append(frame)
 
-        def wait(self, timeout=None):
-            return 0
+    def _close_sink(self):
+        pass
 
-    monkeypatch.setattr(writer_mod.subprocess, "Popen", FakeProc)
-    assert writer_mod.probe_nvenc_max_sessions(ceiling=12) == 12
-    assert len(launches) == 12
-    for cmd, kwargs in launches:
-        assert_off_tty(cmd, kwargs, "probe_nvenc_max_sessions")
 
-    # 3. _reporting_args injects -nostdin for both the piped-progress and the
-    #    opt-in raw-view transcode modes (grid xstack routes through here too).
-    for raw in (False, True):
-        flags = writer_mod._reporting_args(["/fake/ffmpeg", "-i", "in.mkv"], raw)
-        assert "-nostdin" in flags, f"_reporting_args(raw_output={raw}) missing -nostdin"
+def _gated(max_queue_size):
+    """A gated writer holding its first frame at the gate, so its queue has room
+    for exactly `max_queue_size` more.
+    """
+    writer = _GatedSink(max_queue_size=max_queue_size)
+    assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
+    assert writer.write(synthetic_frames(1)[0]) is WRITTEN
+    _held(writer)
+    return writer
+
+
+def _held(writer):
+    """Wait until the sink holds the next frame at its gate."""
+    assert wait_until(
+        lambda: writer.entered > writer.frames_written, timeout=2.0, interval=0.001
+    )
+
+
+def _let_through(writer, n):
+    """Let `n` more frames reach the sink and wait until they have."""
+    target = writer.frames_written + n
+    for _ in range(n):
+        writer.gate.release()
+    assert wait_until(
+        lambda: writer.frames_written >= target, timeout=2.0, interval=0.001
+    )
+
+
+def _finish(writer):
+    for _ in range(64):
+        writer.gate.release()
+    writer.close()
+
+
+def test_a_transient_stall_is_refused_however_often_it_recurs():
+    # Each stall refuses fewer frames than the queue holds and the sink catches
+    # up before the next one: every refused frame is owed (filled), none skipped.
+    writer = _gated(4)
+    frame = synthetic_frames(1)[0]
+    for _ in range(3):
+        assert [writer.write(frame) for _ in range(8)] == [WRITTEN] * 4 + [REFUSED] * 4
+        _let_through(writer, 5)
+        assert writer.write(frame) is WRITTEN  # caught up: the refusal run restarts
+        _held(writer)
+    _finish(writer)
+
+
+def test_a_sustained_shortfall_is_skipped_for_the_rest_of_the_file():
+    # More than a queue's worth refused before the sink catches up: filling it
+    # would snowball, so every later refusal is skipped, even after a catch-up.
+    writer = _gated(4)
+    frame = synthetic_frames(1)[0]
+    assert [writer.write(frame) for _ in range(9)] == (
+        [WRITTEN] * 4 + [REFUSED] * 4 + [SKIPPED]
+    )
+    _let_through(writer, 5)
+    assert writer.write(frame) is WRITTEN
+    _held(writer)
+    assert [writer.write(frame) for _ in range(5)] == [WRITTEN] * 4 + [SKIPPED]
+    _finish(writer)
+
+
+def test_the_catch_up_counts_the_fills_riding_on_each_queued_frame():
+    # One queued frame carrying three fills is four frames behind, not one: the
+    # sink has not caught up, so the refusal run stands.
+    writer = _gated(4)
+    frame = synthetic_frames(1)[0]
+    assert [writer.write(frame) for _ in range(7)] == [WRITTEN] * 4 + [REFUSED] * 3
+    _let_through(writer, 4)
+    _held(writer)
+    assert writer.write(frame, fill_before=3) is WRITTEN
+    assert [writer.write(frame) for _ in range(5)] == [WRITTEN] * 3 + [REFUSED, SKIPPED]
+    _finish(writer)
+    assert writer.frames_written == 4 + 1 + 4 + 3
+
+
+def test_a_failed_sink_only_ever_refuses():
+    writer = _FailingSink(fail_after=0, max_queue_size=1)
+    assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
+    frame = synthetic_frames(1)[0]
+    assert writer.write(frame) is WRITTEN
+    assert wait_until(lambda: writer.failed, timeout=2.0, interval=0.001)
+    assert {writer.write(frame) for _ in range(10)} == {REFUSED}
+    writer.close()

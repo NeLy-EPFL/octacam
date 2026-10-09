@@ -1,12 +1,12 @@
 """TOML config writer: round-trip fidelity, strftime safety, atomic writes."""
 
 import glob
+import tomllib
 from pathlib import Path
 
 import pytest
 
 from octacam import config_writer as cw
-from octacam._compat import tomllib
 from octacam.config import parse_config, parse_record_section
 
 PRESETS = sorted(glob.glob("configs/*/octacam_config.toml"))
@@ -94,12 +94,13 @@ def test_dumps_serializes_date_and_datetime():
     doc = {
         "record": {
             "directory": datetime.date(2026, 7, 9),
-            "stamp": datetime.datetime(2026, 7, 9, 13, 30, 5),
+            # A TOML local date-time.
+            "stamp": datetime.datetime(2026, 7, 9, 13, 30, 5),  # noqa: DTZ001
         }
     }
     reparsed = tomllib.loads(cw._dumps(doc))["record"]
     assert reparsed["directory"] == datetime.date(2026, 7, 9)
-    assert reparsed["stamp"] == datetime.datetime(2026, 7, 9, 13, 30, 5)
+    assert reparsed["stamp"] == datetime.datetime(2026, 7, 9, 13, 30, 5)  # noqa: DTZ001
 
 
 def test_plugin_options_roundtrip():
@@ -154,13 +155,16 @@ def test_visualization_and_transfer_sections_roundtrip():
 
 
 @pytest.mark.parametrize("name", ["", "  ", ".", "..", "a/b", "a\\b", "/abs", "x/../y"])
-def test_safe_config_name_rejects(name):
-    with pytest.raises(ValueError):
-        cw.safe_config_name(name)
+def test_new_config_dir_rejects_unsafe_names(tmp_path, name):
+    with pytest.raises(ValueError, match="^Invalid config name: "):
+        cw.resolve_new_config_dir(tmp_path / "active", name)
 
 
-def test_safe_config_name_accepts():
-    assert cw.safe_config_name(" my_rig ") == "my_rig"
+def test_new_config_dir_name_is_stripped(tmp_path):
+    assert (
+        cw.resolve_new_config_dir(tmp_path / "active", " my_rig ")
+        == tmp_path / "my_rig"
+    )
 
 
 def test_resolve_new_config_dir_collision(tmp_path):
@@ -170,22 +174,6 @@ def test_resolve_new_config_dir_collision(tmp_path):
         cw.resolve_new_config_dir(tmp_path / "active", "exists")
     assert cw.resolve_new_config_dir(tmp_path / "active", "exists", overwrite=True)
     assert cw.resolve_new_config_dir(tmp_path / "active", "fresh") == tmp_path / "fresh"
-
-
-def test_atomic_write_leaves_no_temp(tmp_path):
-    cw.atomic_write_text(tmp_path / "octacam_config.toml", "[gui]\nfps_default = 1.0\n")
-    assert (tmp_path / "octacam_config.toml").exists()
-    assert not list(tmp_path.glob(".octacam-*"))
-
-
-def test_read_pfs_files(tmp_path):
-    (tmp_path / "0815-0000.pfs").write_text("live\n")
-    (tmp_path / "fictrac_camera_config.pfs").write_text("aux\n")
-    (tmp_path / "octacam_config.toml").write_text("[gui]\n")  # non-.pfs ignored
-    out = cw.read_pfs_files(tmp_path)
-    assert out == {"0815-0000": "live\n", "fictrac_camera_config": "aux\n"}
-    # a missing directory yields an empty map rather than raising
-    assert cw.read_pfs_files(tmp_path / "nope") == {}
 
 
 def test_copy_auxiliary_pfs_skips_live_serials(tmp_path):
@@ -204,26 +192,18 @@ def test_pfs_helpers_honor_a_non_pfs_extension(tmp_path):
     # The persistence generalization: a FLIR/fake backend persists per-camera
     # files under its own extension; the helpers must round-trip those too.
     cw.write_pfs_files(tmp_path, {"FAKE-0": "{}\n"}, extension="json")
-    assert (tmp_path / "FAKE-0.json").exists()
+    assert (tmp_path / "FAKE-0.json").read_text() == "{}\n"
     assert not (tmp_path / "FAKE-0.pfs").exists()
-    assert cw.read_pfs_files(tmp_path, extension="json") == {"FAKE-0": "{}\n"}
-    # the default extension stays "pfs" and ignores the json file
-    assert cw.read_pfs_files(tmp_path) == {}
 
 
 def test_pfs_helpers_handle_a_mixed_vendor_rig(tmp_path):
-    # A Basler+FLIR rig writes each camera's params in its own format and reads
-    # them all back: write_pfs_files takes a per-serial extension map, and
-    # read_pfs_files / copy_auxiliary_pfs take the set of suffixes in play.
+    # A Basler+FLIR rig writes each camera's params in its own format:
+    # write_pfs_files takes a per-serial extension map, and copy_auxiliary_pfs
+    # the set of suffixes in play.
     ext_by_serial = {"BAS-1": "pfs", "FLIR-1": "json"}
     cw.write_pfs_files(tmp_path, {"BAS-1": "<pfs/>\n", "FLIR-1": "{}\n"}, ext_by_serial)
-    assert (tmp_path / "BAS-1.pfs").exists()
-    assert (tmp_path / "FLIR-1.json").exists()
-
-    both = cw.read_pfs_files(tmp_path, ("pfs", "json"))
-    assert both == {"BAS-1": "<pfs/>\n", "FLIR-1": "{}\n"}
-    # A single suffix still reads only its own files.
-    assert cw.read_pfs_files(tmp_path, "json") == {"FLIR-1": "{}\n"}
+    assert (tmp_path / "BAS-1.pfs").read_text() == "<pfs/>\n"
+    assert (tmp_path / "FLIR-1.json").read_text() == "{}\n"
 
     # copy_auxiliary_pfs preserves non-live per-camera files across both formats.
     (tmp_path / "aux.pfs").write_text("<aux/>\n")
@@ -283,7 +263,7 @@ def test_with_process_params_noop_when_values_match():
 
 
 def test_with_process_params_adds_sections_only_when_diverging():
-    from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
+    from octacam.transcode import DEFAULT_TRANSCODE_FFMPEG_PARAMS
 
     # No [transcode]/[transfer] and default/blank values -> no sections added,
     # so a rig without a transfer destination never grows an empty one.
@@ -398,7 +378,10 @@ def test_with_record_settings_duration_units(unit, fps, duration_s, expected):
     assert (record["duration"], record["duration_unit"]) == expected
     # Whatever the unit, the snapshot loads back as the recorded length.
     reloaded = parse_record_section(edited)
-    assert duration_to_seconds(reloaded.duration, reloaded.duration_unit, fps) == duration_s
+    assert (
+        duration_to_seconds(reloaded.duration, reloaded.duration_unit, fps)
+        == duration_s
+    )
 
 
 def test_with_record_settings_rescales_frames_when_only_fps_changed():
@@ -460,3 +443,52 @@ def test_with_plugin_options_noop_when_nothing_to_add():
     raw = {"plugins": [{"name": "triggerbox", "options": {"device": "x"}}]}
     assert cw.with_plugin_options(raw, {"triggerbox": {}}) == raw
     assert cw.with_plugin_options({}, {}) == {}
+
+
+# --------------------------------------------------- with_camera_transforms
+
+
+def _rig_cameras():
+    return {
+        "cameras": [
+            {"serial_number": "A", "name": "top", "scale_x": 2.0, "rotation_deg": 0.0},
+            {"serial_number": "B", "name": "bottom", "scale_y": -1.0},
+        ]
+    }
+
+
+def test_with_camera_transforms_noop_when_nothing_changed():
+    raw = _rig_cameras()
+    live = {
+        "A": {"rotation_deg": 0, "flip_h": False, "flip_v": False},
+        "B": {"rotation_deg": 0, "flip_h": False, "flip_v": True},
+    }
+    assert cw.with_camera_transforms(raw, live) == raw
+
+
+def test_with_camera_transforms_patches_rotation_and_flips():
+    # The capillary rig's PR-test takes: top rotated 90 deg in the View tab, which
+    # the recording baked in but the snapshot did not carry.
+    raw = _rig_cameras()
+    live = {
+        "A": {"rotation_deg": 90, "flip_h": True, "flip_v": False},
+        "B": {"rotation_deg": 0, "flip_h": False, "flip_v": False},
+    }
+    doc = cw.with_camera_transforms(raw, live)
+    top, bottom = doc["cameras"]
+    assert top == {
+        "serial_number": "A",
+        "name": "top",
+        "scale_x": -2.0,  # the flip is the sign; the magnitude is kept
+        "scale_y": 1.0,
+        "rotation_deg": 90.0,
+    }
+    assert bottom["scale_y"] == 1.0 and bottom["rotation_deg"] == 0.0
+    assert raw == _rig_cameras()  # the input is not mutated
+
+
+def test_with_camera_transforms_never_adds_a_camera():
+    # Listing a camera changes which cameras the rig opens: only patch entries.
+    live = {"C": {"rotation_deg": 180, "flip_h": False, "flip_v": False}}
+    assert cw.with_camera_transforms(_rig_cameras(), live) == _rig_cameras()
+    assert cw.with_camera_transforms({"record": {}}, live) == {"record": {}}

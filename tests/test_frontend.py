@@ -1,20 +1,20 @@
 """Browser-driven tests for the vanilla-JS Record tab.
 
-Loads the *real* ES modules (``web/static/js/record.js`` and its imports) in a
-headless Chromium against the *real* ``index.html`` DOM, so the GUI wiring —
-which fields exist, when they enable/disable, applySettings round-trips — is
+Loads the *real* ES modules (`web/static/js/record.js` and its imports) in a
+headless Chromium against the *real* `index.html` DOM, so the GUI wiring --
+which fields exist, when they enable/disable, applySettings round-trips -- is
 exercised the way a browser actually runs it. This is the automated counterpart
 to the manual "GUI headless render" recipe in CLAUDE.md, and it is what catches
 the class of bug where a backend setting ships without a GUI control.
 
-Opt-in: the ``playwright`` package lives in the ``frontend`` dependency group,
-so the default ``uv run pytest`` skips this whole module (importorskip). Run it
-with::
+Opt-in: conftest collects this module only when the command line names it, and
+the `playwright` package lives in the `frontend` dependency group (the
+module skips without it). Run it with::
 
     uv run --group frontend pytest tests/test_frontend.py
 
-The first time also needs a browser: ``uv run --group frontend playwright
-install chromium``. If no usable Chromium is present the tests skip rather than
+The first time also needs a browser: `uv run --group frontend playwright
+install chromium`. If no usable Chromium is present the tests skip rather than
 fail, so CI without the browser stays green.
 """
 
@@ -31,7 +31,7 @@ import pytest
 
 pytest.importorskip("playwright.sync_api")
 
-from playwright.sync_api import (  # noqa: E402  (after importorskip)
+from playwright.sync_api import (
     Error as PlaywrightError,
 )
 from playwright.sync_api import (
@@ -78,7 +78,8 @@ NVENC_FORMATS = [
 @pytest.fixture(scope="session")
 def static_server():
     """Serve web/static over HTTP so the browser can load ES modules (file://
-    origins can't ``import``)."""
+    origins can't `import`).
+    """
     handler = functools.partial(
         http.server.SimpleHTTPRequestHandler, directory=str(STATIC)
     )
@@ -90,6 +91,7 @@ def static_server():
         yield f"http://127.0.0.1:{httpd.server_address[1]}"
     finally:
         httpd.shutdown()
+        httpd.server_close()
 
 
 @pytest.fixture(scope="session")
@@ -125,7 +127,8 @@ def page(static_server, browser):
 
 def make_tab(page: Page, formats=DEFAULT_FORMATS) -> None:
     """Construct the real RecordTab against the loaded DOM, exposed as
-    ``window.__tab``. Uses no-op plugin/notify deps so no network is touched."""
+    `window.__tab`. Uses no-op plugin/notify deps so no network is touched.
+    """
     page.evaluate(
         """async (formats) => {
             const m = await import('./js/record.js');
@@ -148,9 +151,7 @@ def prop(page: Page, selector: str, expr: str):
 
 def test_save_method_dropdown_populated_from_formats(page):
     make_tab(page)
-    values = page.eval_on_selector_all(
-        "#format option", "els => els.map(e => e.value)"
-    )
+    values = page.eval_on_selector_all("#format option", "els => els.map(e => e.value)")
     assert values == ["ffmpeg", "raw"]
 
 
@@ -172,7 +173,8 @@ def test_writer_queue_size_round_trips_from_settings(page):
 
 def test_writer_queue_size_change_rounds_to_int(page):
     """A typed non-integer must be rounded before the PUT (the server rejects a
-    float writer_queue_size), and the rounded value written back to the input."""
+    float writer_queue_size), and the rounded value written back to the input.
+    """
     make_tab(page)
     body = page.evaluate(
         """async () => {
@@ -207,8 +209,9 @@ def _rows(page):
 
 
 def test_save_method_swaps_param_boxes(page):
-    """The core fix: exactly the selected method's encoder box shows — the CPU
-    box for ffmpeg, the GPU box + session cap for nvenc, neither for raw."""
+    """The core fix: exactly the selected method's encoder box shows -- the CPU
+    box for ffmpeg, the GPU box + session cap for nvenc, neither for raw.
+    """
     make_tab(page, formats=NVENC_FORMATS)
     page.evaluate("() => window.__tab.applySettings({ save_method: 'ffmpeg' })")
     assert _rows(page) == {"ffmpeg": False, "nvenc": True, "sessions": True}
@@ -248,7 +251,8 @@ def test_max_nvenc_sessions_auto_and_override(page):
 
 def test_nvenc_capabilities_displayed_and_default_filled(page):
     """Selecting nvenc lazily fetches the detected GPU cap, shows it, and (in auto
-    mode) mirrors it into the disabled session box."""
+    mode) mirrors it into the disabled session box.
+    """
     make_tab(page, formats=NVENC_FORMATS)
     result = page.evaluate(
         """async () => {
@@ -260,7 +264,8 @@ def test_nvenc_capabilities_displayed_and_default_filled(page):
                     encoder: 'h264_nvenc', default_params: 'x',
                 }),
             });
-            window.__tab.applySettings({ save_method: 'nvenc', max_nvenc_sessions: null });
+            window.__tab.applySettings({ save_method: 'nvenc', max_nvenc_sessions: null
+            });
             await new Promise((r) => setTimeout(r, 0));
             await new Promise((r) => setTimeout(r, 0));
             return {
@@ -276,7 +281,8 @@ def test_nvenc_capabilities_displayed_and_default_filled(page):
 def test_nvenc_auto_toggle_change_sends_null_then_number(page):
     """The #nvenc-auto change handler: checking sends max_nvenc_sessions:null and
     disables the box; unchecking with a blank box seeds the detected cap (never a
-    silent 0) and PUTs it."""
+    silent 0) and PUTs it.
+    """
     make_tab(page, formats=NVENC_FORMATS)
     result = page.evaluate(
         """async () => {
@@ -344,7 +350,7 @@ def _flip_advanced(page, on: bool) -> None:
 
 # The exact essentials/advanced partition from the spec. Parametrized below so a
 # regression that pushes an essential into the advanced block (or leaves an
-# advanced knob among the essentials) fails a named case — not just the two-field
+# advanced knob among the essentials) fails a named case -- not just the two-field
 # spot-check the toggle test would otherwise give.
 ESSENTIAL_IDS = ["duration-value", "fps", "record-dir", "relative-dir", "transfer-dir"]
 ADVANCED_IDS = [
@@ -390,23 +396,27 @@ def test_advanced_fields_are_inside_advanced(page, field_id):
 
 
 def init_shortcuts(page: Page) -> None:
-    """Install the real shortcut layer against the loaded DOM. ``window.__calls``
-    records every method the (fake) grid receives, as ``[name, ...args]``."""
+    """Install the real shortcut layer against the loaded DOM. `window.__calls`
+    records every method the (fake) grid receives, as `[name, ...args]`.
+    """
     page.evaluate(
         """async () => {
             const m = await import('./js/shortcuts.js');
+            const t = await import('./js/tabs.js');
             window.__calls = [];
             const grid = new Proxy({}, {
                 get: (_, k) => (...args) => { window.__calls.push([k, ...args]); },
             });
-            window.__sc = m.initShortcuts({ grid });
+            m.initShortcuts({ grid, tabs: new t.TabBar(document.getElementById("tabs"))
+            });
         }"""
     )
 
 
 def key(page: Page, k: str, *, target: str | None = None, **mods) -> None:
-    """Dispatch a keydown. With ``target``, the event originates on that element
-    (so the typing-suppression guard sees it); otherwise on ``document``."""
+    """Dispatch a keydown. With `target`, the event originates on that element
+    (so the typing-suppression guard sees it); otherwise on `document`.
+    """
     page.evaluate(
         """({ k, target, mods }) => {
             const el = target ? document.querySelector(target) : document;
@@ -424,8 +434,9 @@ def _hidden(page: Page, selector: str) -> bool:
 
 
 def test_bare_key_shortcut_fires_and_is_suppressed_while_typing(page):
-    """``t`` toggles the theme via the real button — but never while a text
-    field holds focus (the edit-heavy GUI must not let bare keys eat input)."""
+    """`t` toggles the theme via the real button -- but never while a text
+    field holds focus (the edit-heavy GUI must not let bare keys eat input).
+    """
     init_shortcuts(page)
     page.evaluate(
         """() => {
@@ -442,8 +453,9 @@ def test_bare_key_shortcut_fires_and_is_suppressed_while_typing(page):
 
 
 def test_record_shortcut_respects_disabled(page):
-    """Ctrl+Enter drives #record-button, and is a no-op while it's disabled — so
-    it inherits the app's connected/finishing/pending gating for free."""
+    """Ctrl+Enter drives #record-button, and is a no-op while it's disabled -- so
+    it inherits the app's connected/finishing/pending gating for free.
+    """
     init_shortcuts(page)
     disabled = page.evaluate(
         """() => {
@@ -476,8 +488,9 @@ def test_global_preview_shortcuts_call_grid(page):
 
 
 def test_view_shortcut_scoped_to_active_tab(page):
-    """``r`` rotates only while the View tab is active; on another tab it's inert
-    (so the same letter is free to mean other things per tab)."""
+    """`r` rotates only while the View tab is active; on another tab it's inert
+    (so the same letter is free to mean other things per tab).
+    """
     init_shortcuts(page)
     key(page, "r")  # Record tab is active by default
     assert page.evaluate("() => window.__calls.length") == 0
@@ -491,9 +504,10 @@ def test_view_shortcut_scoped_to_active_tab(page):
     ]
 
 
-def test_digit_switches_tab_by_fixed_order(page):
-    """Digit 3 clicks the View tab button (3rd in the fixed order), independent
-    of overflow-menu packing."""
+def test_digit_switches_tab_by_tab_order(page):
+    """Digit 3 clicks the View tab button (3rd in the tab bar's order),
+    independent of overflow-menu packing.
+    """
     init_shortcuts(page)
     clicks = page.evaluate(
         """() => {
@@ -512,8 +526,9 @@ def test_digit_switches_tab_by_fixed_order(page):
 
 
 def test_help_overlay_toggles_and_lists_bindings(page):
-    """``?`` opens the help overlay (rendered from the binding table), Escape
-    closes it; it lists the sections and real keycaps."""
+    """`?` opens the help overlay (rendered from the binding table), Escape
+    closes it; it lists the sections and real keycaps.
+    """
     init_shortcuts(page)
     assert _hidden(page, "#shortcuts-overlay") is True
     key(page, "?")
@@ -522,7 +537,8 @@ def test_help_overlay_toggles_and_lists_bindings(page):
         """() => {
             const c = document.querySelector('#shortcuts-overlay .shortcuts-card');
             return {
-                groups: [...c.querySelectorAll('.shortcuts-group-head')].map(e => e.textContent),
+                groups: [...c.querySelectorAll('.shortcuts-group-head')].map(e =>
+                e.textContent),
                 kbds: [...c.querySelectorAll('kbd')].map(k => k.textContent),
                 text: c.textContent,
             };
@@ -545,7 +561,8 @@ def test_record_button_gets_shortcut_title_hint(page):
 def test_grid_keyboard_helpers_drive_selection_and_zoom(page):
     """The new CameraGrid helpers the shortcuts call: selectNext/Prev wrap the
     selection, zoomSelected/resetZoomSelected move zoom (and notify the server),
-    and toggleMaximizeSelected maximizes the current tile."""
+    and toggleMaximizeSelected maximizes the current tile.
+    """
     result = page.evaluate(
         """async () => {
             const m = await import('./js/grid.js');
@@ -580,7 +597,8 @@ def test_grid_keyboard_helpers_drive_selection_and_zoom(page):
 
 def test_advanced_toggle_reveals_and_hides_and_persists(page):
     """Flipping the switch shows/hides the advanced block and remembers the
-    choice in localStorage."""
+    choice in localStorage.
+    """
     make_tab(page)
     _flip_advanced(page, True)
     assert prop(page, "#record-advanced", "e => e.hidden") is False
@@ -666,8 +684,10 @@ def test_shutdown_offers_three_way_choice_when_work_exists(page):
     _make_shutdown(page)
     result = page.evaluate(
         """async () => {
-            const p = window.__sd.confirm({ recordingActive: false, hasWork: true, peerCount: 1 });
-            const visible = !document.getElementById('shutdown-dialog').classList.contains('hidden');
+            const p = window.__sd.confirm({ recordingActive: false, hasWork: true,
+            peerCount: 1 });
+            const visible =
+            !document.getElementById('shutdown-dialog').classList.contains('hidden');
             const btns = ['shutdown-cancel', 'shutdown-plain', 'shutdown-process']
                 .every(id => document.getElementById(id) !== null);
             document.getElementById('shutdown-process').click();
@@ -681,7 +701,8 @@ def test_shutdown_plain_button_resolves_shutdown(page):
     _make_shutdown(page)
     choice = page.evaluate(
         """async () => {
-            const p = window.__sd.confirm({ recordingActive: false, hasWork: true, peerCount: 1 });
+            const p = window.__sd.confirm({ recordingActive: false, hasWork: true,
+            peerCount: 1 });
             document.getElementById('shutdown-plain').click();
             return await p;
         }"""
@@ -693,7 +714,7 @@ def test_shutdown_confirms_even_when_nothing_recorded(page):
     """The no-work path still asks before killing the server.
 
     It used to return "shutdown" immediately, so the one path /api/shutdown
-    actually honours had no confirmation at all — from a bare icon button sitting
+    actually honours had no confirmation at all -- from a bare icon button sitting
     next to save-config. The three-way modal stays out of the way (there is
     nothing to process), but a plain confirm is not optional.
     """
@@ -702,8 +723,10 @@ def test_shutdown_confirms_even_when_nothing_recorded(page):
         """async () => {
             const asked = [];
             window.confirm = (m) => { asked.push(m); return true; };
-            const choice = await window.__sd.confirm({ recordingActive: false, hasWork: false });
-            const hidden = document.getElementById('shutdown-dialog').classList.contains('hidden');
+            const choice = await window.__sd.confirm({ recordingActive: false, hasWork:
+            false });
+            const hidden =
+            document.getElementById('shutdown-dialog').classList.contains('hidden');
             return { choice, hidden, asked: asked.length };
         }"""
     )
@@ -715,7 +738,8 @@ def test_shutdown_declined_when_nothing_recorded_cancels(page):
     choice = page.evaluate(
         """async () => {
             window.confirm = () => false;  // operator backs out
-            return await window.__sd.confirm({ recordingActive: false, hasWork: false });
+            return await window.__sd.confirm({ recordingActive: false, hasWork: false
+            });
         }"""
     )
     assert choice == "cancel"
@@ -723,13 +747,15 @@ def test_shutdown_declined_when_nothing_recorded_cancels(page):
 
 def test_shutdown_warns_about_other_browsers_on_every_path(page):
     """The peer warning used to exist only on the recordingActive path, which the
-    server rejects with 409 — so in practice nobody ever saw it."""
+    server rejects with 409 -- so in practice nobody ever saw it.
+    """
     _make_shutdown(page)
     message = page.evaluate(
         """async () => {
             let seen = "";
             window.confirm = (m) => { seen = m; return true; };
-            await window.__sd.confirm({ recordingActive: false, hasWork: false, peerCount: 3 });
+            await window.__sd.confirm({ recordingActive: false, hasWork: false,
+            peerCount: 3 });
             return seen;
         }"""
     )
@@ -742,8 +768,10 @@ def test_shutdown_while_recording_uses_binary_confirm(page):
         """async () => {
             window.confirm = () => true;  // operator accepts the speed-bump
             const modalShown = [];
-            const choice = await window.__sd.confirm({ recordingActive: true, hasWork: false, peerCount: 2 });
-            const hidden = document.getElementById('shutdown-dialog').classList.contains('hidden');
+            const choice = await window.__sd.confirm({ recordingActive: true, hasWork:
+            false, peerCount: 2 });
+            const hidden =
+            document.getElementById('shutdown-dialog').classList.contains('hidden');
             return { choice, hidden };  // no 3-way modal while recording
         }"""
     )
@@ -755,7 +783,7 @@ def test_shortcuts_suppressed_while_shutdown_dialog_open(page):
 
     #shutdown-dialog was added without being listed in suppressed(), so with the
     Shut down / Shut down & process dialog open and awaiting a choice, `t`/`f`/`x`
-    and friends still acted on the app behind it — and Ctrl+Enter clicked
+    and friends still acted on the app behind it -- and Ctrl+Enter clicked
     #record-button, starting a recording that made the pending shutdown 409.
     """
     init_shortcuts(page)
@@ -799,7 +827,8 @@ def test_ctrl_enter_does_not_record_while_shutdown_dialog_open(page):
 def test_save_config_button_disabled_until_cameras_exist(page):
     """It is wired in buildCameras(), so before that (and forever, if camera init
     fails) clicking it or pressing Ctrl+S silently did nothing while it looked
-    live. It must read as disabled until it actually works."""
+    live. It must read as disabled until it actually works.
+    """
     assert prop(page, "#save-config-btn", "e => e.disabled") is True
 
 
@@ -807,7 +836,8 @@ def test_shutdown_cancel_button_resolves_cancel(page):
     _make_shutdown(page)
     choice = page.evaluate(
         """async () => {
-            const p = window.__sd.confirm({ recordingActive: false, hasWork: true, peerCount: 1 });
+            const p = window.__sd.confirm({ recordingActive: false, hasWork: true,
+            peerCount: 1 });
             document.getElementById('shutdown-cancel').click();
             return await p;
         }"""
@@ -850,6 +880,7 @@ def _system_payload(*, ready, plugins=None):
         "update": None,
         "ready": ready,
         "init_error": None,
+        "missing_cameras": [],
         "config_dir": "/x",
         "plugins": plugins or {},
         "managed_trigger_available": False,
@@ -869,7 +900,6 @@ def _system_payload(*, ready, plugins=None):
                 "name": "cam0",
                 "width": 640,
                 "height": 480,
-                "params": {},
                 "layout": {
                     "window_x": -1.0,
                     "window_y": -1.0,
@@ -902,7 +932,8 @@ def _state_payload(*, ready):
 def test_grid_placeholder_shows_then_fills_on_system_push(static_server, browser):
     """The real main() serves the shell immediately against a not-ready system
     (loading placeholder, no tiles), then builds the grid when a ready `system`
-    message arrives over the socket — the whole point of deferred startup."""
+    message arrives over the socket -- the whole point of deferred startup.
+    """
     page = browser.new_page()
     ready = {"v": False}
 
@@ -937,7 +968,7 @@ def test_grid_placeholder_shows_then_fills_on_system_push(static_server, browser
             {"type": "system", **_system_payload(ready=True)},
         )
 
-        # The grid fills in and the placeholder is gone — no reload.
+        # The grid fills in and the placeholder is gone -- no reload.
         page.wait_for_selector("#grid .tile", timeout=5000)
         assert page.eval_on_selector_all("#grid .tile", "els => els.length") == 1
         assert page.eval_on_selector_all(".grid-placeholder", "els => els.length") == 0
@@ -977,13 +1008,14 @@ def test_triggerbox_auto_strobe_updates_when_the_camera_system_attaches(
 ):
     """An Auto strobe's on-time reaches the timing plot after deferred startup.
 
-    Serve-first startup means the triggerbox tab is constructed — and reads
-    /api/triggerbox/exposures — while the server still holds the hardware-free
+    Serve-first startup means the triggerbox tab is constructed -- and reads
+    /api/triggerbox/exposures -- while the server still holds the hardware-free
     placeholder camera system, so it sees zero exposures and every Auto (cover
     exposure) strobe falls back to its manual duty percent. The `system` push
     that fills the grid in must also make the tab re-read the exposures, or the
     plot disagrees with the on-time the board is actually armed with for the
-    whole session."""
+    whole session.
+    """
     page = browser.new_page()
     ready = {"v": False}
     exposure_reads = {"n": 0}
@@ -1000,8 +1032,14 @@ def test_triggerbox_auto_strobe_updates_when_the_camera_system_attaches(
         # Before the cameras open the endpoint reports no cameras at all (it
         # iterates controller.camera_system, which is CameraSystem.pending()).
         cameras = (
-            [{"index": 0, "name": "cam0", "exposure_us": 5000.0,
-              "trigger_delay_us": 0.0}]
+            [
+                {
+                    "index": 0,
+                    "name": "cam0",
+                    "exposure_us": 5000.0,
+                    "trigger_delay_us": 0.0,
+                }
+            ]
             if ready["v"]
             else []
         )
@@ -1055,16 +1093,17 @@ def test_triggerbox_auto_strobe_updates_when_the_camera_system_attaches(
         # The Auto strobe now brackets the longest exposure + the guard band.
         page.wait_for_function(
             """() => document.getElementById('triggerbox-timing-summary')
-                     ?.textContent.includes('longest exposure 5.00 ms + 100 µs guard')""",
+                     ?.textContent.includes(
+                         'longest exposure 5.00 ms + 100 \N{MICRO SIGN}s guard')""",
             timeout=5000,
         )
         assert (
             page.eval_on_selector(
                 "#triggerbox-timing-viz rect.tb-led title", "el => el.textContent"
             )
-            == "on 5.10 ms"  # 5 ms exposure + 100 µs guard
+            == "on 5.10 ms"  # 5 ms exposure + 100 us guard
         )
-        # …and the guard band is drawn past the exposure it covers.
+        # ...and the guard band is drawn past the exposure it covers.
         assert (
             page.eval_on_selector_all(
                 "#triggerbox-timing-viz rect.tb-guard", "els => els.length"
@@ -1086,7 +1125,8 @@ def test_flywheel_tab_seeds_its_loop_from_the_configured_command(
     configured per rig and a recording's config snapshot had nothing to restore.
     The plugin now publishes it in its status; the tab must seed the fields from
     it (the sign of n_steps being the initial direction), or a snapshot-restored
-    program would silently run with the markup's defaults instead."""
+    program would silently run with the markup's defaults instead.
+    """
     page = browser.new_page()
     status = {
         "ready": True,
@@ -1106,9 +1146,12 @@ def test_flywheel_tab_seeds_its_loop_from_the_configured_command(
         "web": {"module": "/plugins/flywheel/flywheel.js"},
     }
     plugins = {"flywheel": status}
-    page.route("**/api/**", lambda route: route.fulfill(
-        status=200, content_type="application/json", body="{}"
-    ))
+    page.route(
+        "**/api/**",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body="{}"
+        ),
+    )
     page.route(
         "**/api/system",
         lambda route: route.fulfill(
@@ -1161,5 +1204,375 @@ def test_flywheel_tab_seeds_its_loop_from_the_configured_command(
             "ccw": True,
             "cw": False,
         }
+        # The module owns its tab: the button is added after the core tabs.
+        assert page.eval_on_selector_all(
+            "#tabs button[data-tab]", "els => els.map(e => e.textContent)"
+        ) == ["Record", "Camera", "View", "Benchmark", "Flywheel"]
     finally:
         page.close()
+
+
+def test_incomplete_rig_warning_names_each_missing_camera(static_server, browser):
+    """A rig that opened fewer cameras than its config asks for must not look
+    like a healthy one with a smaller grid: a persistent warning names each
+    missing camera and why. The cameras open after the page is served, so the
+    shortfall arrives with the `system` push that fills the grid in.
+    """
+    page = browser.new_page()
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(builder()),
+        )
+
+    page.route("**/api/**", json_route(dict))
+    page.route("**/api/system", json_route(lambda: _system_payload(ready=False)))
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=False)))
+    page.add_init_script(_WS_STUB)
+    missing = [
+        {"serial": "S1", "reason": "not found"},
+        {"serial": "S2", "reason": "failed to open: device busy"},
+    ]
+
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_selector(".grid-placeholder", timeout=5000)
+        assert _hidden(page, "#rig-alert")
+
+        page.evaluate(
+            "(sys) => window.__pushWs(sys)",
+            {
+                "type": "system",
+                **_system_payload(ready=True),
+                "missing_cameras": missing,
+            },
+        )
+        page.wait_for_selector("#rig-alert", state="visible", timeout=5000)
+        text = page.eval_on_selector("#rig-alert", "el => el.textContent")
+        assert "1 of 3 configured cameras" in text
+        assert "S1: not found" in text
+        assert "S2: failed to open: device busy" in text
+
+        # It stays up on every tab, not only the Record tab.
+        page.click('#tabs button[data-tab="view"]')
+        assert page.is_visible("#rig-alert")
+    finally:
+        page.close()
+
+
+# --- benchmark report (diagnose.js) ----------------------------------------- #
+
+
+def _bench_trial(name, achieved_fps, max_queue_depth):
+    return {
+        "serial": name.upper(),
+        "name": name,
+        "width": 160,
+        "height": 120,
+        "target_fps": 60.0,
+        "achieved_fps": achieved_fps,
+        "grabbed": 300,
+        "dropped": 0,
+        "drop_rate": 0.0,
+        "max_queue_depth": max_queue_depth,
+        "stages": {},
+    }
+
+
+def test_benchmark_queue_peaks_are_of_the_benchmarked_writer_queue(page):
+    """Each queue peak is shown against the writer queue the benchmark ran
+    with (the rig's record.writer_queue_size), not a hard-coded bound.
+    """
+    report = {
+        "backend": "fake",
+        "n_cameras": 1,
+        "target_fps": 60.0,
+        "trigger_source": "software",
+        "save_method": "ffmpeg",
+        "ffmpeg_params": "-c:v libx264",
+        "writer_queue_size": 7,
+        "duration_s": 5.0,
+        "trials": [_bench_trial("cam0", 60.0, 3)],
+        "achieved_fps": 60.0,
+        "drop_rate": 0.0,
+        "achievable": True,
+        "bottleneck": "none",
+        "bottleneck_label": "none",
+        "ceilings": None,
+        "predicted_max_fps": 90.0,
+        "measured_max_fps": None,
+        "max_confirmed": False,
+        "freerun_max_fps": None,
+        "hardware_max_fps": 85.0,
+        "transfer_bound": False,
+        "throughput_mbps": {},
+        "throughput_mbps_total": None,
+        "freerun_trials": [_bench_trial("cam0", 85.0, 5)],
+        "system_cpu_percent": None,
+        "load_per_core": None,
+        "recommendations": [],
+        "jitter_p99_ms": None,
+        "cpu_percent": None,
+        "notes": [],
+    }
+    cells = page.evaluate(
+        """async (report) => {
+            const m = await import('./js/diagnose.js');
+            new m.BenchmarkTab({ notify: () => {} }).applyReport(report);
+            return [...document.querySelectorAll('#bench-results td')]
+                .map((td) => td.textContent);
+        }""",
+        report,
+    )
+    assert "3 of 7" in cells  # the end-to-end trial
+    assert "5 of 7" in cells  # the free-run trial
+
+
+def test_benchmark_progress_only_grows_and_the_verdict_names_the_reports_label(page):
+    """The bar eases toward each step's end of the seconds budget and never
+    moves back; the verdict shows the label the report ships.
+    """
+    out = page.evaluate(
+        """async () => {
+            const m = await import('./js/diagnose.js');
+            const tab = new m.BenchmarkTab({ notify: () => {} });
+            const fill = document.getElementById('bench-progress-fill');
+            const widths = [];
+            for (const [elapsed_s, step_s] of [[0, 2], [2, 3], [1, 1]]) {
+                tab.applyProgress(
+                    { phase: 'P', detail: '', elapsed_s, step_s, total_s: 10 });
+                widths.push(fill.style.width);
+            }
+            const label = document.getElementById('bench-progress-label').textContent;
+            tab.applyReport({
+                target_fps: 60, achievable: false, bottleneck: 'encode',
+                bottleneck_label: 'encoding (x)', ceilings: null, trials: [],
+                writer_queue_size: 7,
+            });
+            const verdict = document.querySelector('.bench-verdict').textContent;
+            return { widths, label, verdict };
+        }"""
+    )
+    assert out["widths"] == ["20%", "50%", "50%"]
+    assert out["label"] == "P \N{MIDDLE DOT} about 9 s left"
+    assert out["verdict"].endswith("limited by encoding (x)")
+
+
+# --- shared helpers (util.js) and the plugin-tab base (serial.js) ----------- #
+
+
+def test_store_never_throws_when_storage_is_unavailable(page):
+    """A private window or sandbox makes localStorage throw: a read is null and
+    a write is dropped, so a remembered preference can never break a tab.
+    """
+    result = page.evaluate(
+        """async () => {
+            const { store } = await import('./js/util.js');
+            const saved = Object.getOwnPropertyDescriptor(window, 'localStorage');
+            Object.defineProperty(window, 'localStorage', {
+                configurable: true, get() { throw new Error('denied'); },
+            });
+            try {
+                store.set('octacam.x', 1);
+                return store.get('octacam.x');
+            } finally {
+                Object.defineProperty(window, 'localStorage', saved);
+            }
+        }"""
+    )
+    assert result is None
+
+
+def test_request_returns_the_body_or_notifies_and_returns_null(page):
+    result = page.evaluate(
+        """async () => {
+            const { request } = await import('./js/util.js');
+            const notes = [];
+            const notify = (level, msg) => notes.push([level, msg]);
+            const opts = { action: 'Thing', notify };
+            const reply = (ok, status, body) => async () =>
+                ({ ok, status, json: async () => body });
+            window.fetch = reply(true, 200, { a: 1 });
+            const ok = await request('GET', '/x', undefined, opts);
+            window.fetch = reply(false, 422, { detail: 'bad value' });
+            const rejected = await request('PUT', '/x', {}, opts);
+            window.fetch = reply(false, 500, null);
+            const failed = await request('PUT', '/x', {}, opts);
+            window.fetch = async () => { throw new TypeError('offline'); };
+            const unreachable = await request('PUT', '/x', {}, opts);
+            return { ok, rejected, failed, unreachable, notes };
+        }"""
+    )
+    assert result["ok"] == {"a": 1}
+    assert result["rejected"] is result["failed"] is result["unreachable"] is None
+    assert result["notes"] == [
+        ["error", "bad value"],
+        ["error", "Thing failed (HTTP 500)"],
+        ["error", "Thing failed: server unreachable"],
+    ]
+
+
+def test_modal_dismisses_on_escape_and_backdrop_and_returns_focus(page):
+    result = page.evaluate(
+        """async () => {
+            const { Modal } = await import('./js/util.js');
+            const overlay = document.getElementById('dir-dialog');
+            const modal = new Modal(overlay);
+            const opener = document.getElementById('shutdown-btn');
+            opener.focus();
+            modal.open();
+            const inside = overlay.contains(document.activeElement);
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape',
+            bubbles: true }));
+            const afterEscape = { hidden: !modal.isOpen, focus: document.activeElement
+            === opener };
+            modal.open();
+            overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            return { inside, afterEscape, afterBackdrop: !modal.isOpen };
+        }"""
+    )
+    assert result == {
+        "inside": True,
+        "afterEscape": {"hidden": True, "focus": True},
+        "afterBackdrop": True,
+    }
+
+
+def _make_serial_tab(page: Page, status: dict) -> None:
+    """A minimal SerialTab subclass ("probe") in a fresh panel as window.__st,
+    against a fetch stub that records each request in window.__reqs.
+    """
+    page.evaluate(
+        """async (status) => {
+            window.__reqs = [];
+            window.__notes = [];
+            window.__replies = {
+                '/api/serial/ports': { ports: [
+                    { device: '/dev/ttyS0', board_name: 'UART', likely_microcontroller:
+                    false },
+                    { device: '/dev/ttyUSB0', board_name: 'CH340',
+                    likely_microcontroller: true },
+                    { device: '/dev/ttyACM0', board_name: 'Nano',
+                    likely_microcontroller: true,
+                      likely_arduino: true },
+                ] },
+                '/api/probe/firmware': { state: 'outdated', needs_flash: true,
+                    can_flash: true, needed_build: 'b2' },
+                '/api/probe/reconnect': { ready: true, device: '/dev/ttyACM0', error:
+                null },
+            };
+            window.fetch = async (url, opts) => {
+                window.__reqs.push([opts?.method || 'GET', url, opts?.body ?
+                JSON.parse(opts.body) : null]);
+                return { ok: true, status: 200, json: async () => window.__replies[url]
+                ?? {} };
+            };
+            const { SerialTab } = await import('/js/serial.js');
+            class Probe extends SerialTab {
+                constructor(ctx) { super(ctx, '<p id="probe-body"></p>'); this.busy =
+                false; this.start(ctx.status); }
+                boardBusy() { return this.busy; }
+            }
+            const panel = document.createElement('section');
+            document.body.appendChild(panel);
+            window.__st = new Probe({
+                name: 'probe', panel, status,
+                notify: (level, msg) => window.__notes.push([level, msg]),
+            });
+            await new Promise((r) => setTimeout(r, 0));
+        }""",
+        status,
+    )
+
+
+def test_serial_tab_renders_the_link_block_ports_and_reconnects(page):
+    """The shared block every plugin tab shows: a not-open notice naming the
+    device, a port picker listing microcontrollers Arduinos first (the current
+    device always present), and a Reconnect that posts the picked port.
+    """
+    _make_serial_tab(page, {"ready": False, "device": "/dev/ttyACM9"})
+    assert not _hidden(page, "#probe-status")
+    assert "(/dev/ttyACM9) is not open" in prop(
+        page, "#probe-status-msg", "e => e.textContent"
+    )
+    assert page.eval_on_selector_all(
+        "#probe-port option", "els => els.map(e => e.value)"
+    ) == [
+        "/dev/ttyACM9",
+        "/dev/ttyACM0",
+        "/dev/ttyUSB0",
+    ]
+    assert prop(page, "#probe-body", "e => e !== null")
+
+    page.evaluate(
+        """async () => {
+            document.getElementById('probe-port').value = '/dev/ttyACM0';
+            await window.__st.reconnect();
+        }"""
+    )
+    assert [
+        "POST",
+        "/api/probe/reconnect",
+        {"device": "/dev/ttyACM0"},
+    ] in page.evaluate("() => window.__reqs")
+    assert _hidden(page, "#probe-status")
+    assert page.evaluate("() => window.__notes") == [
+        ["info", "Serial port /dev/ttyACM0 connected."]
+    ]
+
+
+def test_serial_tab_firmware_banner_follows_readiness_and_busy_board(page):
+    _make_serial_tab(
+        page, {"ready": True, "device": "/dev/ttyACM0", "needs_flash": True}
+    )
+    assert not _hidden(page, "#probe-fw-flash")
+    assert "current build b2" in prop(page, "#probe-fw-flash-msg", "e => e.textContent")
+    assert prop(page, "#probe-fw-flash-btn", "e => e.disabled") is False
+    # A busy board (armed, jogging, running) hides it: a flash would interrupt it.
+    page.evaluate("() => { window.__st.busy = true; window.__st.refresh(); }")
+    assert _hidden(page, "#probe-fw-flash")
+    page.evaluate("() => window.__st.applyState({ ready: false })")
+    page.evaluate("() => { window.__st.busy = false; window.__st.refresh(); }")
+    assert _hidden(page, "#probe-fw-flash")
+
+
+def test_grid_title_drag_moves_only_past_the_threshold(page):
+    """A press that travels under the drag threshold stays a click (it selects
+    the tile and leaves the layout alone); a real drag moves the window and
+    swallows its trailing click.
+    """
+    page.evaluate(
+        """async () => {
+            const m = await import('./js/grid.js');
+            const cam = {
+                serial: 'S0', name: 'C0', width: 640, height: 480, transform: {},
+                layout: { window_x: 0.1, window_y: 0.1, window_width: 0.3,
+                window_height: 0.3 },
+            };
+            window.__grid = new m.CameraGrid(document.getElementById('grid'), [cam]);
+        }"""
+    )
+    box = page.locator(".tile-title").bounding_box()
+    x, y = box["x"] + 40, box["y"] + box["height"] / 2
+    layout = "() => ({ ...window.__grid.tiles[0].cam.layout })"
+
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + 2, y + 1)
+    page.mouse.up()
+    assert page.evaluate(layout)["window_x"] == 0.1
+    assert page.evaluate("() => window.__grid.selected") == 0
+
+    page.evaluate("() => { window.__grid.selected = -1; }")
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + 60, y + 30, steps=4)
+    page.mouse.up()
+    moved = page.evaluate(layout)
+    assert moved["window_x"] > 0.1 and moved["window_y"] > 0.1
+    assert moved["window_width"] == 0.3
+    assert (
+        page.evaluate("() => window.__grid.selected") == -1
+    )  # the drag's click is swallowed

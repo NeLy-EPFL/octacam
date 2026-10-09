@@ -30,6 +30,17 @@
 //  batched / hardware-timer variant is possible future work if ns coincidence is
 //  ever needed.)
 //
+//  A valid arm while RUNNING supersedes the run in progress ("C" then "R"). When
+//  its fps is unchanged the frame clock KEEPS ITS PHASE and the new spec takes
+//  effect at the NEXT FRAME EDGE: outputs that stay in the spec carry their level
+//  across the edge, so no output gets an edge inserted mid-frame; pins that leave
+//  the spec are parked LOW and new pins start LOW. The cameras may be exposing on
+//  that clock (a managed preview whose lights are edited live), and a trigger
+//  edge that is early, late or extra is one their overlapped readout can only
+//  honor late — the exposure slides out from under the strobe for several frames.
+//  A changed fps, or an arm from idle, starts a fresh clock at once. The run
+//  clock (duration, pulse-train t0) always restarts with the new spec.
+//
 //  Light polarity: each CCS channel drives an NPN sink transistor, so an Arduino
 //  pin HIGH sinks the channel to GND -> light ON.
 //
@@ -135,6 +146,15 @@ static uint8_t g_nlight = 0;
 static uint8_t g_active_gpio[kMaxCam + kMaxLight];
 static uint8_t g_active_n = 0;
 
+// A same-fps re-arm, staged by enter_running to take effect at the next frame
+// edge (committed in loop()).
+static Cam      g_pend_cam[kMaxCam];
+static Light    g_pend_lt[kMaxLight];
+static uint8_t  g_pend_ncam        = 0;
+static uint8_t  g_pend_nlight      = 0;
+static uint32_t g_pend_duration_ms = 0;
+static bool     g_pending          = false;
+
 // ---- State machine ---------------------------------------------------------
 enum class State : uint8_t { IDLE, RUNNING };
 static State    g_state         = State::IDLE;
@@ -227,54 +247,57 @@ static void apply_outputs(uint32_t elapsed, uint64_t run) {
   }
 }
 
-// ---- State transitions -----------------------------------------------------
-static void enter_idle(char reason) {
-  drive_active_low();
-  g_active_n = 0;
-  g_ncam = 0;
-  g_nlight = 0;
-  g_state = State::IDLE;
-  set_status(false, true, false);  // green = idle / ready
-  if (reason) emit(reason);
+// Roll the frame clock forward to `now` (wraparound-safe) and return the
+// elapsed us into the current frame; `rolled` reports that a frame edge passed.
+// A slip of a whole frame or more resyncs t0 to `now` instead of bursting the
+// missed edges.
+static inline uint32_t advance_frame_clock(uint32_t now, bool &rolled) {
+  uint32_t elapsed = now - g_frame_t0_us;
+  rolled = (elapsed >= g_period_us);
+  if (rolled) {
+    if (elapsed >= 2UL * g_period_us) {
+      g_frame_t0_us = now;
+    } else {
+      g_frame_t0_us += g_period_us;
+    }
+    elapsed = now - g_frame_t0_us;
+  }
+  return elapsed;
 }
 
-static void enter_running(uint16_t fps, uint32_t duration_ms, const Cam *cams,
-                          uint8_t ncam, const Light *lts, uint8_t nlight) {
-  // A valid re-arm supersedes any run in progress; tell the host the old ended.
-  bool was_running = (g_state == State::RUNNING);
-  drive_active_low();
-  if (was_running) emit('C');
+// Level `gpio` currently holds in the outgoing spec (gpio/high arrays of length
+// n), if it is one of its outputs.
+static bool carried_level(uint8_t gpio, const uint8_t *gpios, const bool *highs,
+                          uint8_t n, bool &high) {
+  for (uint8_t k = 0; k < n; k++) {
+    if (gpios[k] == gpio) {
+      high = highs[k];
+      return true;
+    }
+  }
+  return false;
+}
 
-  g_period_us = (1000000UL + fps / 2) / fps;
-  if (g_period_us < 2) g_period_us = 2;
-
-  g_active_n = 0;
-
-  g_ncam = ncam;
+// Clamp a validated arm's records against the frame period into outc / outl.
+static void prepare_outputs(uint32_t period_us, const Cam *cams, uint8_t ncam,
+                            const Light *lts, uint8_t nlight, Cam *outc, Light *outl) {
   for (uint8_t i = 0; i < ncam; i++) {
     Cam c = cams[i];
-    pinMode(c.gpio, OUTPUT);
-    digitalWrite(c.gpio, LOW);
     uint32_t delay = c.delay_us;
-    if (delay > g_period_us - 1) delay = g_period_us - 1;
+    if (delay > period_us - 1) delay = period_us - 1;
     uint32_t pulse = c.pulse_us ? c.pulse_us : kDefaultCamPulseUs;
     if (pulse < kMinCamPulseUs) pulse = kMinCamPulseUs;
-    uint32_t maxp = (g_period_us > delay + 1) ? (g_period_us - 1 - delay) : 1;
+    uint32_t maxp = (period_us > delay + 1) ? (period_us - 1 - delay) : 1;
     if (pulse > maxp) pulse = maxp;
-    g_cam[i] = {c.gpio, delay, pulse, false};
-    g_active_gpio[g_active_n++] = c.gpio;
+    outc[i] = {c.gpio, delay, pulse, false};
   }
-
-  g_nlight = nlight;
   for (uint8_t i = 0; i < nlight; i++) {
     Light L = lts[i];
-    pinMode(L.gpio, OUTPUT);
-    digitalWrite(L.gpio, LOW);
     L.high = false;
     L.cyc_us = L.p2;  // first pulse_train cycle starts at start_delay
     if (L.mode == kModeStrobe) {
-      if (L.p0 > g_period_us - 1) L.p0 = g_period_us - 1;  // clamp phase delay
-      if (L.p1 >= g_period_us) {
+      if (L.p0 > period_us - 1) L.p0 = period_us - 1;  // clamp phase delay
+      if (L.p1 >= period_us) {
         L.mode = kModeContinuous;  // on-time >= period -> never strobes off
       } else if (L.p1 > 0 && L.p1 < kMinLedOnUs) {
         L.p1 = kMinLedOnUs;
@@ -287,17 +310,125 @@ static void enter_running(uint16_t fps, uint32_t duration_ms, const Cam *cams,
         if (L.p0 < 1) L.p0 = 1;
       }
     }
+    outl[i] = L;
+  }
+}
+
+// Make cams / lts the live outputs. With `carry`, a pin that stays in the spec
+// keeps its current level (no edge is inserted) and pins that leave it are
+// parked LOW; without it every pin is (re)started LOW as a fresh output.
+static void install_outputs(const Cam *cams, uint8_t ncam, const Light *lts,
+                            uint8_t nlight, bool carry) {
+  uint8_t old_gpio[kMaxCam + kMaxLight];
+  bool old_high[kMaxCam + kMaxLight];
+  uint8_t old_n = 0;
+  if (carry) {
+    for (uint8_t i = 0; i < g_ncam; i++) {
+      old_gpio[old_n] = g_cam[i].gpio;
+      old_high[old_n++] = g_cam[i].high;
+    }
+    for (uint8_t i = 0; i < g_nlight; i++) {
+      old_gpio[old_n] = g_lt[i].gpio;
+      old_high[old_n++] = g_lt[i].high;
+    }
+  } else {
+    drive_active_low();
+  }
+
+  g_active_n = 0;
+  g_ncam = ncam;
+  for (uint8_t i = 0; i < ncam; i++) {
+    Cam c = cams[i];
+    if (!carried_level(c.gpio, old_gpio, old_high, old_n, c.high)) {
+      pinMode(c.gpio, OUTPUT);  // new output (or fresh clock): start LOW
+      digitalWrite(c.gpio, LOW);
+      c.high = false;
+    }
+    g_cam[i] = c;
+    g_active_gpio[g_active_n++] = c.gpio;
+  }
+  g_nlight = nlight;
+  for (uint8_t i = 0; i < nlight; i++) {
+    Light L = lts[i];
+    if (!carried_level(L.gpio, old_gpio, old_high, old_n, L.high)) {
+      pinMode(L.gpio, OUTPUT);
+      digitalWrite(L.gpio, LOW);
+      L.high = false;
+    }
     g_lt[i] = L;
     g_active_gpio[g_active_n++] = L.gpio;
   }
 
+  // Park the outgoing outputs that are not in the new spec.
+  for (uint8_t k = 0; k < old_n; k++) {
+    bool kept = false;
+    for (uint8_t j = 0; j < g_active_n && !kept; j++) kept = (g_active_gpio[j] == old_gpio[k]);
+    if (!kept) digitalWrite(old_gpio[k], LOW);
+  }
+}
+
+static void start_run_clock(uint32_t duration_ms) {
   g_duration_ms = duration_ms;
   g_run_start_ms = millis();
-  g_frame_t0_us = micros();
   g_run_start_us = (uint64_t)esp_timer_get_time();
+}
+
+// ---- State transitions -----------------------------------------------------
+static void enter_idle(char reason) {
+  drive_active_low();
+  g_active_n = 0;
+  g_ncam = 0;
+  g_nlight = 0;
+  g_pending = false;
+  g_state = State::IDLE;
+  set_status(false, true, false);  // green = idle / ready
+  if (reason) emit(reason);
+}
+
+// A same-fps re-arm staged by enter_running lands here, on a frame edge:
+// continuing outputs carry their level across it (nothing gets an extra edge)
+// and the new run clock starts on the edge.
+static void commit_pending() {
+  install_outputs(g_pend_cam, g_pend_ncam, g_pend_lt, g_pend_nlight, /*carry=*/true);
+  start_run_clock(g_pend_duration_ms);
+  g_pending = false;
+}
+
+static void enter_running(uint16_t fps, uint32_t duration_ms, const Cam *cams,
+                          uint8_t ncam, const Light *lts, uint8_t nlight) {
+  const bool was_running = (g_state == State::RUNNING);
+  uint32_t period_us = (1000000UL + fps / 2) / fps;
+  if (period_us < 2) period_us = 2;
+
+  if (was_running && period_us == g_period_us) {
+    // Same fps while running: the frame clock keeps its phase and the new spec
+    // is staged for the next frame edge (see the header), so no output gets an
+    // edge inserted mid-frame. The superseded run's deadline is dropped so it
+    // cannot end the board before the staged arm lands.
+    prepare_outputs(period_us, cams, ncam, lts, nlight, g_pend_cam, g_pend_lt);
+    g_pend_ncam = ncam;
+    g_pend_nlight = nlight;
+    g_pend_duration_ms = duration_ms;
+    g_duration_ms = 0;
+    g_pending = true;
+    emit('C');  // the superseded run ended...
+    emit('R');  // ...and the new one is running (from the next frame edge)
+    return;
+  }
+
+  // A changed fps, or an arm from idle: a fresh clock, every output from LOW.
+  Cam next_cam[kMaxCam];
+  Light next_lt[kMaxLight];
+  prepare_outputs(period_us, cams, ncam, lts, nlight, next_cam, next_lt);
+  g_pending = false;
+  g_period_us = period_us;
+  install_outputs(next_cam, ncam, next_lt, nlight, /*carry=*/false);
+  start_run_clock(duration_ms);
+  g_frame_t0_us = micros();
   g_state = State::RUNNING;
   set_status(true, false, false);  // red = recording
   apply_outputs(0, 0);             // emit the first frame's edges immediately
+  if (was_running) emit('C');
   emit('R');
 }
 
@@ -423,16 +554,9 @@ void loop() {
 
   // ---- Clocks (RUNNING only) -----------------------------------------------
   if (g_state == State::RUNNING) {
-    uint32_t now = micros();
-    uint32_t elapsed = now - g_frame_t0_us;  // wraparound-safe
-    if (elapsed >= g_period_us) {
-      if (elapsed >= 2UL * g_period_us) {
-        g_frame_t0_us = now;  // slipped a whole frame: resync, no burst
-      } else {
-        g_frame_t0_us += g_period_us;
-      }
-      elapsed = now - g_frame_t0_us;
-    }
+    bool rolled = false;
+    uint32_t elapsed = advance_frame_clock(micros(), rolled);
+    if (rolled && g_pending) commit_pending();  // staged same-fps re-arm lands on the edge
     uint64_t run = (uint64_t)((uint64_t)esp_timer_get_time() - g_run_start_us);
     apply_outputs(elapsed, run);
 

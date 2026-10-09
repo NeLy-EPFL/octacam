@@ -1,91 +1,78 @@
-# octacam
-
-Preview, record, and save synchronized video from many scientific cameras
-through one fast, simple interface. octacam drives **Basler**, **FLIR /
-Teledyne**, and **any GenICam USB3-Vision** camera from a live web GUI, and turns
-a day's recordings into archived videos with one command. It auto-detects the
-best available driver per camera (a [backend cascade](https://nely-epfl.github.io/octacam/guide/backends/))
-with a pip-installable floor, so it just works on modern Python. It is the
-successor to SeptaCam.
+<h1 align="center">octacam</h1>
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/a7b6ac6e-5ae3-45fa-ae5a-2e3f5281e5c3" width="480"/>
+  <a href="https://github.com/NeLy-EPFL/octacam/actions/workflows/ci.yml"><img src="https://github.com/NeLy-EPFL/octacam/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://nely-epfl.github.io/octacam/"><img src="https://github.com/NeLy-EPFL/octacam/actions/workflows/docs.yml/badge.svg" alt="Docs"></a>
+  <img src="https://img.shields.io/badge/python-3.14-blue" alt="Python 3.14">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
 </p>
 
-- 📹 **Many cameras at once** — 8 is not the limit despite the name
-- 🖥️ **Live web GUI** — preview every camera while recording; run it locally or over SSH
-- 💾 **Record straight to video** — monochrome H.264 (or raw) with per-frame drop tracking
-- ⚙️ **One-command post-processing** — transcode, tile into grid videos, and copy to storage
-- 📦 **Clone-and-go install** with [uv](https://docs.astral.sh/uv/)
+Synchronized video from many scientific cameras: octacam previews and records Basler, FLIR, and any GenICam USB3-Vision camera from a live web GUI, and turns a day's recordings into archived videos with one command.
 
-📖 **Full documentation: <https://nely-epfl.github.io/octacam/>**
-
-## Install
+## Installation
 
 ```bash
-git clone https://github.com/NeLy-EPFL/octacam.git
-cd octacam
-uv tool install .    # puts an `octacam` command on your PATH
+git clone https://github.com/NeLy-EPFL/octacam && cd octacam
+uv tool install .
 ```
 
-Cloning `main` (always the latest stable release) also gives you the `configs/`
-example rigs and the emulator config the quickstart uses. The Python-installable
-backends (pypylon and the always-on pycameleon floor) all ship in core, so **a rig
-works out of the box** on Python 3.10+. FLIR / Teledyne cameras need one manual
-step — Teledyne's Spinnaker SDK plus the PySpin wheel (cp310–cp314). See the
-[installation guide](https://nely-epfl.github.io/octacam/installation/) and
-[camera backends](https://nely-epfl.github.io/octacam/guide/backends/).
+A clone is on `main`, the latest stable release, and brings the example rigs in `configs/`. Basler and other USB3-Vision cameras work out of the box; FLIR cameras also need Teledyne's Spinnaker SDK and its PySpin wheel ([installation guide](https://nely-epfl.github.io/octacam/stable/installation/)). `octacam doctor` reports what the installation can do.
 
 ## Quickstart
 
-No cameras attached? Try the built-in Basler emulator first:
+No cameras attached? Eight emulated Basler cameras stand in:
 
 ```bash
-PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # 8 fake cameras, live GUI
+PYLON_CAMEMU=8 octacam gui configs/emulate_basler
 ```
 
-On a real rig, point octacam at a config directory (camera names, layout, and
-recording settings — see [configs/](configs/) for examples):
+On a rig, point octacam at its config directory:
 
 ```bash
-octacam config <config_dir>    # scaffold a new rig config interactively
-octacam doctor <config_dir>    # check the install + validate the rig
-octacam gui <config_dir>       # live web GUI on http://127.0.0.1:8765
-octacam record <config_dir>    # headless recording (no browser)
-octacam process --all          # transcode + grid + copy everything you recorded
+octacam config <config_dir>   # scaffold the rig's config
+octacam gui <config_dir>      # preview and record in the browser
+octacam process --all         # transcode, build grid videos, copy to storage
 ```
 
-Everything after recording — transcoding, composite grid videos, and copying to
-a shared destination — is the single command **`octacam process`**, driven by a
-config snapshot each recording saves alongside its videos.
-
-## Commands
-
-| Command | What it does |
-| --- | --- |
-| `octacam config [config_dir]` | Interactively scaffold a new rig config (`--backend`/`--force`/`--no-snapshot-params`) |
-| `octacam doctor [config_dir]` | Diagnose the install and list cameras/plugins; validate a rig |
-| `octacam gui <config_dir>` | Launch the live web GUI (`--host`/`--port`/`--no-browser`) |
-| `octacam record <config_dir>` | Record headlessly (`--fps`/`--duration`/`--output`) |
-| `octacam process <paths…>` | Transcode, build grids, and transfer (config-driven) |
-
-Run `octacam --help` (or `<command> --help`) for the full option list.
+Each recording is a folder with one video per camera and an `octacam_recording/` subfolder holding its summary, its timestamps, and the config it ran with, which `octacam process` reads.
 
 ## Documentation
 
-| Guide | |
-| --- | --- |
-| [Installation](https://nely-epfl.github.io/octacam/installation/) | Install, update, FLIR setup, development install |
-| [Quickstart](https://nely-epfl.github.io/octacam/quickstart/) | Your first recording, with or without hardware |
-| [Web GUI](https://nely-epfl.github.io/octacam/guide/gui/) | Preview, record, and remote operation over SSH |
-| [Recording](https://nely-epfl.github.io/octacam/guide/recording/) | Outputs, the recording summary, transformed vs raw |
-| [Processing](https://nely-epfl.github.io/octacam/guide/processing/) | Transcode, grid videos, and transfer to storage |
-| [Configuration](https://nely-epfl.github.io/octacam/guide/configuration/) | The `octacam_config.toml` reference |
-| [Camera backends](https://nely-epfl.github.io/octacam/guide/backends/) | The auto-detect cascade (Basler → FLIR → Spinnaker → pycameleon) |
-| [Plugins](https://nely-epfl.github.io/octacam/guide/plugins/) | Flywheel turntable, 2-photon trigger, and the configurable triggerbox (camera trigger + lights) |
-| [Troubleshooting](https://nely-epfl.github.io/octacam/reference/troubleshooting/) | Common errors and fixes |
+[nely-epfl.github.io/octacam](https://nely-epfl.github.io/octacam/)
+
+- [Quickstart](https://nely-epfl.github.io/octacam/stable/quickstart/): a first recording, with or without hardware.
+- [Recording](https://nely-epfl.github.io/octacam/stable/guide/recording/) and [Processing](https://nely-epfl.github.io/octacam/stable/guide/processing/): what a recording holds, and how it becomes archived videos.
+- [Configuration](https://nely-epfl.github.io/octacam/stable/guide/configuration/): every key of `octacam_config.toml`.
+- [Camera backends](https://nely-epfl.github.io/octacam/stable/guide/backends/) and [Plugins](https://nely-epfl.github.io/octacam/stable/guide/plugins/): the camera drivers, and the Arduino-driven rig hardware.
+- [CLI reference](https://nely-epfl.github.io/octacam/stable/cli/) and [Troubleshooting](https://nely-epfl.github.io/octacam/stable/reference/troubleshooting/).
+
+Contributing: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+<!-- --8<-- [start:citing] -->
+## Citation
+
+There is no paper on octacam: please cite the software, as below or with GitHub's "Cite this repository" button, which reads [`CITATION.cff`](https://github.com/NeLy-EPFL/octacam/blob/main/CITATION.cff).
+
+```bibtex
+@software{lam_octacam_2026,
+  author = {Lam, Thomas Ka Chung and Durrieu, Matthias},
+  title  = {octacam: synchronized video from many scientific cameras},
+  year   = {2026},
+  url    = {https://github.com/NeLy-EPFL/octacam},
+}
+```
+<!-- --8<-- [end:citing] -->
+
+## Acknowledgments
+
+octacam is developed in the [Ramdya lab](https://www.epfl.ch/labs/ramdya-lab/) at EPFL and succeeds [SeptaCam](https://github.com/NeLy-EPFL/SeptaCam). Matthias Durrieu wrote its grid videos, its transfer to storage, and the two-photon trigger plugin. It drives cameras through pypylon, Teledyne's Spinnaker SDK, and pycameleon, among others: [Citing and credits](https://nely-epfl.github.io/octacam/stable/citing/) lists them.
+
+<!-- --8<-- [start:ai] -->
+## Use of AI
+
+octacam was developed with extensive help from AI coding assistants, mainly [Claude Code](https://claude.com/claude-code) (Anthropic). Directed by the authors, they wrote much of the code, tests, and documentation, including this README. The authors set the goals, made the design decisions, reviewed the changes, and checked the results against data, and are responsible for the software. As with any tool, validate its output on your own rig before relying on it.
+<!-- --8<-- [end:ai] -->
 
 ## License
 
-octacam is released under the [MIT License](LICENSE).
-© 2026 Neuroengineering Laboratory @EPFL — Ramdya Lab.
+[MIT](LICENSE), © 2026 Neuroengineering Laboratory (Ramdya lab), EPFL; the camera SDKs and FFmpeg keep their own licenses ([Citing and credits](https://nely-epfl.github.io/octacam/stable/citing/)).

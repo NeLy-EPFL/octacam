@@ -1,19 +1,20 @@
 [project]
 name = "octacam"
-version = "0.3.3"
+version = "0.3.4.dev0"
 description = "Preview, record, and save video streams from multiple scientific cameras (Basler, FLIR, and any GenICam USB3-Vision camera)"
 readme = "README.md"
 # SPDX license expression (PEP 639); the text lives in LICENSE and is packaged.
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
-    { name = "Neuroengineering Laboratory (Ramdya Lab), EPFL" },
+    { name = "Thomas Ka Chung Lam", email = "thomas.lam@epfl.ch" },
+    { name = "Matthias Durrieu" },
 ]
-# 3.10 is the floor: it is the lowest Python octacam supports (and the lowest
-# PySpin wheel Teledyne ships). Every backend tier runs on any Python from 3.10
-# up — PySpin now ships cp310-cp314 wheels (Spinnaker 4.4), so the FLIR vendor
-# tier is no longer pinned to 3.10.
-requires-python = ">=3.10"
+keywords = ["video acquisition", "multi-camera", "GenICam", "Basler", "FLIR"]
+# 3.14 only, as deeperfly and spintrack: `uv tool install` fetches it, and the cap
+# keeps it on a Python every dependency ships wheels for. FLIR cameras run through
+# PySpin's cp314 wheel (Spinnaker 4.4) or, without it, the `spinnaker` C-API tier.
+requires-python = ">=3.14,<3.15"
 # No `License ::` classifier: PEP 639 supersedes it with the `license` expression
 # above, and listing both trips a metadata conflict in modern build backends.
 classifiers = [
@@ -23,38 +24,31 @@ classifiers = [
     "Topic :: Multimedia :: Video :: Capture",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     # Basler vendor tier (uv-installable, so it lives in core).
-    "pypylon>=4.0",
+    "pypylon>=26.8",
     # Floor tier: libusb-only USB3-Vision, always present so the cascade has a
     # guaranteed backend on any Python where no vendor SDK is set up. It is the
     # general-purpose path for any GenICam USB3-Vision camera without a vendor SDK.
     "pycameleon>=0.2.11",
-    "numpy>=1.26",
-    "opencv-python-headless>=4.9",
-    "pydantic>=2",
-    "typer>=0.15",
-    "rich>=13.7",
+    "numpy>=2.5",
+    "opencv-python-headless>=5.0",
+    "pydantic>=2.14",
+    "typer>=0.27",
+    "rich>=15.0",
     # PEP 440 version parsing for the PyPI "update available" check (updates.py).
-    "packaging>=23",
-    "fastapi>=0.136.3",
-    "uvicorn>=0.49.0",
-    # uvicorn ships no WebSocket implementation on its own; the preview/
-    # telemetry/jog socket (octacam gui) needs one at runtime.
-    "websockets>=16.0",
+    "packaging>=26.3",
+    "fastapi>=0.143",
+    # `[standard]` brings the WebSocket implementation the preview/telemetry/jog
+    # socket (octacam gui) needs at runtime; plain uvicorn ships none.
+    "uvicorn[standard]>=0.54",
     "imageio-ffmpeg>=0.6.0",
     # The flywheel and twophoton plugins talk to an Arduino over serial. It's a
     # light, pure-Python dep needed by every bundled plugin, so it ships by
     # default rather than as an extra people can forget to install.
     "pyserial>=3.5",
-    # Python 3.10 has no stdlib tomllib (the TOML reader); tomli is the drop-in.
-    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -76,26 +70,29 @@ octacam = "octacam.cli:main"
 [project.urls]
 Homepage = "https://github.com/NeLy-EPFL/octacam"
 Documentation = "https://nely-epfl.github.io/octacam/"
-Repository = "https://github.com/NeLy-EPFL/octacam.git"
+Issues = "https://github.com/NeLy-EPFL/octacam/issues"
 Changelog = "https://github.com/NeLy-EPFL/octacam/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
-    "av>=12",
-    "httpx>=0.28.1",
-    "psutil>=5.9",
-    "pytest>=8",
-    "pytest-cov>=5",
-    "ruff>=0.8",
-    "pyright>=1.1.390",
+    "av>=19.0",
+    # FastAPI's TestClient; recent Starlette deprecates plain httpx for it.
+    "httpx2>=2.13",
+    "psutil>=7.2",
+    "pytest>=9.1",
+    "pytest-cov>=7.1",
+    "ruff>=0.16",
+    "pyrefly>=1.3",
 ]
 # Documentation site (Material for MkDocs). Preview locally with
 # `uv run --group docs mkdocs serve`; CI publishes it to GitHub Pages.
 docs = [
-    "mkdocs-material>=9.5",
+    # MkDocs 2.0 (in pre-release) drops the plugin system mike and Material run on.
+    "mkdocs>=1.6,<2",
+    "mkdocs-material>=9.7",
     # Versioned docs (main -> "stable", develop -> "dev"). Deployed by CI; also
     # usable locally: `uv run --group docs mike serve`.
-    "mike>=2.1",
+    "mike>=2.2",
 ]
 # Browser-driven tests for the vanilla-JS frontend (tests/test_frontend.py):
 # loads the real ES modules in a headless Chromium against the real index.html.
@@ -103,32 +100,51 @@ docs = [
 # `uv run --group frontend pytest tests/test_frontend.py` (first time also needs
 # `uv run --group frontend playwright install chromium`).
 frontend = [
-    "playwright>=1.49",
+    "playwright>=1.63",
 ]
 
 [build-system]
-requires = ["uv_build>=0.11.0,<0.12.0"]
+requires = ["uv_build>=0.12,<0.13"]
 build-backend = "uv_build"
 
 [tool.ruff]
-target-version = "py310"
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
-# The formatter owns wrapping; long help strings / log messages are intentional.
-ignore = ["E501"]
+extend-select = ["E501", "I", "UP", "B", "D"]
+# D1: docstring coverage is not enforced yet. D205: some 540 docstrings open with
+# a summary that wraps onto a second line; each needs its summary rewritten.
+# BLE001, S110, S112: hardware teardown and helper threads catch everything and
+# carry on by design (a helper thread must never die silently).
+ignore = ["D1", "D205", "BLE001", "S110", "S112"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**.py" = ["D100", "D103"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's parameter helpers are designed to be called in argument defaults.
 extend-immutable-calls = ["fastapi.Body", "fastapi.Depends", "fastapi.Query"]
 
-[tool.pyright]
+[tool.pyrefly]
 # The library is the type-check surface; tests use stubs/fakes and monkeypatch
 # private attributes, which intentionally fight static typing.
-include = ["src"]
-pythonVersion = "3.10"
-typeCheckingMode = "standard"
+project-includes = ["src"]
+# The floor of requires-python, so an API newer than the oldest supported Python
+# is an error.
+python-version = "3.14"
 
 [tool.pytest.ini_options]
-addopts = "--cov=src/octacam --cov-report=term-missing"
+testpaths = ["tests"]
+addopts = "-q"
+# A warning the suite does not assert on is a bug in the code or in the test.
+filterwarnings = [
+    "error",
+    # pypylon's SWIG bindings warn on import; raised as an error inside the
+    # extension's init, the warning crashes the interpreter.
+    "ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type SwigPyPacked has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type SwigPyObject has no __module__ attribute:DeprecationWarning",
+]

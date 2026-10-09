@@ -1,21 +1,10 @@
-"""Display transforms (rotation + flips) shared by recording and transcoding.
+"""Display transforms (rotation + flips) baked into recorded video.
 
-The web GUI shows each camera through a CSS transform ``scale(sx, sy)
-rotate(deg)`` applied to the raw frame (see ``web/static/js/grid.js``). To bake
-that same orientation into a recorded/transcoded video we must reproduce it
-exactly, in pixels.
-
-CSS composes the transform list right-to-left, so the matrix is ``S · R``: a
-point is first rotated, then scaled/flipped along the (unrotated) screen axes.
-In pixel terms that means **rotate first, then flip** — and CSS ``rotate(+deg)``
-turns clockwise. Both the numpy path (record-time baking) and the ffmpeg ``-vf``
-path (transcode) implement that ordering so they produce identical pixels.
-
-Only the transforms the View tab can actually produce are supported: rotation in
-90° steps plus horizontal/vertical flips (a flip is a negative ``scale_x`` /
-``scale_y`` in the config; the scale magnitude is always 1 and is ignored). A
-``rotation_deg`` that is not a multiple of 90 is dropped with a warning rather
-than approximated.
+The GUI shows each camera through the CSS transform `scale(sx, sy)
+rotate(deg)` (`web/static/js/grid.js`). CSS composes right-to-left, so a
+video reproduces it by rotating first (clockwise for a positive angle), then
+flipping along the screen axes. Only what the View tab produces is supported:
+90 deg steps, and flips (a negative scale; its magnitude is ignored).
 """
 
 from __future__ import annotations
@@ -31,35 +20,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("octacam")
 
-# Per-recording metadata file written into each recording's save directory and
-# consumed by `octacam transcode`. The shared on-disk vocabulary lives here,
-# next to DisplayTransform, so the recording and transcode sides never drift.
-RECORDING_SUMMARY_FILENAME = "recording_summary.json"
-
-# Optional per-frame timestamp store (opt-in via record.save_timestamps). One
-# compressed NumPy archive for the whole recording, holding every camera's
-# per-frame timestamp/dropped series — replacing the old per-camera CSVs.
-TIMESTAMPS_FILENAME = "timestamps.npz"
-
-# The rig config snapshot written into each recording's save directory
-# (RecordingController._snapshot_config). It carries the live recording settings,
-# and each camera's parameter file (``<serial>.<ext>``) is written beside it, so
-# the recording folder is itself a config directory a new session can launch from.
-CONFIG_SNAPSHOT_FILENAME = "octacam_config.toml"
-
-# Every camera backend's parameter-file suffix (``CameraBackend.extension``):
-# Basler .pfs, the GenApi-TSV backends .txt, and the synthetic ``fake``. Listed
-# here so the transfer step can carry a snapshot's camera files without importing
-# a vendor SDK; tests/test_backends.py keeps it in step with the backends.
-PARAM_FILE_EXTENSIONS = ("pfs", "txt", "fake")
-
 
 @dataclass(frozen=True)
 class DisplayTransform:
-    """A bakeable display orientation: a 90° rotation step plus flips.
-
-    ``rotation_deg`` is one of 0/90/180/270 and is interpreted clockwise (to
-    match CSS). Flips are applied *after* the rotation, along the screen axes.
+    """A bakeable display orientation: a clockwise 0/90/180/270 deg rotation, then
+    flips along the screen axes.
     """
 
     rotation_deg: int = 0
@@ -71,7 +36,7 @@ class DisplayTransform:
         return self.rotation_deg == 0 and not self.flip_h and not self.flip_v
 
     def output_size(self, width: int, height: int) -> tuple[int, int]:
-        """The (width, height) after this transform (90°/270° swap the axes)."""
+        """The (width, height) after this transform (90 deg/270 deg swap the axes)."""
         if self.rotation_deg in (90, 270):
             return (height, width)
         return (width, height)
@@ -108,8 +73,8 @@ def _normalize_rotation(rotation_deg: float) -> int:
     deg = round(float(rotation_deg)) % 360
     if deg % 90 != 0:
         log.warning(
-            "Display rotation %s° is not a multiple of 90; ignoring it "
-            "(only 90° steps can be baked into a video)",
+            "Display rotation %s\N{DEGREE SIGN} is not a multiple of 90; ignoring it "
+            "(only 90\N{DEGREE SIGN} steps can be baked into a video)",
             rotation_deg,
         )
         return 0
@@ -117,21 +82,15 @@ def _normalize_rotation(rotation_deg: float) -> int:
 
 
 def from_camera_config(cfg: CameraConfig) -> DisplayTransform:
-    """Derive the bakeable transform from a camera's persisted display config.
-
-    A negative ``scale_x`` / ``scale_y`` is a horizontal / vertical flip; the
-    magnitude is ignored (the View tab only ever flips, never scales).
-    """
+    """The bakeable transform of a camera's configured display."""
     return DisplayTransform.from_scale_rotation(
         cfg.scale_x, cfg.scale_y, cfg.rotation_deg
     )
 
 
 def apply_display_transform(array: np.ndarray, t: DisplayTransform) -> np.ndarray:
-    """Return ``array`` rotated then flipped per ``t`` (a fresh C-contiguous copy).
-
-    The result is passed to the video writer, whose ``_write_all`` casts it to
-    raw bytes and therefore needs C-contiguous memory.
+    """`array` rotated then flipped per `t`, C-contiguous (the writer casts
+    it to raw bytes).
     """
     if t.is_identity:
         return array
@@ -142,25 +101,3 @@ def apply_display_transform(array: np.ndarray, t: DisplayTransform) -> np.ndarra
     if t.flip_v:
         out = np.flipud(out)
     return np.ascontiguousarray(out)
-
-
-def display_vf_filter(t: DisplayTransform) -> str:
-    """The ffmpeg ``-vf`` chain equivalent to :func:`apply_display_transform`.
-
-    Empty string when ``t`` is the identity. Rotation filters come first, then
-    flips, matching the numpy ordering (rotate, then flip).
-    """
-    filters: list[str] = []
-    # transpose=1 is 90° clockwise, transpose=2 is 90° counter-clockwise.
-    if t.rotation_deg == 90:
-        filters.append("transpose=1")
-    elif t.rotation_deg == 180:
-        filters.append("transpose=1")
-        filters.append("transpose=1")
-    elif t.rotation_deg == 270:
-        filters.append("transpose=2")
-    if t.flip_h:
-        filters.append("hflip")
-    if t.flip_v:
-        filters.append("vflip")
-    return ",".join(filters)

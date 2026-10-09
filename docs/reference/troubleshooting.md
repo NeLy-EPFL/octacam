@@ -40,8 +40,9 @@ unplugged. Stop the other instance, or check the connection, then retry.
 
 ## "Port 8765 is already in use"
 
-Another program (or an octacam serving a different config) holds the port. Pick a
-free one:
+Another program (or an octacam serving a different config) holds the port you
+asked for with `--port`. Leave `--port` out to take the next free port after 8765,
+or pick one:
 
 ```bash
 octacam gui <config_dir> --port 8766
@@ -62,16 +63,30 @@ needed. Confirm with:
 octacam doctor --backend flir
 ```
 
-## Dropped frames
+## Dropped frames and missed trigger pulses
 
-- `recording_summary.json` counts frames the **encoder/writer queue** could not
-  accept. If you see these, the machine is CPU-bound — check whether an
-  `octacam process` transcode is running at the same time (it's CPU-heavy and
-  `gui`/`record` warn about it at startup).
-- Frames the **camera or transport** never delivered (e.g. USB bandwidth gaps)
-  are *not* counted as dropped. Enable `record.save_timestamps = true` and
-  inspect the inter-frame gaps in `timestamps.npz` to find those — e.g.
-  `np.diff(np.load("timestamps.npz")["cam0/timestamp_ns"])`.
+Run `octacam check <recording or directory>` — it lists every camera's missed
+pulses, unequal frame counts and start offsets. In the recording's
+`octacam_recording/recording_summary.json` (flat beside the videos in a recording
+made before that subfolder existed):
+
+- `writer_dropped` counts frames the **encoder/writer queue** could not accept.
+  If you see these, the machine is CPU-bound — check whether an `octacam process`
+  transcode is running at the same time (it's CPU-heavy and `gui`/`record` warn
+  about it at startup).
+- `missed_pulses` counts trigger pulses a camera delivered **no frame** for. The
+  camera SDK's own counters, `stream`, tell a transport loss (frames lost,
+  incomplete) from a trigger the camera never exposed (none of them move). On an
+  octacam-driven train both kinds of loss are filled with the previous frame, so
+  the cameras stay aligned; `dropped` counts the fills.
+
+A camera that **misses triggers** the others on the same trigger line catch —
+with no transport loss — has a trigger-input problem: its cable, connector,
+ground return or opto-isolated input. A FLIR Grasshopper3 that misses a pulse's
+rising edge sometimes fires on its **falling edge** instead, one pulse width late
+(`late_pulse_indices`, ~500 µs with the triggerbox default); the same camera
+showing both is the signature. Swap the two cameras' trigger cables to see
+whether the fault follows the cable or the camera.
 
 ## Transfer destination not present / not writable
 
@@ -79,6 +94,18 @@ octacam doctor --backend flir
 mounted/present or isn't writable (local recording still works either way). Mount
 the share or fix permissions, then re-run — transfers **resume**, redoing at most
 the one in-progress file. See [Processing → Transfer](../guide/processing.md#transfer).
+
+## Videos play as flat gray frames
+
+Videos recorded with `-pix_fmt gray` (the default before 0.3.4) are monochrome
+4:0:0 H.264. NVIDIA's hardware decoder shows these as a uniform gray frame,
+and VLC uses that decoder by default on an NVIDIA machine. Software decoders
+(ffmpeg, OpenCV, analysis tools) read them correctly. octacam now writes
+full-range 4:2:0, even for configs and recording snapshots that still say
+`gray`, so `octacam process` turns an older recording into an MP4 that plays
+everywhere. To view an old `.mkv` directly, turn off hardware decoding in VLC
+(*Tools → Preferences → Input / Codecs → Hardware-accelerated decoding →
+Disable*).
 
 ## Colour looks wrong after transcoding
 

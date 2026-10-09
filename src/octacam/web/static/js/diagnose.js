@@ -2,14 +2,6 @@
 
 import { api } from "./util.js";
 
-const BOTTLENECK_LABEL = {
-  acquisition: "acquisition — the camera can't deliver frames fast enough",
-  transfer: "transfer — the cameras share more bus bandwidth than the link provides",
-  encode: "encoding — the encoder can't keep up",
-  host: "host contention — CPU / GIL",
-  none: "none",
-};
-
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -86,30 +78,27 @@ export class BenchmarkTab {
     this.progress.hidden = true;
   }
 
-  // A structured progress update (msg.type === "diagnostics_progress"). Animates
-  // the bar from its CURRENT width toward the phase's end target over the phase's
-  // expected duration. The goal is clamped monotonic and the animation is never
-  // reset to the phase start, so the bar keeps moving forward — repeated updates
-  // within a phase (the max-fps probes) no longer snap it backward.
+  // A "diagnostics_progress" message: a step starting elapsed_s into a run
+  // budgeted at total_s, expected to take step_s. The bar eases toward the
+  // step's end over step_s; the goal only grows, so it never moves back.
   applyProgress(msg) {
     if (this.results.dataset.forThisRun) return; // a report is already shown
     this.progress.hidden = false;
-    const clamp = (v) => Math.max(0, Math.min(1, Number(v) || 0));
-    const goal = Math.max(
-      this._progressGoal || 0,
-      clamp(msg.target != null ? msg.target : msg.fraction)
-    );
-    this._progressGoal = goal;
+    const elapsed = Number(msg.elapsed_s) || 0;
+    const step = Math.max(0, Number(msg.step_s) || 0);
+    const total = Number(msg.total_s) || 0;
+    const end = total > 0 ? Math.min(1, (elapsed + step) / total) : 1;
+    this._progressGoal = Math.max(this._progressGoal || 0, end);
     if (msg.phase === "Done") {
       this.progressLabel.textContent = "Finishing…";
     } else {
       const label = msg.detail ? `${msg.phase} — ${msg.detail}` : msg.phase;
-      this.progressLabel.textContent = `${label} · ${Math.round(goal * 100)}%`;
+      const left = Math.ceil(Math.max(0, total - elapsed));
+      this.progressLabel.textContent = `${label} · about ${left} s left`;
     }
-    const eta = Math.max(0, Number(msg.eta_s) || 0);
     const fill = this.progressFill;
-    fill.style.transition = `width ${eta > 0 ? eta : 0.3}s linear`;
-    fill.style.width = `${goal * 100}%`;
+    fill.style.transition = `width ${step > 0 ? step : 0.3}s linear`;
+    fill.style.width = `${this._progressGoal * 100}%`;
   }
 
   updateControls() {
@@ -154,9 +143,8 @@ export class BenchmarkTab {
     try {
       r = await api("POST", "/api/diagnostics/run", body);
     } catch (e) {
-      // The start request never reached the server, so no running-state
-      // transition will ever fire to clear the bar — undo the optimistic UI
-      // here, then rethrow so _onButton's catch still emits the notify.
+      // No running state will come to clear the bar: undo it here, then let
+      // _onButton's catch notify.
       this.status.textContent = "";
       this._hideProgress();
       throw e;
@@ -191,9 +179,9 @@ export class BenchmarkTab {
       verdict.textContent = `✓ ${fmt(rep.target_fps, 0)} fps is achievable`;
     } else {
       verdict.classList.add("bad");
-      const label = BOTTLENECK_LABEL[rep.bottleneck] || rep.bottleneck;
       verdict.textContent =
-        `✗ ${fmt(rep.target_fps, 0)} fps is not achievable — limited by ${label}`;
+        `✗ ${fmt(rep.target_fps, 0)} fps is not achievable — ` +
+        `limited by ${rep.bottleneck_label}`;
     }
     nodes.push(verdict);
 
@@ -298,7 +286,7 @@ export class BenchmarkTab {
         fmt(c?.encode_fps?.[s]),
         fmt(t.achieved_fps, 1),
         fmt(100 * t.drop_rate, 2),
-        `${t.max_queue_depth} of 20`,
+        `${t.max_queue_depth} of ${rep.writer_queue_size}`,
         acq ? `${fmt(acq.p50_ms, 1)}/${fmt(acq.p99_ms, 1)} ms` : "–",
         enc && enc.samples ? `${fmt(enc.p50_ms, 2)}/${fmt(enc.p99_ms, 2)} ms` : "–",
       ];
@@ -340,7 +328,7 @@ export class BenchmarkTab {
           t.name,
           fmt(t.achieved_fps, 1),
           fmt(100 * t.drop_rate, 2),
-          `${t.max_queue_depth} of 20`,
+          `${t.max_queue_depth} of ${rep.writer_queue_size}`,
         ];
         cells.forEach((cell, i) =>
           row.append(el("td", i === 0 ? "bench-cam" : null, cell))
