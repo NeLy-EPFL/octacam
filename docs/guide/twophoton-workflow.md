@@ -153,11 +153,15 @@ under a specific fly yet. Two ways to resolve it:
 - **`2p_reconciliation.md`** (one per day/session folder) — the fastest way
   to see, for that day, every take against its matched 2P folder (or
   "unmatched"), plus every 2P folder on the share that day nothing claimed.
-- **`octacam process --twophoton-verify --config <rig-config-dir>`** —
+- **`octacam process --twophoton-verify [SHARE_FOLDER ...] --config <rig-config-dir>`** —
   read-only report of which 2P *source* folders (still sitting on the
-  Windows share) are fully, checksum-verified present on the NAS, and
-  therefore safe to delete by hand. Never deletes or modifies anything
-  itself.
+  Windows share) are fully verified present on the NAS, and therefore safe
+  to delete by hand. Never deletes or modifies anything itself. ThorImage's
+  per-frame `.tif` files are checked frame by frame against the stacks the
+  transfer assembled them into (`ChanA.tif`, `ChanA_Z01.tif`, ...); every
+  other file by checksum. Pass experiment folders on the share (e.g.
+  `/mnt/windows_share/MD/THxCI80`) to check just those — without them, every
+  folder on the share is re-read, which can take hours.
 - **`reconciliation_log.md`** (one per fly, append-only) — if a
   `--reconcile-recordings` rename ever needs reverting by hand, this is
   the original name/location, preserved even after later runs renumber

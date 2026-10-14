@@ -1808,6 +1808,41 @@ def test_process_assembles_multipage_tiff_stack_on_transfer(tmp_path, monkeypatc
             assert (tf.pages[i].asarray() == i + 1).all()
 
 
+@pytest.mark.parametrize("checksum", [True, False])
+def test_process_pixel_verifies_assembled_stack_when_checksum_on(tmp_path, monkeypatch, checksum):
+    # --delete-after-transfer deletes the per-frame source tifs once the
+    # stack is "verified": with [transfer].checksum on, that must mean every
+    # page compared to its source frame, not just a page count.
+    pytest.importorskip("tifffile")
+    from octacam import twophoton_tiff
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(source_root, "MB247_CI63", "Fly1", u_time=take_start - 5, n_frames=4)
+    folder = tmp_path / "rec"
+    _armed_recording(folder, source_root=source_root, dest_root=dest_root, take_start=take_start)
+    toml = folder / "octacam_config.toml"
+    toml.write_text(
+        toml.read_text().replace("[transfer]\n", f"[transfer]\nchecksum = {str(checksum).lower()}\n", 1)
+    )
+
+    seen = []
+    real = twophoton_tiff.assemble_channel_stack
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("full_verify"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(twophoton_tiff, "assemble_channel_stack", spy)
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert seen == [checksum]
+    assert (dest_root / folder.name / "2P" / "Fly1" / "ChanA.tif").is_file()
+    assert ("every frame verified" in " ".join(result.output.split())) is checksum
+
+
 def _make_fastz_folder_2p(root, experiment, name, *, u_time, zsteps, timepoints, channel="ChanA"):
     """A real "FastZ" (simultaneous multi-plane) ThorImage folder — matches
     real data exactly: ZStage itself reports enable="0" (Z motion is
@@ -2458,6 +2493,160 @@ def test_twophoton_verify_skips_unsettled_folder(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert "still writing" in result.output
+
+
+def _nas_copy_with_assembled_stack(folder, dest_2p, *, tamper=None):
+    """Mirror *folder* the way a transfer does: every per-frame tif channel
+    assembled into one ``ChanA.tif`` stack, everything else copied as-is.
+    *tamper(frames)* may edit the frame list before the stack is written."""
+    tifffile = pytest.importorskip("tifffile")
+    from octacam.twophoton_tiff import _read_single_page, plan_assembly
+
+    dest_2p.mkdir(parents=True)
+    covered = set()
+    for ch in plan_assembly(folder).ready:
+        covered.update(ch.source_files)
+        frames = [_read_single_page(f) for f in ch.source_files]
+        if tamper is not None:
+            frames = tamper(frames)
+        with tifffile.TiffWriter(dest_2p / ch.dest_name) as tw:
+            for frame in frames:
+                tw.write(frame, contiguous=False)
+    for f in folder.iterdir():
+        if f not in covered:
+            (dest_2p / f.name).write_bytes(f.read_bytes())
+
+
+def _run_verify(tmp_path, dest_root, source_root, *extra):
+    config_dir = tmp_path / "rig"
+    if not config_dir.exists():
+        _write_verify_rig_config(config_dir, dest_root, source_root)
+    return runner.invoke(
+        app, ["process", "--twophoton-verify", *extra, "--config", str(config_dir)]
+    )
+
+
+def test_twophoton_verify_accepts_assembled_tiff_stack(tmp_path, monkeypatch):
+    # The transfer turns ThorImage's per-frame tifs into one stack per
+    # channel, so the loose frames are never at the NAS. They must be checked
+    # against the stack's pages, not reported missing (the real 2026-10-13
+    # false alarm: every imaging folder flagged MISMATCH).
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = _make_image_folder_2p(source_root, "exp", "Fly1_Streaming", u_time=1_000_000, n_frames=5)
+    _nas_copy_with_assembled_stack(
+        folder, dest_root / "day1" / "Fly1" / "Recording1_Synced" / "2P" / "Fly1_Streaming"
+    )
+
+    result = _run_verify(tmp_path, dest_root, source_root)
+    out = " ".join(result.output.split())
+    assert result.exit_code == 0, result.output
+    assert "1 safe to delete" in out
+    assert "0 MISMATCH" in out
+
+
+def test_twophoton_verify_flags_assembled_stack_with_a_wrong_frame(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = _make_image_folder_2p(source_root, "exp", "Fly1_Streaming", u_time=1_000_000, n_frames=5)
+
+    def corrupt_one(frames):
+        frames[2] = frames[2] + 1
+        return frames
+
+    _nas_copy_with_assembled_stack(
+        folder, dest_root / "day1" / "Fly1" / "001" / "2P" / "Fly1_Streaming", tamper=corrupt_one
+    )
+    result = _run_verify(tmp_path, dest_root, source_root)
+    out = " ".join(result.output.split())
+    assert result.exit_code != 0
+    assert "MISMATCH" in out
+    assert "1 of 5 frame(s) differ" in out
+    assert "missing at NAS" not in out
+
+
+def test_twophoton_verify_flags_truncated_assembled_stack(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = _make_image_folder_2p(source_root, "exp", "Fly1_Streaming", u_time=1_000_000, n_frames=5)
+    _nas_copy_with_assembled_stack(
+        folder, dest_root / "day1" / "Fly1" / "001" / "2P" / "Fly1_Streaming",
+        tamper=lambda frames: frames[:4],
+    )
+    result = _run_verify(tmp_path, dest_root, source_root)
+    out = " ".join(result.output.split())
+    assert result.exit_code != 0
+    assert "4 page(s) for 5 source frame(s)" in out
+
+
+def test_twophoton_verify_still_checks_loose_frames_when_not_assembled(tmp_path, monkeypatch):
+    # A channel that fell back to a per-file copy has no stack at the NAS:
+    # its frames are checked file by file, and a missing one is still caught.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = _make_image_folder_2p(source_root, "exp", "Fly1_Streaming", u_time=1_000_000, n_frames=5)
+    dest_2p = dest_root / "day1" / "Fly1" / "001" / "2P" / "Fly1_Streaming"
+    dest_2p.mkdir(parents=True)
+    for f in folder.iterdir():
+        (dest_2p / f.name).write_bytes(f.read_bytes())
+
+    result = _run_verify(tmp_path, dest_root, source_root)
+    assert result.exit_code == 0, result.output
+    assert "1 safe to delete" in " ".join(result.output.split())
+
+    (dest_2p / "ChanA_001_001_001_003.tif").unlink()
+    result = _run_verify(tmp_path, dest_root, source_root)
+    assert result.exit_code != 0
+    assert "missing at NAS: ChanA_001_001_001_003.tif" in " ".join(result.output.split())
+
+
+def test_twophoton_verify_ignores_a_different_acquisition_with_the_same_name(
+    tmp_path, monkeypatch
+):
+    # ThorSync/ThorImage reuse names (SyncData165 in two experiments a day
+    # apart, real share 2026-10-14). A not-yet-transferred folder must report
+    # "not yet transferred", not a MISMATCH against someone else's namesake.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    old = time.time() - 10_000
+    folder = _make_sync_folder_2p(source_root, "Test", "SyncData165", mtime=old)
+    (folder / "ThorRealTimeDataSettings.xml").write_bytes(b"<today's settings/>")
+    os.utime(folder / "ThorRealTimeDataSettings.xml", (old, old))
+    os.utime(folder, (old, old))
+    other = dest_root / "day0" / "Fly1" / "Recording7_Synced" / "2P" / "SyncData165"
+    other.mkdir(parents=True)
+    (other / "ThorRealTimeDataSettings.xml").write_bytes(b"<yesterday's settings/>")
+    (other / "Episode001.h5").write_bytes(b"a much bigger, unrelated episode")
+
+    result = _run_verify(tmp_path, dest_root, source_root)
+    out = " ".join(result.output.split())
+    assert result.exit_code == 0, result.output
+    assert "0 safe to delete, 1 not yet transferred" in out
+    assert "MISMATCH —" not in out
+
+
+def test_twophoton_verify_paths_limit_the_check_to_one_experiment(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = _make_image_folder_2p(source_root, "THxCI80", "Fly1_Streaming", u_time=1_000_000, n_frames=3)
+    _nas_copy_with_assembled_stack(folder, dest_root / "day1" / "Fly1" / "001" / "2P" / "Fly1_Streaming")
+    # An older experiment never transferred: outside the scope, not reported.
+    _make_image_folder_2p(source_root, "PAM7xCI80", "Fly2_Streaming", u_time=900_000, n_frames=3)
+
+    result = _run_verify(tmp_path, dest_root, source_root, str(source_root / "THxCI80"))
+    out = " ".join(result.output.split())
+    assert result.exit_code == 0, result.output
+    assert "1 safe to delete, 0 not yet transferred" in out
+    assert "Fly2_Streaming" not in out
+
+    result = _run_verify(tmp_path, dest_root, source_root)
+    assert "1 not yet transferred" in " ".join(result.output.split())
 
 
 # --- 2P sweep: attribute unclaimed folders to their fly by ThorImage prefix -

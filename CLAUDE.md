@@ -679,6 +679,19 @@ against a real 2P rig; the durable findings:
   transfer's `verify`/`checksum` flags aren't persisted in it) and therefore
   safe for a human to delete by hand from the share. Never deletes or
   modifies anything on either side.
+  ThorImage's per-frame `.tif`s are not on the NAS as-is (the transfer
+  assembles them into per-channel/plane stacks), so those are compared
+  **page by page** against the stack (`_verify_assembled_stack`), not
+  byte-wise — byte-wise flagged every imaging folder MISMATCH on the real
+  share (2026-10-14). A namesake fallback only counts when its
+  `Experiment.xml`/`ThorRealTimeDataSettings.xml` is byte-identical
+  (`_could_be_same_acquisition`): names repeat across experiments, and
+  comparing against another acquisition's folder was a false MISMATCH.
+  Optional PATHS scope it to experiment folders on the share.
+  The transfer itself pixel-verifies each stack too (`full_verify=verify` in
+  `_transfer_image_folder_with_assembly`): `verify` is on whenever
+  `[transfer].checksum` is set or a delete depends on the copy — before
+  2026-10-14 it only counted pages, too weak to delete the source on.
 - **Run-ordering gap, fixed**: a behavior take can be finalized by one
   `process` run before its true 2P counterpart has even appeared/settled on
   the share yet (confirmed on real data — see

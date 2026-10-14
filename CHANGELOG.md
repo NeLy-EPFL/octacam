@@ -73,6 +73,24 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **Assembled 2P TIFF stacks are now checked frame by frame on transfer.**
+  When `[transfer].checksum` is on (or `--delete-after-transfer` depends on
+  the copy), each stack is read back from the NAS and every page compared to
+  its source frame before it is kept, instead of only counting pages, so an
+  automatic delete of the per-frame source files rests on the same strength
+  of check as every other file.
+
+- **`octacam process --twophoton-verify` no longer flags every imaging
+  folder as MISMATCH.** It compared files one by one, but the transfer
+  assembles ThorImage's per-frame `.tif` files into one stack per channel
+  (or FastZ plane), so every frame looked "missing at NAS". Those frames are
+  now compared pixel for pixel against the assembled stack pages. A
+  not-yet-transferred folder whose name an older acquisition already used
+  (`SyncData165`, `Fly1_002`) now reports "not yet transferred" instead of a
+  MISMATCH against that other folder. It also takes optional PATHS
+  (`--twophoton-verify /mnt/windows_share/MD/THxCI80`) to check one
+  experiment instead of re-reading the whole share.
+
 - **`RecordingN` renumbering no longer collides when a fly's sequence shifts
   up** (e.g. an earlier Z-stack arriving late): renames are two-phase, and a
   name held by a session that isn't moving is refused instead of merged into.

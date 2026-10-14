@@ -4340,7 +4340,15 @@ def _transfer_image_folder_with_assembly(src: Path, dest: Path, *, verify: bool,
     safely assembled (or assembly isn't enabled/available) falls through to
     a plain per-file copy, same as today. Guarantees every source file ends
     up on *dest* one way or another — an assembly failure means falling back
-    to copying those frames individually, never silently dropping them."""
+    to copying those frames individually, never silently dropping them.
+
+    With *verify* (on whenever ``[transfer].checksum`` is set or a
+    ``--delete-after-transfer`` depends on the copy), each stack is read back
+    from *dest* and every page compared pixel for pixel against its source
+    frame before it is promoted — the stack's equivalent of a checksummed
+    copy, so deleting the source never rides on a weaker check than the rest
+    of the folder got (a page count alone can't see a bad frame).
+    Costs one extra read of each stack and of its source frames."""
     from octacam.transfer import transfer_folder, transfer_tree
     from octacam.twophoton_tiff import (
         assemble_channel_stack,
@@ -4365,13 +4373,15 @@ def _transfer_image_folder_with_assembly(src: Path, dest: Path, *, verify: bool,
             ch.source_files, dest_path,
             axis=ch.axis or "T",
             experiment_xml=experiment_xml if experiment_xml.is_file() else None,
+            full_verify=verify,
             on_progress=make_progress_logger(src, ch.channel),
         )
         if assembled.ok:
             result.copied.append(dest_path.name)
             log.info(
-                "2P tiff-assemble: %s %s: assembled %d frame(s) -> %s",
+                "2P tiff-assemble: %s %s: assembled %d frame(s) -> %s%s",
                 src, ch.channel, assembled.frame_count, dest_path,
+                " (every frame verified)" if verify else "",
             )
         else:
             log.error(
@@ -5732,7 +5742,11 @@ def _find_twophoton_dest_folder(dest_root: Path, source: Path) -> Path | None:
                 return candidate
     # No identity match: fall back to a same-named copy so a truncated or
     # corrupted copy (its h5 size no longer matches) is still hashed and
-    # flagged MISMATCH — at worst a namesake is flagged too, never "safe".
+    # flagged MISMATCH — but only one that is plausibly *this* acquisition.
+    # Names repeat (SyncData165 in two experiments a day apart, Fly1_002 in
+    # many), and comparing against a different acquisition's folder was a
+    # false MISMATCH on every not-yet-transferred namesake (real share,
+    # 2026-10-14). Either way the folder is never reported "safe".
     for pattern in (
         f"*/*/*/2P/{name}",
         f"*/*/2P_only/{name}",
@@ -5740,14 +5754,69 @@ def _find_twophoton_dest_folder(dest_root: Path, source: Path) -> Path | None:
         f"2p_only/*/*/{name}",
     ):
         for candidate in dest_root.glob(pattern):
-            if candidate.is_dir():
+            if candidate.is_dir() and _could_be_same_acquisition(source, candidate):
                 return candidate
     return None
 
 
+# The small per-acquisition metadata files ThorImage/ThorSync write first;
+# a copy of the same acquisition has them byte-identical even when a big
+# data file was truncated or damaged.
+_TWOPHOTON_METADATA_FILES = ("Experiment.xml", "ThorRealTimeDataSettings.xml")
+
+
+def _could_be_same_acquisition(source: Path, candidate: Path) -> bool:
+    """Whether same-named *candidate* on the NAS may be a (damaged) copy of
+    *source* rather than a different acquisition reusing the name: its
+    metadata files match byte for byte. (Not mtimes — a transfer to a share
+    that rejects utime keeps the copy's own.) Missing or unreadable evidence
+    counts as "may be" — the caller then hashes it and reports MISMATCH,
+    never "safe"."""
+    for meta in _TWOPHOTON_METADATA_FILES:
+        src_meta, dst_meta = source / meta, candidate / meta
+        if src_meta.is_file() and dst_meta.is_file():
+            try:
+                if src_meta.read_bytes() != dst_meta.read_bytes():
+                    return False
+            except OSError:
+                pass
+    return True
+
+
+def _verify_assembled_stack(stack: Path, source_files: list[Path]) -> str | None:
+    """Pixel-compare an assembled multi-page stack against the per-frame
+    source files it was built from: page *i* must equal ``source_files[i]``'s
+    own frame (same shape, dtype and values). Returns a problem description,
+    or ``None`` when every frame is present and identical. Never raises."""
+    import numpy as np
+    import tifffile
+
+    from octacam.twophoton_tiff import _read_single_page
+
+    try:
+        with tifffile.TiffFile(stack) as tf:
+            pages = tf.pages
+            if len(pages) != len(source_files):
+                return (
+                    f"stack {stack.name}: {len(pages)} page(s) for "
+                    f"{len(source_files)} source frame(s)"
+                )
+            bad = 0
+            for i, src_file in enumerate(source_files):
+                got = pages[i].asarray()  # pyright: ignore[reportAttributeAccessIssue]
+                want = _read_single_page(src_file)
+                if got.shape != want.shape or got.dtype != want.dtype or not np.array_equal(got, want):
+                    bad += 1
+    except Exception as exc:  # noqa: BLE001 — unreadable stack == not verified
+        return f"stack {stack.name}: unreadable ({exc})"
+    if bad:
+        return f"stack {stack.name}: {bad} of {len(source_files)} frame(s) differ from the source"
+    return None
+
+
 def _verify_twophoton_folder_on_nas(source_folder: Path, dest_folder: Path) -> list[str]:
-    """Byte-for-byte compare every file under *source_folder* against its
-    counterpart under *dest_folder*.
+    """Check that every file under *source_folder* is faithfully present
+    under *dest_folder*.
 
     Returns a list of problem descriptions (missing file, size/content
     mismatch) — empty means *source_folder* is fully, verifiably present at
@@ -5756,11 +5825,31 @@ def _verify_twophoton_folder_on_nas(source_folder: Path, dest_folder: Path) -> l
     mere existence: the sidecar records that a copy was *attempted*, not that
     it was ever checksum-verified — the original transfer's ``verify``/
     ``checksum`` flags aren't persisted in it, and an unmatched-sweep copy
-    made without ``[transfer].checksum`` set skips verification entirely."""
+    made without ``[transfer].checksum`` set skips verification entirely.
+
+    ThorImage's per-frame ``.tif`` files are usually not on the NAS as-is:
+    the transfer assembles each channel (or FastZ plane) into one multi-page
+    stack (``ChanA.tif``, ``ChanA_Z01.tif``; see ``twophoton_tiff``). Those
+    frames are verified page by page against the stack instead of being
+    reported missing — a byte comparison can't work there, the container
+    differs. A channel whose stack isn't at the NAS (it fell back to a
+    per-file copy) is checked file by file like everything else."""
     from octacam.transfer import _file_digest
+    from octacam.twophoton_tiff import plan_assembly
 
     problems: list[str] = []
+    covered: set[Path] = set()
+    for channel in plan_assembly(source_folder).ready:
+        stack = dest_folder / channel.dest_name
+        if not stack.is_file():
+            continue
+        covered.update(channel.source_files)
+        problem = _verify_assembled_stack(stack, channel.source_files)
+        if problem:
+            problems.append(problem)
     for src_file in sorted(p for p in source_folder.rglob("*") if p.is_file()):
+        if src_file in covered:
+            continue
         rel = src_file.relative_to(source_folder)
         dest_file = dest_folder / rel
         if not dest_file.is_file():
@@ -5774,7 +5863,19 @@ def _verify_twophoton_folder_on_nas(source_folder: Path, dest_folder: Path) -> l
     return problems
 
 
-def _run_twophoton_verify(cli_config_dir: Path | None, user: str | None = None) -> None:
+def _scope_twophoton_verify(candidates: list, paths: list[Path]) -> list:
+    """Keep only the *candidates* at or under one of *paths* (experiment or
+    2P folders on the share)."""
+    roots = [path.resolve() for path in paths]
+    return [
+        c for c in candidates
+        if any(c.path.resolve() == r or r in c.path.resolve().parents for r in roots)
+    ]
+
+
+def _run_twophoton_verify(
+    cli_config_dir: Path | None, user: str | None = None, paths: list[Path] | None = None
+) -> None:
     """``octacam process --twophoton-verify``: read-only report of which 2P
     source folders on ``[transfer.twophoton].source`` are already fully,
     live-checksum-verified on the NAS and therefore safe to delete by hand
@@ -5796,6 +5897,8 @@ def _run_twophoton_verify(cli_config_dir: Path | None, user: str | None = None) 
     source_root = Path(resolve_dir_template(twophoton_cfg.source))
     dest_root = Path(resolve_dir_template(cfg.transfer.directory))
     candidates = discover_twophoton_folders(source_root)
+    if paths:
+        candidates = _scope_twophoton_verify(candidates, paths)
     if not candidates:
         log.info("2P verify: nothing found under %s", source_root)
         return
@@ -6898,8 +7001,11 @@ def process(
             "fully, live-checksum-verified on the NAS — safe to delete by hand "
             "from the share (for a mount, like a noperm CIFS share, where "
             "octacam itself has no delete permission there). Read-only: never "
-            "deletes or modifies anything. Requires --config; ignores "
-            "PATHS/--last/--session-id/--all.",
+            "deletes or modifies anything. Assembled TIFF stacks are checked "
+            "frame by frame against the source's per-frame files. Requires "
+            "--config; optional PATHS (experiment or 2P folders on the share) "
+            "limit the check to those; "
+            "ignores --last/--session-id/--all.",
         ),
     ] = False,
     recursive: Annotated[
@@ -7082,12 +7188,14 @@ def process(
     session), or --all (every cached folder). Deleted folders are silently
     skipped.
 
-    --twophoton-sweep, --migrate-layout, --reassemble-tiffs,
-    --twophoton-manifest, and --twophoton-verify are separate modes (ignore
+    --twophoton-sweep, --migrate-layout, --reassemble-tiffs, and
+    --twophoton-manifest are separate modes (ignore
     PATHS/--last/--session-id/--all/--detach) — see their own help text.
-    --reconcile-recordings is also a separate mode, but is the one exception
-    that *does* read PATHS/--all: PATHS scope it to specific day/experiment
-    (or fly) folders (the common case), --all opts into a full-tree pass.
+    --reconcile-recordings and --twophoton-verify are separate modes too, but
+    *do* read PATHS: for --reconcile-recordings they scope it to specific
+    day/experiment (or fly) folders (--all opts into a full-tree pass); for
+    --twophoton-verify they limit the check to those experiment/2P folders
+    on the share.
     """
     from octacam import process_jobs, session_cache
     from octacam.writer import is_partial_transcode, transcode_file
@@ -7108,7 +7216,7 @@ def process(
         _run_reconcile_recordings(config_dir, dry_run, user, paths=list(paths or []), scan_all=all_)
         return
     if twophoton_verify:
-        _run_twophoton_verify(config_dir, user)
+        _run_twophoton_verify(config_dir, user, paths=list(paths or []))
         return
 
     do_transcode = not no_transcode
