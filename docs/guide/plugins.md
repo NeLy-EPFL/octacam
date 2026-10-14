@@ -42,10 +42,35 @@ The matching firmware is in
 ### `twophoton` — 2-photon hardware trigger
 
 Arms an Arduino hardware camera trigger for a 2-photon rig. The Arduino waits for
-a ThorSync rising edge, then emits a square-wave trigger at the recording's fps
-for its duration. Adds the web GUI's **2-Photon** tab (live Arduino state plus
-"arm with recording") and arms at recording start, so capture is synced to the
-ThorSync edge.
+a ThorSync rising edge, then emits a square-wave trigger at the recording's fps.
+Adds the web GUI's **2-Photon** tab (live Arduino state plus "arm with
+recording") and arms at recording start, so capture is synced
+to the ThorSync edge.
+
+By default the take also **stops when ThorImage stops**: the board watches the
+same ThorSync input, and once it has been quiet for `stop_idle_ms` it ends the
+camera trigger and octacam ends the recording. While the take will be armed,
+the Record tab shows a "Synced with ThorImage" checkbox in place of Duration:
+ticked (the default, from `match_thorimage`), no duration is shown or needed and
+`max_duration_s` is only a safety ceiling; unticked, the Duration field appears
+and that manual duration applies. Set `match_thorimage = false` to make manual
+the rig's default.
+
+```toml
+[[plugins]]
+name = "twophoton"
+
+[plugins.options]
+device = "/dev/arduinoCams"
+match_thorimage = true   # default
+stop_idle_ms = 2000      # default; Z-stacks pause up to ~1.35 s between slices
+max_duration_s = 3600    # default safety ceiling
+```
+
+The summary of a take ended this way records its real length as `duration_s`,
+plus `ended_by = "twophoton"`, `duration_limit_s`, and the board's end-of-run
+report under `plugins.twophoton.stop`. The firmware speaks protocol v2: an older
+board is refused and offered a reflash (one click in the tab, or `octacam flash`).
 
 The firmware and wiring notes are in
 [arduino/2photon_trigger/](https://github.com/NeLy-EPFL/octacam/tree/main/arduino/2photon_trigger).

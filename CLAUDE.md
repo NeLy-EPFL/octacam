@@ -472,6 +472,27 @@ a missing device):
    trigger that never fires at all) would eventually reveal the mistake.
    `_doctor_plugins` now warns both directions.
 
+**twophoton "match ThorImage" (2026-10-14, the plugin's default)**: the take
+ends when ThorImage stops, not after a duration. The Mega firmware (protocol
+v2: arm packet gains `idle_ms`) keeps polling D4 after the start edge and ends
+the run once D4 has been LOW for `idle_ms`, sending a `STOP <I|C> <edges>
+<high_ms> <run_ms>` line then `D`; the plugin turns that `D` into
+`controller.stop_recording()` (only after a `T` it saw, so a stale byte can't
+stop a later take). Why "LOW for N ms" works without knowing exactly what is
+wired to D4: real ThorSync episodes put the camera start within ~0.1–11 ms of
+both `CaptureOn`'s rise and the first `FrameOut`, and both are busy for the
+whole acquisition — `CaptureOn` HIGH throughout, `FrameOut` HIGH ~99% of each
+period (64.6 of 65.3 ms) with no streaming/FastZ gap over one frame (≤130 ms);
+Z-stacks pause ≤1.35 s between slices, hence the 2 s default. The `STOP`
+report's edge count/HIGH time records which signal it really is; the first
+real-rig take should confirm it. The controller side is generic: a plugin's
+`recording_end_override(params)` returns a safety ceiling that replaces
+`duration_s` as the deadline (`PluginManager.recording_end_override`), the
+snapshot then reports `ended_by`/`elapsed_ms` instead of `remaining_ms`, and the
+summary's `duration_s` becomes the real length (frames / target fps) — it
+**must** stay the real length, since the 2P matcher/manifest use
+`start + duration_s` as the take's end.
+
 **triggerbox** generalizes the EPFL `common-trigger-circuit` (Arduino Nano
 ESP32). Self-describing wire protocol v2: `0xA5 | ver=2 | len u16 | payload |
 xor`; payload = fps, duration_ms, N camera lines `{pin, pulse_us, delay_us}`, and

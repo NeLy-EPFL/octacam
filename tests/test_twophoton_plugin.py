@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from octacam.plugins.twophoton import (
     DEFAULT_DURATION_MS,
     DEFAULT_FPS,
+    DEFAULT_STOP_IDLE_MS,
     ArmParams,
     TwoPhotonPlugin,
     _build,
@@ -21,7 +22,7 @@ from octacam.plugins.twophoton import (
 # Wire-format constants (mirror the firmware and plugin source)
 ARM_MAGIC    = 0xA5
 CANCEL_MAGIC = 0xCA
-ARM_FORMAT   = "<BHI"  # magic(u8) + fps(u16) + duration_ms(u32) = 7 bytes
+ARM_FORMAT   = "<BHIH"  # magic(u8) + fps(u16) + duration_ms(u32) + idle_ms(u16) = 9 bytes
 
 
 # ---------------------------------------------------------------------------
@@ -74,12 +75,18 @@ class FakeLink:
             return list(self.written)
 
 
-def _plugin_with_fake(is_open: bool = True) -> tuple[TwoPhotonPlugin, FakeLink]:
-    """Return a TwoPhotonPlugin whose link is replaced with a FakeLink."""
+def _plugin_with_fake(
+    is_open: bool = True, match_thorimage: bool = False
+) -> tuple[TwoPhotonPlugin, FakeLink]:
+    """Return a TwoPhotonPlugin whose link is replaced with a FakeLink.
+
+    Fixed-duration mode unless asked: most tests here pin the classic
+    fps/duration arm; the match-ThorImage tests opt in."""
     plugin = TwoPhotonPlugin(
         device="/dev/arduinoCams",
         default_fps=DEFAULT_FPS,
         default_duration_ms=DEFAULT_DURATION_MS,
+        match_thorimage=match_thorimage,
     )
     link = FakeLink(is_open=is_open)
     plugin._link = link
@@ -96,8 +103,8 @@ def _plugin_with_fake(is_open: bool = True) -> tuple[TwoPhotonPlugin, FakeLink]:
 def test_arm_params_to_bytes_correct_format():
     params = ArmParams(fps=100, duration_ms=10_000)
     raw = params.to_bytes()
-    assert len(raw) == 7
-    magic, fps, duration_ms = struct.unpack(ARM_FORMAT, raw)
+    assert len(raw) == 9
+    magic, fps, duration_ms, idle_ms = struct.unpack(ARM_FORMAT, raw)
     assert magic == ARM_MAGIC
     assert fps == 100
     assert duration_ms == 10_000
@@ -105,13 +112,13 @@ def test_arm_params_to_bytes_correct_format():
 
 def test_arm_params_to_bytes_boundary_values():
     params = ArmParams(fps=1, duration_ms=1)
-    magic, fps, dur = struct.unpack(ARM_FORMAT, params.to_bytes())
+    magic, fps, dur, _idle = struct.unpack(ARM_FORMAT, params.to_bytes())
     assert magic == ARM_MAGIC
     assert fps == 1
     assert dur == 1
 
     params = ArmParams(fps=10_000, duration_ms=2**32 - 1)
-    magic, fps, dur = struct.unpack(ARM_FORMAT, params.to_bytes())
+    magic, fps, dur, _idle = struct.unpack(ARM_FORMAT, params.to_bytes())
     assert fps == 10_000
     assert dur == 2**32 - 1
 
@@ -155,7 +162,7 @@ def test_on_recording_start_sends_arm_packet():
     plugin.on_recording_start({"twophoton": {"fps": 120, "duration_ms": 5000}})
     written = link.snapshot()
     assert len(written) == 1
-    magic, fps, dur = struct.unpack(ARM_FORMAT, written[0])
+    magic, fps, dur, _idle = struct.unpack(ARM_FORMAT, written[0])
     assert magic == ARM_MAGIC
     assert fps == 120
     assert dur == 5000
@@ -181,7 +188,7 @@ def test_on_recording_start_uses_defaults_when_twophoton_key_present_but_empty()
     plugin.on_recording_start({"twophoton": {}})
     written = link.snapshot()
     assert len(written) == 1
-    _, fps, dur = struct.unpack(ARM_FORMAT, written[0])
+    _, fps, dur, _idle = struct.unpack(ARM_FORMAT, written[0])
     assert fps == DEFAULT_FPS
     assert dur == DEFAULT_DURATION_MS
 
@@ -189,22 +196,22 @@ def test_on_recording_start_uses_defaults_when_twophoton_key_present_but_empty()
 def test_recording_metadata_armed_when_checkbox_checked():
     plugin, _link = _plugin_with_fake()
     plugin.on_recording_start({"twophoton": {"fps": 120, "duration_ms": 5000}})
-    assert plugin.recording_metadata() == {"armed": True}
+    assert plugin.recording_metadata() == {"armed": True, "match_thorimage": False}
 
 
 def test_recording_metadata_not_armed_when_no_params():
     plugin, _link = _plugin_with_fake()
     plugin.on_recording_start(None)
-    assert plugin.recording_metadata() == {"armed": False}
+    assert plugin.recording_metadata() == {"armed": False, "match_thorimage": False}
 
 
 def test_recording_metadata_reflects_most_recent_take_only():
     # A prior armed take must not leak "armed": True into a later unarmed one.
     plugin, _link = _plugin_with_fake()
     plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
-    assert plugin.recording_metadata() == {"armed": True}
+    assert plugin.recording_metadata() == {"armed": True, "match_thorimage": False}
     plugin.on_recording_start(None)
-    assert plugin.recording_metadata() == {"armed": False}
+    assert plugin.recording_metadata() == {"armed": False, "match_thorimage": False}
 
 
 def test_recording_metadata_armed_even_when_link_closed():
@@ -213,7 +220,7 @@ def test_recording_metadata_armed_even_when_link_closed():
     # transfer pipeline's purposes (it should still look for paired 2P data).
     plugin = TwoPhotonPlugin(device="/dev/does-not-exist")
     plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
-    assert plugin.recording_metadata() == {"armed": True}
+    assert plugin.recording_metadata() == {"armed": True, "match_thorimage": True}
 
 
 def test_on_recording_stop_abort_sends_cancel():
@@ -247,10 +254,14 @@ def test_default_start_params_emits_headless_slice():
     from octacam.plugins import PluginManager
 
     plugin, _ = _plugin_with_fake()
-    assert plugin.default_start_params(83.0, 12.0) == {"fps": 83, "duration_ms": 12000}
+    assert plugin.default_start_params(83.0, 12.0) == {
+        "fps": 83, "duration_ms": 12000, "match_thorimage": False,
+    }
     # And it must reach on_recording_start under the "twophoton" key via the manager.
     params = PluginManager([plugin]).default_start_params(80.0, 5.0)
-    assert params == {"twophoton": {"fps": 80, "duration_ms": 5000}}
+    assert params == {
+        "twophoton": {"fps": 80, "duration_ms": 5000, "match_thorimage": False}
+    }
 
 
 def test_on_recording_start_surfaces_write_failure_to_gui():
@@ -435,7 +446,7 @@ def test_from_payload_clamps_duration_to_uint32():
     # An out-of-range duration must clamp, not blow up to_bytes() with struct.error.
     p = ArmParams.from_payload({"duration_ms": 2**40}, 100, 10_000)
     assert p.duration_ms == 0xFFFF_FFFF
-    assert len(p.to_bytes()) == 7  # still packs cleanly
+    assert len(p.to_bytes()) == 9  # still packs cleanly
 
 
 def test_on_recording_start_warns_and_skips_when_link_closed():
@@ -870,12 +881,12 @@ def test_reader_distinguishes_bare_status_from_banner():
 
 def test_identify_current_and_outdated():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, f"2PHOTON 1 {plugin._fw.needed_build}")
+    _verify_with_banner(plugin, link, f"2PHOTON 2 {plugin._fw.needed_build}")
     assert plugin._firmware_ok
     assert plugin.firmware_provisioning()["state"] == "current"
     assert plugin.firmware_provisioning()["needs_flash"] is False
 
-    _verify_with_banner(plugin, link, "2PHOTON 1")  # older, no fingerprint
+    _verify_with_banner(plugin, link, "2PHOTON 2")  # older, no fingerprint
     assert plugin._firmware_ok  # still arms
     assert plugin.firmware_provisioning()["state"] == "outdated"
 
@@ -898,8 +909,8 @@ def test_identify_foreign_board_disables_arming():
 
 def test_flash_firmware_success():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "2PHOTON 1")  # out of date
-    link.banner = f"2PHOTON 1 {plugin._fw.needed_build}"  # reports current after flash
+    _verify_with_banner(plugin, link, "2PHOTON 2")  # out of date
+    link.banner = f"2PHOTON 2 {plugin._fw.needed_build}"  # reports current after flash
     result = plugin.flash_firmware()
     assert result.ok
     assert plugin.firmware_provisioning()["needs_flash"] is False
@@ -922,12 +933,196 @@ def test_on_recording_start_refuses_on_incompatible_firmware():
 
 def test_firmware_and_flash_endpoints():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "2PHOTON 1")
+    _verify_with_banner(plugin, link, "2PHOTON 2")
     client = _test_client(plugin)
     body = client.get("/api/twophoton/firmware").json()
     assert body["state"] == "outdated" and body["needs_flash"] is True
 
-    link.banner = f"2PHOTON 1 {plugin._fw.needed_build}"
+    link.banner = f"2PHOTON 2 {plugin._fw.needed_build}"
     flashed = client.post("/api/twophoton/flash", json={}).json()
     assert flashed["ok"] is True
     assert flashed["provisioning"]["needs_flash"] is False
+
+
+# ---------------------------------------------------------------------------
+# Match ThorImage: stop the recording when ThorImage stops
+# ---------------------------------------------------------------------------
+
+class _StopSpy:
+    """Stands in for RecordingController: records stop_recording calls."""
+
+    def __init__(self):
+        self.stops: list[bool] = []
+
+    def stop_recording(self, abort: bool = False) -> None:
+        self.stops.append(abort)
+
+
+def test_match_thorimage_is_the_default():
+    assert TwoPhotonPlugin()._match_thorimage is True
+    assert _build({})._match_thorimage is True
+    assert _build({"match_thorimage": "false"})._match_thorimage is False
+    assert _build({"match_thorimage": False})._match_thorimage is False
+
+
+def test_build_parses_match_options():
+    plugin = _build({"stop_idle_ms": "1500", "max_duration_s": 900})
+    assert plugin._stop_idle_ms == 1500
+    assert plugin._max_duration_s == 900.0
+    # Garbage falls back to the defaults; idle_ms is clamped to the uint16 wire
+    # field and never to 0 (which the firmware reads as "fixed duration").
+    assert _build({"stop_idle_ms": "x"})._stop_idle_ms == DEFAULT_STOP_IDLE_MS
+    assert _build({"stop_idle_ms": 0})._stop_idle_ms == 1
+    assert _build({"stop_idle_ms": 10**6})._stop_idle_ms == 0xFFFF
+
+
+def test_match_arm_sends_ceiling_and_idle_timeout():
+    plugin, link = _plugin_with_fake(match_thorimage=True)
+    plugin._stop_idle_ms = 2000
+    plugin._max_duration_s = 600.0
+    # The Record tab's duration is ignored: ThorImage decides; 600 s is the cap.
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 5000}})
+    magic, fps, dur, idle = struct.unpack(ARM_FORMAT, link.snapshot()[0])
+    assert (magic, fps, dur, idle) == (ARM_MAGIC, 100, 600_000, 2000)
+    assert plugin.recording_metadata() == {"armed": True, "match_thorimage": True}
+
+
+def test_fixed_duration_arm_disables_idle_detection():
+    plugin, link = _plugin_with_fake(match_thorimage=False)
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 5000}})
+    _, _, dur, idle = struct.unpack(ARM_FORMAT, link.snapshot()[0])
+    assert (dur, idle) == (5000, 0)
+
+
+def test_gui_checkbox_overrides_config_default():
+    # Config says match; the operator unticked "Stop when ThorImage stops".
+    plugin, link = _plugin_with_fake(match_thorimage=True)
+    params = {"twophoton": {"fps": 100, "duration_ms": 5000, "match_thorimage": False}}
+    assert plugin.recording_end_override(params) is None
+    plugin.on_recording_start(params)
+    _, _, dur, idle = struct.unpack(ARM_FORMAT, link.snapshot()[0])
+    assert (dur, idle) == (5000, 0)
+    # ...and the other way round.
+    plugin, link = _plugin_with_fake(match_thorimage=False)
+    params = {"twophoton": {"fps": 100, "duration_ms": 5000, "match_thorimage": True}}
+    assert plugin.recording_end_override(params) == plugin._max_duration_s
+    plugin.on_recording_start(params)
+    assert struct.unpack(ARM_FORMAT, link.snapshot()[0])[3] == plugin._stop_idle_ms
+
+
+def test_recording_end_override_only_when_armed_and_matching():
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    assert plugin.recording_end_override(None) is None
+    assert plugin.recording_end_override({"flywheel": {}}) is None  # not armed
+    assert plugin.recording_end_override({"twophoton": {}}) == plugin._max_duration_s
+
+
+def test_plugin_manager_recording_end_override():
+    from octacam.plugins import PluginManager
+
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    manager = PluginManager([object(), plugin])  # a hook-less plugin is skipped
+    assert manager.recording_end_override({"twophoton": {}}) == (
+        "twophoton", plugin._max_duration_s,
+    )
+    assert manager.recording_end_override(None) is None
+
+
+def test_done_after_trigger_stops_recording_in_match_mode():
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    spy = _StopSpy()
+    plugin.set_controller(spy)
+    plugin.on_recording_start({"twophoton": {}})
+    for status in "AT":
+        plugin._on_arduino_status(status)
+    assert spy.stops == []
+    plugin._on_stop_report(
+        {"reason": "thorimage", "edges": 4500, "high_ms": 293_000, "run_ms": 294_000}
+    )
+    plugin._on_arduino_status("D")
+    assert spy.stops == [False]  # a clean stop, not an abort
+    assert plugin.recording_metadata()["stop"]["reason"] == "thorimage"
+
+
+def test_done_does_not_stop_a_fixed_duration_take():
+    plugin, _ = _plugin_with_fake(match_thorimage=False)
+    spy = _StopSpy()
+    plugin.set_controller(spy)
+    plugin.on_recording_start({"twophoton": {}})
+    for status in "ATD":
+        plugin._on_arduino_status(status)
+    assert spy.stops == []  # the controller's own deadline ends it, as before
+
+
+def test_stale_done_never_stops_a_later_take():
+    # A 'D' that arrives after on_recording_stop reset the state (or before the
+    # next take's board triggered) must not end the take that's now waiting.
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    spy = _StopSpy()
+    plugin.set_controller(spy)
+    plugin.on_recording_start({"twophoton": {}})
+    plugin._on_arduino_status("A")
+    plugin._on_arduino_status("D")  # never saw 'T'
+    plugin.on_recording_stop(aborted=False)
+    plugin._on_arduino_status("D")
+    assert spy.stops == []
+
+
+def test_new_take_clears_previous_stop_report():
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    plugin.on_recording_start({"twophoton": {}})
+    plugin._on_stop_report({"reason": "ceiling", "edges": 1, "high_ms": 5, "run_ms": 9})
+    plugin.on_recording_start({"twophoton": {}})
+    assert "stop" not in plugin.recording_metadata()
+
+
+def test_parse_stop_report():
+    from octacam.plugins.twophoton import parse_stop_report
+
+    assert parse_stop_report("STOP I 4500 293000 294100") == {
+        "reason": "thorimage", "edges": 4500, "high_ms": 293000, "run_ms": 294100,
+    }
+    assert parse_stop_report("STOP C 1 3600000 3600000")["reason"] == "ceiling"
+    for garbled in ("STOP X 1 2 3", "STOP I 1 2", "STOP I a b c", "STOPI 1 2 3"):
+        assert parse_stop_report(garbled) is None
+
+
+def test_reader_parses_stop_report_before_done():
+    """The end-of-run "STOP …" line starts with 'S' (never a status byte), so it
+    is read as a line and delivered before the trailing 'D'."""
+    events: list = []
+    link = TwoPhotonLink(lambda s: events.append(("status", s)))
+    link.on_stop_report = lambda r: events.append(("stop", r["reason"], r["edges"]))
+    link._serial = _FeedSerial(b"ATSTOP I 4500 293000 294100\nD")
+    link._reader_stop.clear()
+    t = threading.Thread(target=link._read_loop, daemon=True)
+    t.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while len(events) < 4 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        link._reader_stop.set()
+        t.join(timeout=1.0)
+    assert events == [
+        ("status", "A"), ("status", "T"), ("stop", "thorimage", 4500), ("status", "D"),
+    ]
+
+
+def test_v1_firmware_is_refused_and_offered_a_reflash():
+    # A v1 board would misparse the 9-byte arm packet: refuse to arm it.
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "2PHOTON 1 deadbeef")
+    assert plugin._firmware_ok is False
+    prov = plugin.firmware_provisioning()
+    assert prov["state"] == "wrong_version" and prov["needs_flash"]
+    plugin.on_recording_start({"twophoton": {}})
+    assert link.snapshot() == []
+
+
+def test_status_reports_match_config():
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    status = plugin.status()
+    assert status["match_thorimage"] is True
+    assert status["max_duration_s"] == plugin._max_duration_s
+    assert status["stop_idle_ms"] == plugin._stop_idle_ms

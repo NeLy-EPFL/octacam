@@ -3,6 +3,9 @@
 import { api, clamp, clampInput, formatBytes, formatHMS } from "./util.js";
 
 const BUSY_STATES = new Set(["waiting", "recording", "finishing"]);
+// Operator-facing name for the plugin that ends a take itself (snapshot
+// `ended_by`), e.g. "Recording until ThorImage stops".
+const ENDED_BY_LABELS = { twophoton: "ThorImage" };
 
 // Per-browser memory of the Advanced-options switch, so a power user who keeps
 // it open doesn't have to re-flip it every load (mirrors the theme/resize
@@ -61,6 +64,15 @@ export class RecordTab {
     this.fields = document.getElementById("record-fields");
     this.durationValue = document.getElementById("duration-value");
     this.durationUnit = document.getElementById("duration-unit");
+    this.durationRow = document.getElementById("duration-row");
+    this.durationSyncRow = document.getElementById("duration-sync-row");
+    this.durationSyncLabel = document.getElementById("duration-sync-label");
+    this.durationSync = document.getElementById("duration-sync");
+    this._durationSyncSpec = null;
+    this.durationSync.addEventListener("change", () => {
+      this._durationSyncSpec?.onChange?.(this.durationSync.checked);
+      this._syncDurationRows();
+    });
     this.fpsInput = document.getElementById("fps");
     // The save path is split into a base directory (record_directory) and a
     // relative sub-path (relative_directory); the server recomposes save_dir.
@@ -226,7 +238,10 @@ export class RecordTab {
     // reads the clock - it never mutates the remaining time, which is what made
     // the old per-second decrement race with telemetry and tick back up.
     setInterval(() => {
-      if (this.state === "recording" && this.deadline != null) {
+      if (
+        this.state === "recording" &&
+        (this.deadline != null || this.elapsedStart != null)
+      ) {
         this.renderStatus();
       }
     }, 250);
@@ -555,7 +570,43 @@ export class RecordTab {
     return Math.max(0, this.deadline - performance.now());
   }
 
+  // A plugin that can end the take itself (twophoton: "Synced with
+  // ThorImage") offers a checkbox in place of the Duration field:
+  // spec = {label, title, checked, onChange(checked)}; null withdraws it.
+  // Ticked hides the Duration row entirely; unticked shows it, and the manual
+  // duration applies. The plugin owns the state (it builds the start params);
+  // this only renders it and reports flips back.
+  setDurationSync(spec) {
+    this._durationSyncSpec = spec || null;
+    if (spec) {
+      this.durationSyncLabel.textContent = spec.label;
+      this.durationSyncRow.title = spec.title || "";
+      this.durationSync.checked = Boolean(spec.checked);
+    }
+    this._syncDurationRows();
+  }
+
+  _syncDurationRows() {
+    const offered = this._durationSyncSpec != null;
+    this.durationSyncRow.hidden = !offered;
+    this.durationRow.hidden = offered && this.durationSync.checked;
+  }
+
   _syncCountdown(snap) {
+    // A plugin-ended take (snap.ended_by) has no countdown, only elapsed time;
+    // anchor its start locally so the 250 ms re-render ticks smoothly.
+    if (snap.state === "recording" && snap.elapsed_ms != null) {
+      if (snap.recording_id !== this.recordingId || this.elapsedStart == null) {
+        this.recordingId = snap.recording_id;
+        this.elapsedStart = performance.now() - snap.elapsed_ms;
+      }
+      this.endedBy = snap.ended_by;
+      this.deadline = null;
+      this.totalMs = null;
+      return;
+    }
+    this.elapsedStart = null;
+    this.endedBy = null;
     if (snap.state !== "recording" || snap.remaining_ms == null) {
       this.deadline = null;
       this.totalMs = null;
@@ -597,6 +648,10 @@ export class RecordTab {
     let level = "";
     if (this.state === "waiting") {
       text = "Waiting for first trigger...";
+    } else if (this.state === "recording" && this.elapsedStart != null) {
+      const who = ENDED_BY_LABELS[this.endedBy] ?? this.endedBy;
+      const elapsed = Math.max(0, performance.now() - this.elapsedStart);
+      text = `Recording until ${who} stops — ${formatHMS(elapsed)} elapsed`;
     } else if (this.state === "recording") {
       text =
         remaining != null
@@ -638,8 +693,9 @@ export class RecordTab {
       } else {
         bar.style.width = width;
       }
-    } else if (this.state === "waiting") {
-      // Armed but no deadline yet: show an indeterminate sweep rather than a
+    } else if (this.state === "waiting" || this.elapsedStart != null) {
+      // Armed but no deadline yet — or a plugin-ended take, which has no
+      // deadline at all: show an indeterminate sweep rather than a
       // bar stuck at zero. Clear the inline width so the CSS rule drives it.
       bar.style.width = "";
       prog.classList.remove("hidden");

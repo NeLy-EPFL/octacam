@@ -69,6 +69,13 @@ class OctacamPlugin(Protocol):
     # See PluginManager.default_start_params.
     def default_start_params(self, fps: float, duration_s: float) -> dict | None: ...
 
+    # A plugin that ends the recording itself (e.g. twophoton stopping when
+    # ThorImage stops, via controller.stop_recording) returns the take's safety
+    # ceiling in seconds, used as the deadline in place of the configured
+    # duration. None = the configured duration applies. Queried at start with the
+    # same {name: slice} params as on_recording_start; must not block or raise.
+    def recording_end_override(self, params: dict | None) -> float | None: ...
+
     # ---- preview lifecycle (optional; only a trigger-DRIVING plugin acts) ----
     # A plugin that can generate the trigger (e.g. triggerbox) can drive it during
     # idle preview too, so the preview approximates the recording. It advertises
@@ -131,6 +138,9 @@ class Plugin:
         return None
 
     def default_start_params(self, fps: float, duration_s: float) -> dict | None:
+        return None
+
+    def recording_end_override(self, params: dict | None) -> float | None:
         return None
 
     def drives_preview_trigger(self) -> bool:
@@ -210,6 +220,26 @@ class PluginManager:
             if slice_ is not None:
                 params[self._name(plugin)] = slice_
         return params
+
+    def recording_end_override(self, params: dict | None) -> tuple[str, float] | None:
+        """``(plugin_name, ceiling_s)`` of the first plugin that ends this
+        recording itself (see :meth:`Plugin.recording_end_override`), else None.
+        Duck-typed (``getattr``) so a plugin predating the hook still loads; a
+        misbehaving plugin is logged and skipped."""
+        for plugin in self.plugins:
+            hook = getattr(plugin, "recording_end_override", None)
+            if hook is None:
+                continue
+            try:
+                ceiling = hook(params)
+            except Exception:
+                log.exception(
+                    "Plugin %s.recording_end_override failed", self._name(plugin)
+                )
+                continue
+            if ceiling is not None and ceiling > 0:
+                return self._name(plugin), float(ceiling)
+        return None
 
     def collect_recording_metadata(self) -> dict:
         """Collect each plugin's just-finished-take metadata, keyed by name.

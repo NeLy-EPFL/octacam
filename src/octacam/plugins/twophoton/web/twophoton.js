@@ -1,4 +1,6 @@
 // 2-Photon tab: Arduino hardware trigger status and arm-with-recording control.
+// While armed it also offers the Record tab a "Synced with ThorImage" checkbox
+// (match ThorImage: the take ends when ThorImage stops) in place of Duration.
 //
 // Served from /plugins/twophoton/, so it cannot import core "./util.js" (that
 // would 404). The shared fetch helper (api) is passed in via the ctx the host
@@ -15,10 +17,19 @@ const STATE_LABELS = {
 };
 
 export default class TwoPhotonTab {
-  constructor({ notify, status, getRecordSettings, api }) {
+  constructor({ notify, status, getRecordSettings, api, setDurationSync }) {
     this.notify = notify;
     this.api = api; // shared fetch helper (from util.js, injected by app.js)
     this._getRecordSettings = getRecordSettings;
+    // Record-tab hook: shows the "Synced with ThorImage" checkbox in place of
+    // its Duration field while this tab will arm the take. Optional in the ctx.
+    this._setDurationSync = setDurationSync;
+    this.maxDurationS = Number(status?.max_duration_s) || null;
+    // The rig config's match_thorimage seeds the choice once; after that it is
+    // the operator's (state pushes never overwrite it).
+    this.matchThorImage =
+      typeof status?.match_thorimage === "boolean" ? status.match_thorimage : true;
+    this._syncOffered = null; // last offer state sent to the Record tab
     this.ready = Boolean(status?.ready);
     this.device = status?.device || "";
     this.arduinoState = status?.arduino_state || "idle";
@@ -32,6 +43,7 @@ export default class TwoPhotonTab {
     this.stateLabel    = document.getElementById("twophoton-state-label");
     this.stateValue    = document.getElementById("twophoton-state-value");
     this.armWithRec    = document.getElementById("twophoton-arm-with-recording");
+    this.armWithRec?.addEventListener("change", () => this._refresh());
 
     this.reconnectBtn.addEventListener("click", () => this._reconnect());
 
@@ -75,6 +87,7 @@ export default class TwoPhotonTab {
   applyState(msg) {
     this.arduinoState = msg.state || "idle";
     if (msg.device) this.device = msg.device;
+    if (typeof msg.max_duration_s === "number") this.maxDurationS = msg.max_duration_s;
     // The backend reports link readiness with every state push, so a serial
     // port that dies mid-session disables the arm gate (and shows the reconnect
     // notice) instead of leaving a stale "ready" that would arm a dead link.
@@ -111,15 +124,43 @@ export default class TwoPhotonTab {
 
   // --------------------------------------------------------- start params
 
-  // Returns {fps, duration_ms} to include in the recording start request, or
-  // null when "arm with recording" is unchecked or the serial port is not open.
+  // Returns {fps, duration_ms, match_thorimage} to include in the recording
+  // start request, or null when "arm with recording" is unchecked or the serial
+  // port is not open. With match_thorimage the server ignores duration_ms and
+  // ends the take when ThorImage stops.
   getStartParams() {
     if (!this.ready || !this.armWithRec?.checked) return null;
     const s = this._getRecordSettings?.();
     if (!s) return null;
     const fps = Math.max(1, Math.round(s.fps || 100));
     const duration_ms = Math.max(1, Math.round((s.duration_s || 10) * 1000));
-    return { fps, duration_ms };
+    return { fps, duration_ms, match_thorimage: this.matchThorImage };
+  }
+
+  // Offer the Record tab the "Synced with ThorImage" checkbox while the next
+  // take will be armed (link open + "Arm with recording"); withdraw it
+  // otherwise, so an unarmed take shows the plain Duration field. Only re-sent
+  // when the offer changes, so state pushes don't keep re-rendering it.
+  _syncDurationOffer() {
+    if (!this._setDurationSync) return;
+    const offer = Boolean(this.ready && this.armWithRec?.checked);
+    if (offer === this._syncOffered) return;
+    this._syncOffered = offer;
+    if (!offer) {
+      this._setDurationSync(null);
+      return;
+    }
+    const cap = this.maxDurationS
+      ? ` (safety limit ${Math.round(this.maxDurationS / 60)} min)`
+      : "";
+    this._setDurationSync({
+      label: "Synced with ThorImage:",
+      title:
+        "End the recording when ThorImage stops acquiring" + cap +
+        ". Untick to enter a duration manually.",
+      checked: this.matchThorImage,
+      onChange: (checked) => { this.matchThorImage = checked; },
+    });
   }
 
   // --------------------------------------------------------- render
@@ -144,6 +185,7 @@ export default class TwoPhotonTab {
     if (this.armWithRec) {
       this.armWithRec.disabled = !this.ready || !this.connected;
     }
+    this._syncDurationOffer();
   }
 
   _renderState() {

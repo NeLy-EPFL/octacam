@@ -1197,3 +1197,124 @@ def test_twophoton_status_shows_specific_error_over_generic_fallback(
         )
     finally:
         page.close()
+
+
+def test_twophoton_synced_duration_replaces_duration_field_and_shows_elapsed(
+    static_server, browser
+):
+    """While the 2P tab will arm the take, the Record tab shows a "Synced with
+    ThorImage" checkbox instead of Duration: ticked (the config default) hides
+    the Duration row entirely, unticked brings it back so a manual duration
+    applies. Not armed: no checkbox, plain Duration. The start slice carries the
+    choice, and a plugin-ended take shows elapsed time, not a countdown."""
+    page = browser.new_page()
+    plugins = {
+        "twophoton": {
+            "device": "/dev/arduinoCams",
+            "arduino_state": "idle",
+            "ready": True,
+            "firmware": "2PHOTON 2 abc",
+            "firmware_ok": True,
+            "firmware_state": "current",
+            "needs_flash": False,
+            "error": None,
+            "match_thorimage": True,
+            "max_duration_s": 3600.0,
+            "stop_idle_ms": 2000,
+            "web": {"module": "/plugins/twophoton/twophoton.js"},
+        }
+    }
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(builder())
+        )
+
+    page.route("**/api/**", json_route(dict))
+    page.route(
+        "**/api/system", json_route(lambda: _system_payload(ready=True, plugins=plugins))
+    )
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=True)))
+    page.route(
+        "**/plugins/twophoton/twophoton.js",
+        lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=TWOPHOTON_JS.read_text()
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+
+    def rows():
+        return page.evaluate(
+            """() => ({
+                sync: !document.getElementById('duration-sync-row').hidden
+                      && document.getElementById('duration-sync-row').offsetParent !== null,
+                duration: document.getElementById('duration-row').offsetParent !== null,
+                checked: document.getElementById('duration-sync').checked,
+                label: document.getElementById('duration-sync-label').textContent,
+            })"""
+        )
+
+    def set_box(box_id, checked):
+        page.evaluate(
+            """([id, on]) => { const el = document.getElementById(id);
+                el.checked = on; el.dispatchEvent(new Event('change')); }""",
+            [box_id, checked],
+        )
+
+    starts: list = []
+
+    def capture_start(route):
+        starts.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    page.route("**/api/recording/start", capture_start)
+
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => !document.getElementById('duration-sync-row').hidden",
+            timeout=5000,
+        )
+        r = rows()
+        assert r["sync"] and r["checked"] and not r["duration"]
+        assert "ThorImage" in r["label"]
+
+        set_box("duration-sync", False)  # manual override
+        r = rows()
+        assert r["sync"] and not r["checked"] and r["duration"]
+
+        page.click("#record-button")
+        page.wait_for_timeout(200)
+        assert starts[-1]["plugin_params"]["twophoton"]["match_thorimage"] is False
+
+        set_box("duration-sync", True)
+        assert not rows()["duration"]
+        set_box("twophoton-arm-with-recording", False)  # not armed: plain Duration
+        r = rows()
+        assert not r["sync"] and r["duration"]
+        set_box("twophoton-arm-with-recording", True)
+        r = rows()
+        assert r["sync"] and r["checked"] and not r["duration"]  # choice kept
+
+        # A plugin-ended take: no remaining time, an elapsed clock instead.
+        page.evaluate(
+            "(msg) => window.__pushWs(msg)",
+            {
+                **_state_payload(ready=True),
+                "type": "state",
+                "state": "recording",
+                "recording_id": 1,
+                "remaining_ms": None,
+                "elapsed_ms": 65_000,
+                "ended_by": "twophoton",
+                "duration_limit_s": 3600.0,
+            },
+        )
+        page.wait_for_function(
+            """() => document.getElementById('record-status')
+                     ?.textContent.startsWith('Recording until ThorImage stops')""",
+            timeout=5000,
+        )
+        assert "1:0" in page.text_content("#record-status")  # ~1:05 elapsed
+    finally:
+        page.close()

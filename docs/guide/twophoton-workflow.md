@@ -21,14 +21,18 @@ manually copy a ThorSync/ThorImage folder anywhere.
 
 ## Recording a paired take
 
-1. Start ThorSync/ThorImage as usual — nothing about how you drive them
-   changes.
-2. Start the octacam recording. The 2-photon Arduino trigger waits for
-   ThorSync's own start edge, so octacam's capture begins right when the 2P
-   acquisition does.
-3. Stop both when you're done. (There's currently no automatic "stop
-   octacam when ThorImage finishes" signal — see [Known limitations](#known-limitations-worth-knowing-about)
-   below.)
+1. Start the octacam recording first. With "Arm with recording" checked in
+   the 2-Photon tab and "Synced with ThorImage" checked in the Record tab
+   (both defaults), there is no duration to set (the Duration field isn't
+   even shown): octacam arms the Arduino and waits.
+2. Start ThorSync/ThorImage as usual — nothing about how you drive them
+   changes. The Arduino starts the cameras on ThorSync's start edge, so
+   octacam's capture begins right when the 2P acquisition does.
+3. When ThorImage finishes, the cameras stop and octacam ends the recording
+   by itself (~2 s later, once the ThorSync input has gone quiet). The
+   Record tab shows "Recording until ThorImage stops" with the elapsed time
+   meanwhile. To record for a fixed time instead, untick "Synced with
+   ThorImage"; the Duration field appears and your value applies.
 
 That's it — pairing, transfer, and organizing all happen later, when you run
 `octacam process`.
@@ -163,10 +167,10 @@ under a specific fly yet. Two ways to resolve it:
 
 ## Known limitations worth knowing about
 
-- **End time isn't synced.** octacam and the 2P acquisition each stop
-  independently — a genuine pair's start lines up closely, but its
-  reported end/duration can differ by tens of seconds. This is normal, not
-  a sign of a bad pairing.
+- **End time is only synced for "Synced with ThorImage" takes.** A
+  fixed-duration take (or one recorded before this mode existed) stops
+  independently of the 2P acquisition, so its end/duration can differ by
+  tens of seconds. That is normal, not a sign of a bad pairing.
 - **A purely timestamp-matched pairing (no `SyncData` folder to verify
   against) is the least certain kind.** It's still gated tightly (start
   time within a few seconds), but if you have the choice, running ThorSync

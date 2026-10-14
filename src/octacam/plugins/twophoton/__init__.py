@@ -2,7 +2,12 @@
 
 Arms an Arduino-based camera trigger over a serial link. The Arduino waits for
 a ThorSync rising edge, then generates a precise square-wave camera trigger at
-the configured frame rate for the configured duration. Enable it with a
+the configured frame rate. By default ("match ThorImage") it keeps going until
+ThorImage stops — the same ThorSync input going quiet for ``stop_idle_ms`` — and
+the plugin then stops the octacam recording too, so no duration has to be set in
+octacam; ``max_duration_s`` is only a safety ceiling. With
+``match_thorimage = false`` (or the tab's checkbox unticked) the recording runs
+for the Record tab's duration instead, as before. Enable it with a
 ``[[plugins]]`` entry in ``octacam_config.toml`` (settings go under a
 ``[plugins.options]`` sub-table)::
 
@@ -14,6 +19,9 @@ the configured frame rate for the configured duration. Enable it with a
     baud = 115200                # optional; default 115200
     default_fps = 100            # fallback when GUI params are not sent
     default_duration_ms = 10000  # fallback duration in milliseconds
+    match_thorimage = true       # stop when ThorImage stops (default); false = fixed duration
+    stop_idle_ms = 2000          # ThorSync input quiet this long = ThorImage stopped
+    max_duration_s = 3600        # safety ceiling while matching ThorImage
     auto_flash = false           # headless: reflash a stale board without prompting
 
 The plugin can also be enabled at launch time with ``--plugin twophoton``.
@@ -27,14 +35,16 @@ sketch (arduino-cli, board ``arduino:avr:mega``) when the board is out of date,
 blank, or foreign — from the GUI's *Flash firmware* button, ``octacam flash``, or
 a prompt at ``octacam record`` start. See :mod:`octacam.firmware`.
 
-Wire protocol (host → Arduino, 7 bytes little-endian):
-  [0xA5][fps:uint16][duration_ms:uint32]  — arm
-  [0xCA]                                  — cancel / abort
+Wire protocol (host → Arduino, 9 bytes little-endian):
+  [0xA5][fps:uint16][duration_ms:uint32][idle_ms:uint16]  — arm (idle_ms 0 = fixed duration)
+  [0xCA]                                                  — cancel / abort
 
 Wire protocol (Arduino → host, 1 byte):
   'A' — armed, waiting for ThorSync
   'T' — triggered, capture running
-  'D' — done, capture complete
+  'D' — done, capture complete — preceded by a
+        "STOP <reason> <edges> <high_ms> <run_ms>" line (reason I = ThorImage
+        stopped, C = duration ceiling)
 
 The plugin broadcasts Arduino state changes over the GUI WebSocket so the
 operator sees real-time feedback without polling.
@@ -75,6 +85,16 @@ DEFAULT_DEVICE = "/dev/arduinoCams"
 DEFAULT_BAUD = 115200
 DEFAULT_FPS = 100
 DEFAULT_DURATION_MS = 10_000
+# "Match ThorImage": the board ends the run once its ThorSync input has been LOW
+# this long. Sized from real ThorSync episodes: streaming/FastZ captures never go
+# quiet for more than one frame (<= 130 ms), anatomical Z-stacks pause up to
+# ~1.35 s between slices. The trailing camera frames are on ThorSync's DAQ too,
+# so a short tail costs nothing.
+DEFAULT_MATCH_THORIMAGE = True
+DEFAULT_STOP_IDLE_MS = 2_000
+# The recording's safety ceiling while matching ThorImage (seconds). Only ever
+# reached if the stop signal never comes.
+DEFAULT_MAX_DURATION_S = 3_600.0
 
 # How long on_recording_start waits for the firmware's 'A' acknowledgement
 # before warning that the arm may not have taken. The firmware acks within a
@@ -94,8 +114,8 @@ _NO_PYSERIAL_MSG = (
 # Wire-format constants. The cancel (0xCA) / identify (0x3F) magics live in
 # _serial_link (shared with the triggerbox link).
 _ARM_MAGIC = 0xA5
-# magic (uint8) + fps (uint16 LE) + duration_ms (uint32 LE) = 7 bytes
-_ARM_FORMAT = "<BHI"
+# magic (uint8) + fps (uint16 LE) + duration_ms (uint32 LE) + idle_ms (uint16 LE) = 9 bytes
+_ARM_FORMAT = "<BHIH"
 
 _STATUS_BYTES = frozenset(b"ATD")
 
@@ -104,7 +124,12 @@ _STATUS_BYTES = frozenset(b"ATD")
 # byte) so the reader can tell it apart from the bare 'A'/'T'/'D' status bytes.
 _EXPECTED_BANNER = "2PHOTON"
 _FQBN = "arduino:avr:mega"  # Arduino Mega 2560
-_PROTOCOL_VERSION = 1
+# v2: the arm packet carries idle_ms ("match ThorImage") and a run ends with a
+# STOP report line. A v1 board would misparse the longer arm, so it is refused
+# (WRONG_VERSION) and offered a reflash.
+_PROTOCOL_VERSION = 2
+_STOP_PREFIX = "STOP"
+_STOP_REASONS = {"I": "thorimage", "C": "ceiling"}
 
 
 def _firmware_spec() -> fw.FirmwareSpec | None:
@@ -127,9 +152,14 @@ def _firmware_spec() -> fw.FirmwareSpec | None:
 class ArmParams:
     fps: int
     duration_ms: int
+    # >0: end the run once the ThorSync input has been quiet this long (match
+    # ThorImage); 0: run for exactly duration_ms.
+    idle_ms: int = 0
 
     def to_bytes(self) -> bytes:
-        return struct.pack(_ARM_FORMAT, _ARM_MAGIC, self.fps, self.duration_ms)
+        return struct.pack(
+            _ARM_FORMAT, _ARM_MAGIC, self.fps, self.duration_ms, self.idle_ms
+        )
 
     @classmethod
     def from_payload(
@@ -165,6 +195,9 @@ class TwoPhotonLink(SerialReaderLink):
     log_prefix = "2-photon trigger"
     reader_name = "twophoton-reader"
     expected_banner = _EXPECTED_BANNER
+    # Called (reader thread) with each parsed end-of-run STOP report, just
+    # before its 'D' status byte. Set by the owning plugin.
+    on_stop_report: Callable[[dict], None] | None = None
 
     def send_arm(self, params: ArmParams) -> bool:
         return self._write(params.to_bytes())
@@ -178,10 +211,11 @@ class TwoPhotonLink(SerialReaderLink):
         return super().identify(timeout)
 
     def _read_loop(self) -> None:
-        # The firmware emits bare single-byte statuses ('A'/'T'/'D') AND, in reply
-        # to an identify query, a newline-terminated banner "2PHOTON <v> <build>".
-        # The banner never starts with a status byte, so a byte seen with an empty
-        # buffer is a status; anything else accumulates into the banner line.
+        # The firmware emits bare single-byte statuses ('A'/'T'/'D') AND two
+        # newline-terminated lines: the identify banner "2PHOTON <v> <build>" and
+        # the end-of-run "STOP <reason> <edges> <high_ms> <run_ms>". Neither line
+        # starts with a status byte, so a byte seen with an empty buffer is a
+        # status; anything else accumulates into a line.
         buf = bytearray()
         while not self._reader_stop.is_set():
             s = self._serial
@@ -215,6 +249,10 @@ class TwoPhotonLink(SerialReaderLink):
                 if line.upper().startswith(self.expected_banner):
                     self._identity = line
                     self._identity_event.set()
+                elif line.startswith(_STOP_PREFIX):
+                    report = parse_stop_report(line)
+                    if report is not None:
+                        self._dispatch(self.on_stop_report, report)
                 continue
             if buf:
                 buf.append(byte)
@@ -225,6 +263,35 @@ class TwoPhotonLink(SerialReaderLink):
                 self._dispatch(self._on_status, chr(byte))
             else:
                 buf.append(byte)  # start of a banner line
+
+
+def parse_stop_report(line: str) -> dict | None:
+    """Parse the firmware's ``"STOP <reason> <edges> <high_ms> <run_ms>"`` line.
+
+    Returns ``{"reason": "thorimage"|"ceiling", "edges", "high_ms", "run_ms"}``,
+    or None for a garbled line."""
+    parts = line.split()
+    if len(parts) != 5 or parts[0] != _STOP_PREFIX or parts[1] not in _STOP_REASONS:
+        return None
+    try:
+        edges, high_ms, run_ms = (int(x) for x in parts[2:])
+    except ValueError:
+        return None
+    return {
+        "reason": _STOP_REASONS[parts[1]],
+        "edges": edges,
+        "high_ms": high_ms,
+        "run_ms": run_ms,
+    }
+
+
+def _as_bool(value, default: bool) -> bool:
+    """A config/payload boolean that may arrive as a string ("false")."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 _STATE_LABELS: dict[str, str] = {
@@ -258,15 +325,25 @@ def _build(options: dict) -> TwoPhotonPlugin:
         )
     except (TypeError, ValueError):
         default_duration_ms = DEFAULT_DURATION_MS
-    auto_flash = options.get("auto_flash", False)
-    if isinstance(auto_flash, str):
-        auto_flash = auto_flash.strip().lower() in ("1", "true", "yes", "on")
+    try:
+        stop_idle_ms = int(options.get("stop_idle_ms", DEFAULT_STOP_IDLE_MS))
+    except (TypeError, ValueError):
+        stop_idle_ms = DEFAULT_STOP_IDLE_MS
+    try:
+        max_duration_s = float(options.get("max_duration_s", DEFAULT_MAX_DURATION_S))
+    except (TypeError, ValueError):
+        max_duration_s = DEFAULT_MAX_DURATION_S
     return TwoPhotonPlugin(
         device=str(device),
         baud=baud,
         default_fps=default_fps,
         default_duration_ms=default_duration_ms,
-        auto_flash=bool(auto_flash),
+        auto_flash=_as_bool(options.get("auto_flash"), False),
+        match_thorimage=_as_bool(
+            options.get("match_thorimage"), DEFAULT_MATCH_THORIMAGE
+        ),
+        stop_idle_ms=stop_idle_ms,
+        max_duration_s=max_duration_s,
     )
 
 
@@ -274,7 +351,9 @@ class TwoPhotonPlugin(Plugin):
     """2-photon rig hardware trigger plugin.
 
     Arms the Arduino with the recording's fps and duration, then waits for the
-    ThorSync rising edge to start capture. Arduino state changes are broadcast
+    ThorSync rising edge to start capture. In "match ThorImage" mode the board
+    also ends the run when ThorImage stops, and the plugin stops the recording
+    (see :meth:`recording_end_override`). Arduino state changes are broadcast
     over the GUI WebSocket so the operator sees real-time feedback.
     """
 
@@ -287,6 +366,9 @@ class TwoPhotonPlugin(Plugin):
         default_fps: int = DEFAULT_FPS,
         default_duration_ms: int = DEFAULT_DURATION_MS,
         auto_flash: bool = False,
+        match_thorimage: bool = DEFAULT_MATCH_THORIMAGE,
+        stop_idle_ms: int = DEFAULT_STOP_IDLE_MS,
+        max_duration_s: float = DEFAULT_MAX_DURATION_S,
     ):
         # _configured_device is what the config asked for (a path, or "auto");
         # self.device is the currently-active/display device, resolved on open.
@@ -296,12 +378,17 @@ class TwoPhotonPlugin(Plugin):
         self._default_fps = default_fps
         self._default_duration_ms = default_duration_ms
         self._auto_flash = bool(auto_flash)
+        self._match_thorimage = bool(match_thorimage)
+        # Clamp to the uint16 wire field; 0 would silently mean "fixed duration".
+        self._stop_idle_ms = max(1, min(0xFFFF, int(stop_idle_ms)))
+        self._max_duration_s = max(1.0, float(max_duration_s))
         self._firmware: str | None = None
         self._firmware_ok = True
         self._last_error: str | None = None
         self._link = TwoPhotonLink(
             self._on_arduino_status, on_broken=self._on_link_broken
         )
+        self._link.on_stop_report = self._on_stop_report
         # Firmware detection + flash lifecycle (shared with the other serial
         # plugins). Owns the port lock; _open/reconnect take it too. See
         # octacam.firmware.
@@ -326,8 +413,16 @@ class TwoPhotonPlugin(Plugin):
         # transfer pipeline needs (recording_metadata), not the handshake
         # outcome. Read back by recording_metadata(), never recomputed there.
         self._armed_this_take = False
+        # Whether the take in progress (or the one that just finished) was armed
+        # to stop with ThorImage, and the board's end-of-run report for it. Both
+        # read back by recording_metadata().
+        self._match_this_take = False
+        self._stop_report: dict | None = None
         # Injected by app.py via set_broadcast() once the web app is created.
         self._broadcast: Callable[[str, dict], None] | None = None
+        # Injected via set_controller(): lets the board's end-of-run (ThorImage
+        # stopped) end the octacam recording too.
+        self._controller = None
 
     def _fw_is_busy(self) -> tuple[bool, str]:
         """Refuse to flash while the trigger is armed or a capture is running."""
@@ -341,12 +436,39 @@ class TwoPhotonPlugin(Plugin):
         """Inject the WebSocket broadcast hook (called by app.py at startup)."""
         self._broadcast = callback
 
+    def set_controller(self, controller) -> None:
+        """Inject the recording controller (app.py / cli record), so the board's
+        end of run can stop the recording in "match ThorImage" mode."""
+        self._controller = controller
+
+    def _on_stop_report(self, report: dict) -> None:
+        """Reader-thread hook: the board's end-of-run report (just before 'D')."""
+        self._stop_report = report
+        log.info(
+            "2-photon trigger: run ended (%s) after %.1f s — input saw %d rising "
+            "edge(s), HIGH for %.1f s",
+            "ThorImage stopped" if report["reason"] == "thorimage" else "duration ceiling",
+            report["run_ms"] / 1000, report["edges"], report["high_ms"] / 1000,
+        )
+
     def _on_arduino_status(self, status: str) -> None:
         state = _STATE_LABELS.get(status, "idle")
         if state == "armed":
             self._armed_event.set()  # release a pending on_recording_start ack wait
             self._last_error = None  # a good arm clears a prior arm-failure notice
+        # In match-ThorImage mode the board's 'D' ends the take: ThorImage stopped
+        # (or the safety ceiling hit). Only a 'D' that ends a run this plugin saw
+        # trigger counts — a stale byte after on_recording_stop reset the state
+        # to idle must never stop a later take.
+        ends_take = (
+            state == "done"
+            and self._match_this_take
+            and self._arduino_state == "triggered"
+        )
         self._set_arduino_state(state)
+        if ends_take and self._controller is not None:
+            log.info("2-photon trigger: ThorImage stopped — stopping the recording")
+            self._controller.stop_recording(abort=False)
 
     def _on_link_broken(self) -> None:
         """Reader-thread hook: the serial port died mid-session. Re-broadcast the
@@ -377,8 +499,17 @@ class TwoPhotonPlugin(Plugin):
                 "firmware_state": check.state.value if check else None,
                 "needs_flash": bool(check and check.needs_flash),
                 "error": self._last_error,
+                **self._match_status(),
             },
         )
+
+    def _match_status(self) -> dict:
+        """The "match ThorImage" config the GUI tab seeds its checkbox/hint from."""
+        return {
+            "match_thorimage": self._match_thorimage,
+            "max_duration_s": self._max_duration_s,
+            "stop_idle_ms": self._stop_idle_ms,
+        }
 
     # -------------------------------------------------- process lifecycle
 
@@ -470,6 +601,7 @@ class TwoPhotonPlugin(Plugin):
             "firmware_state": check.state.value if check else None,
             "needs_flash": bool(check and check.needs_flash),
             "error": self._last_error,
+            **self._match_status(),
         }
 
     # -------------------------------------------------- firmware provisioning
@@ -504,13 +636,32 @@ class TwoPhotonPlugin(Plugin):
 
         The GUI supplies this slice from its tab; ``octacam record`` has no UI, so
         contribute it here (built from the recording's fps/duration) or the board
-        is never armed and the external-triggered cameras hang forever. Only
-        fps/duration_ms are consumed (ArmParams.from_payload); the plugin's
-        configured defaults still apply as per-field fallbacks."""
+        is never armed and the external-triggered cameras hang forever. fps/
+        duration_ms are consumed by ArmParams.from_payload (the plugin's
+        configured defaults still apply as per-field fallbacks); the take follows
+        the configured ``match_thorimage`` mode, in which duration_ms is unused."""
         return {
             "fps": int(round(fps)),
             "duration_ms": max(1, int(round(duration_s * 1000))),
+            "match_thorimage": self._match_thorimage,
         }
+
+    def _wants_match(self, spec: dict) -> bool:
+        """Whether an arm slice asks to stop with ThorImage (the GUI checkbox);
+        a slice without the key follows the configured default."""
+        return _as_bool(spec.get("match_thorimage"), self._match_thorimage)
+
+    def recording_end_override(self, params: dict | None) -> float | None:
+        """The recording's safety ceiling (s) when this take stops with ThorImage.
+
+        Queried by the controller at start: a non-None value replaces the Record
+        tab's duration as the deadline, because the board — not a timer — ends
+        the take (see :meth:`_on_arduino_status`). None when the take isn't
+        armed, or is armed for a fixed duration."""
+        spec = (params or {}).get("twophoton")
+        if spec is None or not self._wants_match(spec):
+            return None
+        return self._max_duration_s
 
     def on_recording_start(self, params: dict | None) -> None:
         """Arm the Arduino when the GUI's "Arm with recording" checkbox is checked.
@@ -518,12 +669,19 @@ class TwoPhotonPlugin(Plugin):
         Only arms when ``params["twophoton"]`` is present — its absence means the
         operator left the checkbox unchecked.  ``fps`` and ``duration_ms`` inside
         that dict are optional; they fall back to the plugin's configured defaults.
+        With ``match_thorimage`` (default: the config's) the board instead runs
+        until ThorImage stops, bounded by ``max_duration_s``.
         """
         spec = (params or {}).get("twophoton")
         self._armed_this_take = spec is not None
+        self._match_this_take = spec is not None and self._wants_match(spec)
+        self._stop_report = None
         if spec is None:
             return
         arm = ArmParams.from_payload(spec, self._default_fps, self._default_duration_ms)
+        if self._match_this_take:
+            arm.duration_ms = int(round(self._max_duration_s * 1000))
+            arm.idle_ms = self._stop_idle_ms
         if not self._link.is_open:
             # send_arm would silently no-op on a closed link, leaving the cameras
             # waiting on an external trigger that never fires. Surface it instead.
@@ -540,9 +698,17 @@ class TwoPhotonPlugin(Plugin):
                 self.device, self._firmware,
             )
             return
-        log.info(
-            "2-photon trigger: arming at %d fps for %d ms", arm.fps, arm.duration_ms
-        )
+        if self._match_this_take:
+            log.info(
+                "2-photon trigger: arming at %d fps until ThorImage stops "
+                "(input idle %d ms; ceiling %d s)",
+                arm.fps, arm.idle_ms, arm.duration_ms // 1000,
+            )
+        else:
+            log.info(
+                "2-photon trigger: arming at %d fps for %d ms",
+                arm.fps, arm.duration_ms,
+            )
         self._armed_event.clear()
         if not self._link.send_arm(arm):
             # The write never reached the OS (wedged/closed link). Surface it to
@@ -588,8 +754,17 @@ class TwoPhotonPlugin(Plugin):
         ``armed`` reflects the operator's checkbox, not the handshake outcome
         (see ``_armed_this_take``) — it tells the transfer pipeline whether to
         bother looking for a paired 2P folder at all, not whether the arm
-        definitely reached the board."""
-        return {"armed": self._armed_this_take}
+        definitely reached the board. ``match_thorimage`` says the take was set
+        to stop with ThorImage; ``stop`` is the board's end-of-run report (why it
+        ended, and what its ThorSync input looked like), absent when the run was
+        cancelled from octacam (a manual stop/abort)."""
+        meta: dict = {
+            "armed": self._armed_this_take,
+            "match_thorimage": self._match_this_take,
+        }
+        if self._stop_report is not None:
+            meta["stop"] = self._stop_report
+        return meta
 
     # -------------------------------------------------- web contributions
 

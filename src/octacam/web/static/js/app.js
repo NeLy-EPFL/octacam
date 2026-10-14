@@ -348,6 +348,10 @@ async function main() {
           api,
           clampInput,
           getRecordSettings: () => record.settings,
+          // A plugin that can end the take itself (twophoton matching
+          // ThorImage) offers a "synced" checkbox that replaces the Record
+          // tab's Duration field while ticked. null withdraws the offer.
+          setDurationSync: (spec) => record.setDurationSync(spec),
         })
       );
     } catch (e) {

@@ -2572,8 +2572,10 @@ def _drive_record_progress(controller, duration_s: float) -> None:
 
     On a TTY a determinate rich bar tracks the countdown with a running total
     frame count; off a TTY a periodic log heartbeat stands in (so a piped/cron
-    run still shows it is alive). Returns once the recording is no longer active
-    — the caller then join()s the monitor to finalize the summary."""
+    run still shows it is alive). A take a plugin ends itself (twophoton matching
+    ThorImage — snapshot ``ended_by``) has no meaningful countdown, so the bar
+    shows the elapsed time instead. Returns once the recording is no longer
+    active — the caller then join()s the monitor to finalize the summary."""
     import time as _time
 
     poll = 0.1
@@ -2603,7 +2605,15 @@ def _drive_record_progress(controller, duration_s: float) -> None:
             snap = controller.snapshot()
             state = snap["state"]
             frames = sum(c["frames"] for c in snap["cameras"])
-            if state == "recording" and snap.get("remaining_ms") is not None:
+            if state == "recording" and snap.get("elapsed_ms") is not None:
+                progress.update(
+                    task,
+                    description=(
+                        f"Recording until {snap.get('ended_by')} stops it — "
+                        f"{snap['elapsed_ms'] / 1000:.0f} s, {frames} frames"
+                    ),
+                )
+            elif state == "recording" and snap.get("remaining_ms") is not None:
                 elapsed = max(0.0, duration_s - snap["remaining_ms"] / 1000.0)
                 progress.update(
                     task, completed=elapsed, description=f"Recording — {frames} frames"

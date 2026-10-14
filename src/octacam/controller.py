@@ -272,6 +272,7 @@ def build_recording_summary(
     start_wall_ns: int,
     aborted: bool,
     plugin_metadata: dict | None = None,
+    ended_by: tuple[str, float] | None = None,
 ) -> dict:
     """Assemble the recording_summary.json payload from finalized camera stats.
 
@@ -282,7 +283,14 @@ def build_recording_summary(
     is the ``{plugin_name: {...}}`` dict from
     :meth:`~octacam.plugins.base.PluginManager.collect_recording_metadata`
     (e.g. the ``twophoton`` plugin's ``{"armed": bool}``), merged verbatim
-    under the summary's ``"plugins"`` key."""
+    under the summary's ``"plugins"`` key.
+
+    ``ended_by`` is ``(plugin_name, ceiling_s)`` when a plugin ended the take
+    itself (:meth:`~octacam.plugins.base.PluginManager.recording_end_override`,
+    e.g. twophoton stopping with ThorImage). The configured duration then never
+    applied, so ``duration_s`` is the take's real length (frames / target fps —
+    exact for a hardware-triggered take), which the 2P matcher and manifest use
+    as its end; the ceiling is kept as ``duration_limit_s``."""
     extension = settings.video_format().extension
     start_iso = (
         datetime.datetime.fromtimestamp(
@@ -324,7 +332,7 @@ def build_recording_summary(
         "start_time_ns": start_wall_ns or None,
         "aborted": aborted,
         "fps_target": settings.fps,
-        "duration_s": settings.duration_s,
+        "duration_s": _summary_duration_s(settings, cams, ended_by),
         "trigger_source": settings.trigger_source,
         "save_method": settings.save_method,
         # The encoder args actually used, not the raw config string: for
@@ -341,6 +349,9 @@ def build_recording_summary(
         "cameras": cams,
         "plugins": plugin_metadata or {},
     }
+    if ended_by is not None:
+        summary["ended_by"] = ended_by[0]
+        summary["duration_limit_s"] = ended_by[1]
     if settings.save_method == "nvenc":
         # Cameras beyond this many used the CPU (libx264) fallback — see the
         # per-recording warning; recorded here so the split is auditable. Resolve
@@ -353,6 +364,17 @@ def build_recording_summary(
             cap = nvenc_max_sessions(encoder)
         summary["max_nvenc_sessions"] = cap
     return summary
+
+
+def _summary_duration_s(
+    settings: RecordingSettings, cams: list[dict], ended_by: tuple[str, float] | None
+) -> float:
+    """The summary's ``duration_s``: the configured one, or — for a take a plugin
+    ended — the longest camera's frame count over the target fps."""
+    if ended_by is None:
+        return settings.duration_s
+    frames = max((c["frames"] or 0 for c in cams), default=0)
+    return round(frames / settings.fps, 3) if settings.fps > 0 else 0.0
 
 
 def build_timestamps_arrays(cameras) -> dict[str, np.ndarray]:
@@ -487,6 +509,15 @@ class RecordingController:
         self._start_hooks_done = threading.Event()
         self._monitor: threading.Thread | None = None
         self._deadline: float | None = None
+        # (plugin_name, ceiling_s) when the current/last take is ended by a
+        # plugin rather than the configured duration (twophoton matching
+        # ThorImage); the deadline is then only that safety ceiling. See
+        # PluginManager.recording_end_override.
+        self._ended_by: tuple[str, float] | None = None
+        # Monotonic time the current countdown began (first frame), for the
+        # elapsed time shown while a plugin-ended take has no meaningful
+        # remaining time.
+        self._countdown_t0: float | None = None
         # Host wall-clock (ns) captured when the current/last recording started,
         # written into recording_summary.json as the real-world start time.
         self._recording_start_wall_ns = 0
@@ -1136,6 +1167,10 @@ class RecordingController:
                     len(self.camera_system),
                     pre.max_nvenc_sessions,
                 )
+        # Does a plugin end this take itself (twophoton: when ThorImage stops)?
+        # Then its safety ceiling is the deadline, not the configured duration.
+        # Pure (reads only plugin_params + plugin config), so asked off the lock.
+        end_override = self.plugins.recording_end_override(plugin_params)
         with self._lock:
             if self.recording_active:
                 return StartResult(StartResult.BUSY, "Recording in progress")
@@ -1195,7 +1230,10 @@ class RecordingController:
                     settings.record_form,
                     use_software_trigger=use_software_trigger,
                     writer_queue_size=settings.writer_queue_size,
-                    max_frames=capture_frame_count(settings),
+                    # A plugin-ended take has no known frame count to cap at.
+                    max_frames=(
+                        None if end_override else capture_frame_count(settings)
+                    ),
                 )
             except Exception as e:
                 # A non-BackendError escaping the trigger-config or start_record
@@ -1228,8 +1266,10 @@ class RecordingController:
                         f"Only {len(started)}/{total} cameras started "
                         f"recording (missing: {', '.join(missing)})",
                     )
+                self._ended_by = end_override
+                duration_s = end_override[1] if end_override else settings.duration_s
                 if use_software_trigger:
-                    self.camera_system.start_software_trigger(settings.duration_s)
+                    self.camera_system.start_software_trigger(duration_s)
 
                 # Snapshot the config and write an initial summary (pessimistically
                 # marked aborted, frames=0) as soon as the cameras start, so a raw
@@ -1252,7 +1292,7 @@ class RecordingController:
                 self._monitor = threading.Thread(
                     target=self._monitor_loop,
                     args=(
-                        settings.duration_s,
+                        duration_s,
                         plugin_params,
                         len(started),
                         not use_software_trigger,
@@ -1523,7 +1563,8 @@ class RecordingController:
             # motion (or any plugin) stays synchronised to actual capture.
             self.plugins.dispatch("on_first_frame", plugin_params)
             with self._lock:
-                deadline = time.monotonic() + duration_s + STOP_GRACE_S
+                self._countdown_t0 = time.monotonic()
+                deadline = self._countdown_t0 + duration_s + STOP_GRACE_S
                 self._deadline = deadline
                 self._recording_seq += 1
                 self._set_state("recording")
@@ -1695,6 +1736,7 @@ class RecordingController:
                 self._recording_start_wall_ns,
                 aborted,
                 plugin_metadata=self.plugins.collect_recording_metadata(),
+                ended_by=self._ended_by,
             )
             path.write_text(json.dumps(summary, indent=2) + "\n")
             log.info("Wrote recording summary: %s", path)
@@ -1746,10 +1788,19 @@ class RecordingController:
         with self._lock:
             settings = self._settings
             remaining_ms = None
+            elapsed_ms = None
             recording_id = None
             if self._state == "recording" and self._deadline is not None:
-                remaining_ms = max(0, round((self._deadline - time.monotonic()) * 1000))
+                if self._ended_by is None:
+                    remaining_ms = max(
+                        0, round((self._deadline - time.monotonic()) * 1000)
+                    )
+                elif self._countdown_t0 is not None:
+                    # Plugin-ended take: the deadline is only a safety ceiling, so
+                    # report how long it has run instead of a fake countdown.
+                    elapsed_ms = round((time.monotonic() - self._countdown_t0) * 1000)
                 recording_id = self._recording_seq
+            ended_by = self._ended_by if self.recording_active else None
         try:
             free_bytes = shutil.disk_usage(
                 next(
@@ -1765,6 +1816,11 @@ class RecordingController:
             "ready": self._ready,
             "init_error": self._init_error,
             "remaining_ms": remaining_ms,
+            "elapsed_ms": elapsed_ms,
+            # Plugin that ends the active take itself (e.g. "twophoton" stopping
+            # with ThorImage) and its safety ceiling; None for a timed take.
+            "ended_by": ended_by[0] if ended_by else None,
+            "duration_limit_s": ended_by[1] if ended_by else None,
             "recording_id": recording_id,
             "recordings_made": self._recordings_made,
             "save_dir": settings.save_dir,

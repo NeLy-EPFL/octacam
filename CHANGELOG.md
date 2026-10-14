@@ -11,6 +11,20 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **2-photon: stop when ThorImage stops (new default)** — the `twophoton`
+  plugin no longer needs a duration: the Arduino keeps watching its ThorSync
+  input after the start edge and ends the camera trigger once that input has
+  been quiet for `stop_idle_ms` (default 2 s), and octacam then ends the
+  recording. While the take will be armed, the Record tab shows a "Synced with
+  ThorImage" checkbox (default from `[plugins.options] match_thorimage`,
+  default `true`) in place of the Duration field, and the status line shows
+  elapsed time; untick it to enter a manual duration. `max_duration_s` (default 3600) bounds the take if the
+  stop never comes. Summaries of such takes carry the real length as
+  `duration_s` plus `ended_by`/`duration_limit_s` and the board's end-of-run
+  report. **Requires reflashing the 2-photon Arduino** (protocol v2; older
+  boards are refused and offered a reflash). New plugin hook
+  `recording_end_override` lets any plugin end a take itself.
+
 - **Synced behavior + 2-photon video** — `octacam process` now renders
   `Renderings/synced_2p.mp4` for every take with a matched ThorImage +
   ThorSync folder: the behavior grid next to a green/red 2P merge, aligned

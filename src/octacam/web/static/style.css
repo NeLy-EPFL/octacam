@@ -524,6 +524,9 @@ fieldset:disabled { opacity: 0.55; }
   margin-bottom: 6px;
 }
 
+/* .row's display:grid would otherwise override the hidden attribute. */
+.row[hidden] { display: none; }
+
 .row > span:first-child {
   text-align: right;
   color: var(--text-dim);

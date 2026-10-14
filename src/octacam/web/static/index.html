@@ -46,7 +46,14 @@
       <fieldset id="record-fields" disabled>
         <!-- Essentials: always visible. Everything else lives under the
              Advanced-options switch below (see record.js). -->
-        <label class="row" title="How long each recording runs before it stops automatically"><span>Duration:</span>
+        <!-- Offered by a plugin that can end the take itself (the 2-Photon
+             tab: "Synced with ThorImage"). Ticked hides the Duration row;
+             unticked shows it and the manual duration applies. Hidden when no
+             plugin offers it (see record.js setDurationSync). -->
+        <label class="row" id="duration-sync-row" hidden><span id="duration-sync-label">Synced:</span>
+          <input id="duration-sync" type="checkbox">
+        </label>
+        <label class="row" id="duration-row" title="How long each recording runs before it stops automatically"><span>Duration:</span>
           <span class="duration">
             <input id="duration-value" type="number" min="0.01" step="any" value="20"
               title="Recording length, in the unit selected at right">
@@ -315,10 +322,13 @@
         </div>
         <pre id="twophoton-fw-flash-log" class="fw-log hidden"></pre>
         <p class="hint">
-          FPS and duration are taken from the Record tab settings.
+          FPS is taken from the Record tab settings.
           When "Arm with recording" is checked, the Arduino is armed
           automatically each time a recording starts, then waits for the
           ThorSync rising edge before emitting camera trigger pulses.
+          While armed, the Record tab's "Synced with ThorImage" box (on by
+          default) ends the recording when ThorImage finishes, so no duration
+          needs setting; untick it there to enter a duration manually.
         </p>
         <label class="center"
           title="Arm the Arduino automatically when a recording starts">

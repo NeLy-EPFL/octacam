@@ -438,3 +438,81 @@ def test_fake_abort_recording(fake_system, tmp_path):
     controller.join(timeout=20)
     assert controller.state == "idle"
     assert controller.get_settings().save_dir.endswith("001")  # not incremented
+
+
+def test_fake_recording_ended_by_twophoton_when_thorimage_stops(fake_system, tmp_path):
+    """Match ThorImage end to end: the configured duration never applies, the
+    take runs until the board reports ThorImage stopped, and the summary records
+    the real length (not the ceiling) for the 2P matcher."""
+    import time
+
+    from octacam.plugins import PluginManager
+    from octacam.plugins.twophoton import TwoPhotonPlugin
+
+    class _Link:  # no serial port: accept the arm, nothing else
+        is_open = True
+
+        def send_arm(self, params):
+            self.armed = params
+            return True
+
+        def send_cancel(self):
+            pass
+
+    plugin = TwoPhotonPlugin(match_thorimage=True, max_duration_s=120.0)
+    plugin._link = _Link()
+    plugin._ack_timeout_s = 0.0
+    save_dir = tmp_path / "2p" / "001"
+    settings = RecordingSettings(
+        fps=50.0, duration_s=0.5, save_dir=str(save_dir), trigger_source="external"
+    )
+    controller = RecordingController(
+        fake_system, settings, PluginManager([plugin]), auto_preview=False
+    )
+    plugin.set_controller(controller)
+
+    assert controller.start_recording(plugin_params={"twophoton": {}}).ok
+    assert plugin._link.armed.idle_ms > 0
+    assert plugin._link.armed.duration_ms == 120_000
+    plugin._on_arduino_status("A")
+    plugin._on_arduino_status("T")  # ThorImage started
+
+    # External pulses for well past the 0.5 s configured duration.
+    end = time.monotonic() + 1.5
+    while time.monotonic() < end:
+        for camera in fake_system:
+            camera.trigger_once()
+        time.sleep(0.02)
+    assert controller.state == "recording"
+    snap = controller.snapshot()
+    assert snap["ended_by"] == "twophoton"
+    assert snap["remaining_ms"] is None and snap["elapsed_ms"] >= 1000
+    assert snap["duration_limit_s"] == 120.0
+
+    # ThorImage stops: the board reports, then 'D' ends the take.
+    plugin._on_stop_report({"reason": "thorimage", "edges": 1, "high_ms": 1500, "run_ms": 1600})
+    plugin._on_arduino_status("D")
+    controller.join(timeout=20)
+    assert controller.state == "idle"
+
+    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    assert summary["aborted"] is False
+    assert summary["ended_by"] == "twophoton"
+    assert summary["duration_limit_s"] == 120.0
+    frames = max(c["frames"] for c in summary["cameras"])
+    assert frames > 0.5 * 50  # ran past the configured duration
+    assert summary["duration_s"] == round(frames / 50.0, 3)
+    assert summary["plugins"]["twophoton"]["match_thorimage"] is True
+    assert summary["plugins"]["twophoton"]["stop"]["reason"] == "thorimage"
+    assert controller.snapshot()["ended_by"] is None  # cleared once inactive
+
+
+def test_fixed_duration_summary_has_no_ended_by(fake_system, tmp_path):
+    save_dir = tmp_path / "rec" / "001"
+    settings = RecordingSettings(fps=50.0, duration_s=0.5, save_dir=str(save_dir))
+    controller = RecordingController(fake_system, settings, auto_preview=False)
+    assert controller.start_recording().ok
+    controller.join(timeout=20)
+    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    assert summary["duration_s"] == 0.5
+    assert "ended_by" not in summary
