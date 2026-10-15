@@ -183,6 +183,17 @@ and is bounded by the deadline too (the existing short-capture path). The writer
 queue depth is `record.writer_queue_size` (default 64), tunable per rig to absorb
 transient encoder stalls (a full queue is the only source of a "dropped" frame).
 
+**`process` order (2026-10-15, Matthias's ask):** transcode → behavior +
+2P transfer (sweep, manifest) → fly-scoped `RecordingN` reconcile → grids
+(built locally, copied to `Renderings/`) → delete-after-transfer (after the
+grids, which read the local videos) → synced renders + Z-stack MIPs from the
+NAS copy. Renders used to run first and held a day's data off the NAS for
+~8 h. Reconcile moved ahead of deletion, so a re-run must find a take
+already renamed: `_current_take_dest` maps the config's `<take>` path to the
+`Recording*` sibling with the same `start_time_ns` (also used for a pending
+take's stored dest in the sweep). Synced renders are queued
+(`render_queue`) and resolved the same way.
+
 ## Camera backends & the auto cascade
 
 `cameras/registry.py` is the seam. `backend = "auto"` (the default) resolves to a
@@ -790,11 +801,18 @@ against a real 2P rig; the durable findings:
   underscore-separated numeric groups in the filename actually varies (never a
   hardcoded position — streaming varies position 3, a Z-stack varies position
   2, both confirmed on real data), then cross-check the count against
-  `Timelapse/@timepoints` (T-axis) or `ZStage/@steps` (Z-axis) — a real
-  truncated/incomplete recording (confirmed on production data: a folder
-  declaring 1000 timepoints with only 89 real files on disk) fails this check
-  and falls back to a plain per-file copy rather than assembling an
-  incomplete stack. One OME-TIFF per channel, not one combined file — a
+  `Timelapse/@timepoints` (T-axis) or `ZStage/@steps` (Z-axis). **Fewer
+  frames than declared, contiguous from frame 1, is a capture stopped early
+  and is assembled** (`_stopped_early`; `ChannelPlan.declared_count`, kept in
+  the stack's OME description) — since octacam stops with ThorImage
+  (2026-10-14) an early stop is a real take (real 2026-10-14 Fly4: the fly
+  dropped the ball, 418/691/476 of 3000). This replaced the old rule that
+  sent every short folder (e.g. 89 of 1000 files) to a per-file copy. Gaps,
+  frames missing at the start, or more frames than declared still fall back.
+  FastZ is unchanged (an early stop usually cuts a volume short).
+  `thorimage_expected_frameout_edges` likewise counts the frames on disk for
+  a short streaming capture (`_frames_recorded`) — FrameOut only pulses for
+  scanned frames (real: 418 files ↔ 419 edges). One OME-TIFF per channel, not one combined file — a
   structural/reference channel (motion-correction only) and a functional
   channel (e.g. GCaMP, ROI/ΔF-F extraction) are consumed by different
   pipeline stages that never need both loaded together, and combining them

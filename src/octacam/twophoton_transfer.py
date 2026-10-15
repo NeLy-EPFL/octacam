@@ -164,13 +164,34 @@ def thorimage_expected_frameout_edges(experiment_xml: Path) -> int | None:
         and zstage_el is not None
     )
     if not fastz or streaming_el is None or zstage_el is None:
-        return timepoints
+        return _frames_recorded(experiment_xml.parent, timepoints)
     try:
         steps = int(zstage_el.get("steps", "1"))
         flyback = int(streaming_el.get("flybackFrames", "0"))
     except ValueError:
         return timepoints
     return timepoints * (steps + flyback)
+
+
+def _frames_recorded(folder: Path, declared: int) -> int:
+    """Frames a streaming capture actually wrote — fewer than the *declared*
+    timepoints when the acquisition was stopped early (a real, usable take
+    since octacam stops with ThorImage, 2026-10-14), and ``FrameOut`` only
+    pulses for frames actually scanned. Counted from the first channel's
+    per-frame files; *declared* when there are none (already assembled, or
+    an unreadable folder)."""
+    from octacam.twophoton_tiff import _matching_frame_files, _thorimage_channel_names
+
+    if declared <= 1:
+        return declared
+    channels = _thorimage_channel_names(folder / EXPERIMENT_XML_FILENAME)
+    if not channels:
+        return declared
+    try:
+        n = len(_matching_frame_files(folder, channels[0]))
+    except OSError:
+        return declared
+    return n if 0 < n < declared else declared
 
 
 def twophoton_identity(folder: Path) -> tuple[str, str]:

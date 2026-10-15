@@ -91,19 +91,24 @@ octacam process --config <rig-config-dir> --last
 What happens, in order, for everything that shares one
 `[transfer.twophoton].source`:
 
-1. **Transfer & transcode** the behavior take(s) as usual.
+1. **Transcode and transfer** the behavior take(s) as usual.
 2. **Match** each armed take against ThorSync/ThorImage folders on the
    share — verified via the DAQ signal when a `SyncData*` folder exists,
-   timestamp-only otherwise (see [Verified matching](processing.md#verified-matching)).
+   timestamp-only otherwise (see [Verified matching](processing.md#verified-matching))
+   — and copy the matched 2P data next to it.
 3. **Sweep** for any settled 2P folder no take claimed — filed under its
    fly if the name/timing lets octacam recognize it, generic bucket
    otherwise.
-4. **Reconcile** every fly this run touched into one chronological
-   `RecordingN` sequence (on by default — `--no-auto-reconcile-recordings`
-   opts a single run out).
-5. **Rebuild the day's reconciliation manifest** (`2p_reconciliation.md`) —
+4. **Rebuild the day's reconciliation manifest** (`2p_reconciliation.md`) —
    a one-page summary of what matched, what didn't, and what's still
    unclaimed that day.
+5. **Reconcile** every fly this run touched into one chronological
+   `RecordingN` sequence (on by default — `--no-auto-reconcile-recordings`
+   opts a single run out). From here on the data is on the NAS under its
+   final names.
+6. **Render** the quick-look outputs last: behavior grids, then the synced
+   behavior+2P videos and Z-stack MIPs. These take hours for a full day, and
+   never hold up the data.
 
 ## Where things land on the NAS
 

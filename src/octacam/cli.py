@@ -4180,6 +4180,33 @@ def _transfer_dest(cfg, folder: Path) -> Path | None:
     return Path(base) / rel
 
 
+def _current_take_dest(dest: Path, start_time_s: float | None) -> Path:
+    """Where the take transferred to *dest* lives on the NAS now: *dest*
+    itself, or — once the fly-scoped reconcile renamed it to
+    ``RecordingN_*`` — the sibling whose ``recording_summary.json`` has the
+    same start time. Lets a re-run (or a later sweep) keep writing into the
+    renamed folder instead of re-creating the old ``<take>`` path and
+    copying the take a second time."""
+    from octacam.transform import RECORDING_SUMMARY_FILENAME
+
+    if dest.is_dir() or start_time_s is None or not dest.parent.is_dir():
+        return dest
+    for cand in sorted(dest.parent.glob("Recording*")):
+        summary = _read_summary(cand / RECORDING_SUMMARY_FILENAME) or {}
+        start_ns = summary.get("start_time_ns")
+        if isinstance(start_ns, (int, float)) and abs(start_ns / 1e9 - start_time_s) < 1e-3:
+            return cand
+    return dest
+
+
+def _take_start_s(folder: Path) -> float | None:
+    """The take's start (epoch seconds) from its local summary, if any."""
+    from octacam.transform import RECORDING_SUMMARY_FILENAME
+
+    start_ns = (_read_summary(folder / RECORDING_SUMMARY_FILENAME) or {}).get("start_time_ns")
+    return start_ns / 1e9 if isinstance(start_ns, (int, float)) else None
+
+
 def _already_matched_twophoton_paths(source_root: Path) -> set[Path]:
     """2P folders already claimed by some behavior take's Phase-3 transfer.
 
@@ -4375,13 +4402,16 @@ def _transfer_image_folder_with_assembly(src: Path, dest: Path, *, verify: bool,
             experiment_xml=experiment_xml if experiment_xml.is_file() else None,
             full_verify=verify,
             on_progress=make_progress_logger(src, ch.channel),
+            declared_count=ch.declared_count,
         )
         if assembled.ok:
             result.copied.append(dest_path.name)
             log.info(
-                "2P tiff-assemble: %s %s: assembled %d frame(s) -> %s%s",
+                "2P tiff-assemble: %s %s: assembled %d frame(s) -> %s%s%s",
                 src, ch.channel, assembled.frame_count, dest_path,
                 " (every frame verified)" if verify else "",
+                f" — stopped early, {ch.declared_count} declared"
+                if ch.declared_count is not None else "",
             )
         else:
             log.error(
@@ -4407,6 +4437,7 @@ def _finalize_twophoton_matches(
     dry_run: bool,
     assemble_tiff_stacks: bool = True,
     render_options=None,
+    render_queue: list | None = None,
 ) -> tuple[list[Path], list[Path], int]:
     """Transfer every settled match to ``dest/2P/<name>`` (plus, for an
     ``image`` kind, its own ``Experiment.xml`` alongside the take), then write
@@ -4417,7 +4448,9 @@ def _finalize_twophoton_matches(
     the exact transfer shape both need. Returns (every settled match's source
     path, only the ones that transferred cleanly — safe for a caller to later
     delete as --delete-after-transfer does, number of files that failed to
-    transfer); never raises."""
+    transfer); never raises. With *render_queue*, the synced render is
+    queued as ``(dest, take start, options)`` for the caller to run once
+    every data transfer is done, instead of rendering here."""
     from octacam.transfer import transfer_folder, transfer_tree
     from octacam.transform import TWOPHOTON_MATCH_FILENAME
     from octacam.twophoton_transfer import EXPERIMENT_XML_FILENAME, build_match_record
@@ -4463,9 +4496,12 @@ def _finalize_twophoton_matches(
         # the NAS (see octacam.synced_render) — only once every matched
         # folder transferred cleanly, and never fatal to the transfer.
         if render_options is not None and not n_failed:
-            from octacam.synced_render import render_synced_video
+            if render_queue is not None:
+                render_queue.append((dest, _take_start_s(folder), render_options))
+            else:
+                from octacam.synced_render import render_synced_video
 
-            render_synced_video(dest, render_options)
+                render_synced_video(dest, render_options)
     return matched_paths, ok_paths, n_failed
 
 
@@ -4477,6 +4513,7 @@ def _sweep_unclaimed_twophoton(
     checksum: bool,
     dry_run: bool,
     also_exclude: frozenset[Path] = frozenset(),
+    render_queue: list | None = None,
 ) -> tuple[int, int]:
     """Transfer every settled ThorSync/ThorImage folder under *source_root*
     that no behavior take has already claimed (see
@@ -4584,7 +4621,7 @@ def _sweep_unclaimed_twophoton(
                 if not matches:
                     continue
                 local_folder, record = by_folder[take_folder]
-                dest = Path(record["dest"])
+                dest = _current_take_dest(Path(record["dest"]), record.get("start_time"))
                 _matched, ok_paths, n_failed_here = _finalize_twophoton_matches(
                     local_folder,
                     dest,
@@ -4597,6 +4634,7 @@ def _sweep_unclaimed_twophoton(
                         "assemble_tiff_stacks", twophoton_cfg.assemble_tiff_stacks
                     ),
                     render_options=options_from_config(twophoton_cfg),
+                    render_queue=render_queue,
                 )
                 n_failed += n_failed_here
                 n_copied += len(ok_paths)
@@ -6103,6 +6141,7 @@ def _run_tiff_reassembly(
                 experiment_xml=experiment_xml,
                 full_verify=True,
                 on_progress=make_progress_logger(folder, ch.channel),
+                declared_count=ch.declared_count,
             )
             if not result.ok:
                 n_problem += 1
@@ -6160,8 +6199,9 @@ def _grid_and_transfer(
     2-photon data), and — when requested — delete local copies once
     everything is checksum-verified on the NAS.
 
-    Sequential phases, each getting its own progress bar: grids, behavior
-    transfer (root metadata / ``Behavior`` / ``Renderings`` — see
+    The data comes first and the renderings last, so the NAS copy is usable
+    hours before the grids are done. Sequential phases, each getting its own
+    progress bar: behavior transfer (root metadata / ``Behavior`` — see
     ``_transfer_dest``), 2-photon transfer (only for takes the ``twophoton``
     plugin reports as armed and whose config has ``[transfer.twophoton]``
     set), an automatic 2P-only sweep of every ``[transfer.twophoton]`` source
@@ -6169,13 +6209,14 @@ def _grid_and_transfer(
     ``_sweep_unclaimed_twophoton``; ``no_twophoton_sweep`` skips it), a
     reconciliation-manifest rebuild for every day/session folder those
     sources touched (see ``_rebuild_twophoton_manifests``;
-    ``no_twophoton_manifest`` skips it), delete-after-transfer, then an
-    automatic fly-scoped reconcile (see ``_auto_reconcile_fly_dirs``;
-    ``no_auto_reconcile_recordings`` or a rig's own
-    ``[transfer.twophoton].reconcile_recordings = false`` skips it) — run
-    last, after deletion, so a rig using ``--delete-after-transfer`` never
-    renumbers a fly whose local take folder could still be re-processed
-    later. Returns the number of files that failed to transfer (behavior +
+    ``no_twophoton_manifest`` skips it), an automatic fly-scoped reconcile
+    (see ``_auto_reconcile_fly_dirs``; ``no_auto_reconcile_recordings`` or a
+    rig's own ``[transfer.twophoton].reconcile_recordings = false`` skips
+    it) so the take folders have their final names before anyone works on
+    them, then the grids (built from the local videos, copied to
+    ``Renderings``), delete-after-transfer (after the grids, which need the
+    local videos), and finally the synced behavior+2P videos and Z-stack
+    MIPs, rendered from the NAS copy. Returns the number of files that failed to transfer (behavior +
     2P + sweep). When ``reporter`` is set (a detached job) each phase reports
     progress and pauses between folders while a gui/record owns the
     cameras."""
@@ -6197,66 +6238,16 @@ def _grid_and_transfer(
         f: _config_for_recording(f, cli_config_dir, user) for f in folder_outputs
     }
 
-    # --- Phase 1: visualization grids ---------------------------------------
-    grid_files: dict[Path, list[Path]] = {}
-    if do_grid:
-        grid_bar = (
-            _GridProgressBar(len(folder_outputs))
-            if (show_bar and not dry_run)
-            else None
-        )
-        grid_skipped = 0
-        if reporter is not None:
-            reporter.begin_phase("grid", len(folder_outputs))
-        with grid_bar or contextlib.nullcontext():
-            for i, folder in enumerate(folder_outputs, 1):
-                _pause_gate(reporter, job_dir, unit="folder")
-                if reporter is not None:
-                    reporter.item_started(i, len(folder_outputs), folder)
-                cfg = folder_cfgs[folder]
-                summary = _read_summary(folder / RECORDING_SUMMARY_FILENAME) or {}
-                summary_cams = [
-                    c.get("name") for c in summary.get("cameras", []) if c.get("name")
-                ]
-                built: list[Path] = []
-                for name, layout, ff in _visualizations_for(cfg, summary_cams):
-                    out_path = folder / name
-                    if out_path.exists() and not force:
-                        # Idempotent re-run: the grid is already built. Grid
-                        # generation is atomic (temp + rename), so a present file
-                        # is complete — skip rebuilding, but still hand it to the
-                        # transfer phase (which skips it if already copied).
-                        # Counted for the summary rather than logged per grid.
-                        grid_skipped += 1
-                        built.append(out_path)
-                        continue
-                    on_prog = grid_bar.folder(i, folder) if grid_bar else None
-                    out = build_grid_video(
-                        folder,
-                        layout=layout,
-                        output=out_path,
-                        ffmpeg_params=ff or cfg.transcode.ffmpeg_params,
-                        dry_run=dry_run,
-                        on_progress=on_prog,
-                    )
-                    if out is not None:
-                        built.append(out)
-                grid_files[folder] = built
-                if reporter is not None:
-                    reporter.item_done()
-        if grid_skipped:
-            log.info(
-                "%sGrid: %d already exist — skipping (use --force to rebuild)",
-                "[dry-run] " if dry_run else "",
-                grid_skipped,
-            )
-
-    # --- Phase 2: behavior transfer (root metadata / Behavior / Renderings) -
+    # --- Phase 1: behavior transfer (root metadata / Behavior) -------------
     transfer_failed = 0
     folder_dest: dict[Path, Path] = {}
     folder_failed: dict[Path, int] = {}
     folder_delete_after: dict[Path, bool] = {}
     folder_2p_ok: dict[Path, list[Path]] = {}
+    folder_verify: dict[Path, tuple[bool, bool]] = {}
+    grid_files: dict[Path, list[Path]] = {}
+    # Synced renders queued by the 2P transfer, run last (Phase 6).
+    render_queue: list = []
     if do_transfer:
         n_copied = n_skipped = 0
         transfer_bar = _TransferProgressBar() if (show_bar and not dry_run) else None
@@ -6274,6 +6265,9 @@ def _grid_and_transfer(
                     if reporter is not None:
                         reporter.item_done()
                     continue
+                # A take an earlier, interrupted run already renamed to
+                # RecordingN_* is written into that folder, not re-created.
+                dest = _current_take_dest(dest, _take_start_s(folder))
                 folder_dest[folder] = dest
                 # cfg.transfer is guaranteed non-None here: _transfer_dest
                 # already returned None (and we `continue`d above) otherwise.
@@ -6293,6 +6287,7 @@ def _grid_and_transfer(
                 # on every rerun) — only force it when a delete actually
                 # depends on it, not just because [transfer].checksum is on.
                 checksum = delete_wanted
+                folder_verify[folder] = (verify, checksum)
 
                 config_snapshot = folder / "octacam_config.toml"
                 root_files = [config_snapshot] if config_snapshot.exists() else []
@@ -6318,7 +6313,6 @@ def _grid_and_transfer(
                 for call_dest, files, include_summary in (
                     (dest, root_files, True),
                     (dest / "Behavior", behavior_files, False),
-                    (dest / "Renderings", grid_files.get(folder, []), False),
                 ):
                     result = transfer_folder(
                         folder,
@@ -6353,8 +6347,8 @@ def _grid_and_transfer(
             if transfer_failed:
                 log.error("%d file(s) failed to transfer", transfer_failed)
 
-        # --- Phase 3: 2-photon transfer --------------------------------------
-        # 3a: gather every armed take into groups sharing one [transfer.twophoton]
+        # --- Phase 2: 2-photon transfer --------------------------------------
+        # 2a: gather every armed take into groups sharing one [transfer.twophoton]
         # source, so matching runs once per group across ALL its takes together
         # (chronological, no-double-booking — see match_takes_to_twophoton_batch)
         # rather than independently per folder.
@@ -6432,12 +6426,12 @@ def _grid_and_transfer(
             )
             group_meta[key] = twophoton_cfg
 
-        # 3b: match + transfer each group.
+        # 2b: match + transfer each group.
         # Folders matched to a take in THIS run — tracked in memory because
         # dry-run never writes twophoton_match.json to disk, so the sweep
-        # below (3c) can't rely on _already_matched_twophoton_paths alone to
+        # below (2c) can't rely on _already_matched_twophoton_paths alone to
         # exclude a same-run match from its preview (a real run doesn't need
-        # this: the sidecar is written before 3c starts).
+        # this: the sidecar is written before 2c starts).
         matched_this_run: set[Path] = set()
         for key, takes in groups.items():
             source_root, _, _, settle_s, verify_with_signals = key
@@ -6512,6 +6506,7 @@ def _grid_and_transfer(
                     dry_run=dry_run,
                     assemble_tiff_stacks=twophoton_cfg.assemble_tiff_stacks,
                     render_options=options_from_config(twophoton_cfg),
+                    render_queue=render_queue,
                 )
                 matched_this_run.update(p.resolve() for p in matched_paths)
                 transfer_failed += n_failed
@@ -6520,7 +6515,7 @@ def _grid_and_transfer(
                 if not dry_run:
                     _clear_twophoton_pending(folder)
 
-        # --- Phase 3c: automatic 2P-only sweep --------------------------------
+        # --- Phase 2c: automatic 2P-only sweep --------------------------------
         # Every [transfer.twophoton] source this run touched also gets swept
         # for settled folders no take claimed (calibration/tuning/2P-only
         # recordings, safe to store separately) — sequentially, automatically,
@@ -6534,13 +6529,14 @@ def _grid_and_transfer(
                     checksum=checksum,
                     dry_run=dry_run,
                     also_exclude=frozenset(matched_this_run),
+                    render_queue=render_queue,
                 )
                 transfer_failed += n_failed
 
-        # --- Phase 3d: 2P reconciliation manifest ------------------------------
+        # --- Phase 2d: 2P reconciliation manifest ------------------------------
         # Regenerate 2p_reconciliation.md for every day/session folder under
         # each [transfer.twophoton] source this run touched — run last so it
-        # reflects everything 3b/3c just wrote (a folder 3c just swept into
+        # reflects everything 2b/2c just wrote (a folder 3c just swept into
         # 2p_only/ still shows "unclaimed" here, deliberately — see
         # render_twophoton_manifest's docstring).
         if not no_twophoton_manifest:
@@ -6555,7 +6551,111 @@ def _grid_and_transfer(
                         ),
                     )
 
-        # --- Phase 4: delete-after-transfer -----------------------------------
+        # --- Phase 3: automatic fly-scoped reconcile ------------------------
+        # Right after the data, so the take folders have their final
+        # RecordingN_* names before anyone starts working on them (the grids
+        # below take hours). A re-run after an interruption finds a renamed
+        # take again through _current_take_dest instead of re-creating its
+        # old path, so this no longer has to wait for delete-after-transfer.
+        if not no_auto_reconcile_recordings:
+            reconcile_targets: dict[Path, set[Path]] = {}
+            for folder, dest in folder_dest.items():
+                cfg = folder_cfgs[folder]
+                assert cfg.transfer is not None
+                twophoton_cfg = cfg.transfer.twophoton
+                if twophoton_cfg is None or not twophoton_cfg.reconcile_recordings:
+                    continue
+                reconcile_dest_root = Path(resolve_dir_template(cfg.transfer.directory))
+                reconcile_targets.setdefault(reconcile_dest_root, set()).add(dest.parent)
+            for reconcile_dest_root, fly_dirs in reconcile_targets.items():
+                _auto_reconcile_fly_dirs(reconcile_dest_root, fly_dirs, dry_run)
+
+        # Re-resolve each take's (possibly renamed) NAS folder.
+        folder_dest = {
+            folder: _current_take_dest(dest, _take_start_s(folder))
+            for folder, dest in folder_dest.items()
+        }
+
+    # --- Phase 4: visualization grids (after the data is on the NAS) --------
+    if do_grid:
+        grid_bar = (
+            _GridProgressBar(len(folder_outputs))
+            if (show_bar and not dry_run)
+            else None
+        )
+        grid_skipped = 0
+        if reporter is not None:
+            reporter.begin_phase("grid", len(folder_outputs))
+        with grid_bar or contextlib.nullcontext():
+            for i, folder in enumerate(folder_outputs, 1):
+                _pause_gate(reporter, job_dir, unit="folder")
+                if reporter is not None:
+                    reporter.item_started(i, len(folder_outputs), folder)
+                cfg = folder_cfgs[folder]
+                summary = _read_summary(folder / RECORDING_SUMMARY_FILENAME) or {}
+                summary_cams = [
+                    c.get("name") for c in summary.get("cameras", []) if c.get("name")
+                ]
+                built: list[Path] = []
+                for name, layout, ff in _visualizations_for(cfg, summary_cams):
+                    out_path = folder / name
+                    if out_path.exists() and not force:
+                        # Idempotent re-run: the grid is already built. Grid
+                        # generation is atomic (temp + rename), so a present file
+                        # is complete — skip rebuilding, but still hand it to the
+                        # transfer phase (which skips it if already copied).
+                        # Counted for the summary rather than logged per grid.
+                        grid_skipped += 1
+                        built.append(out_path)
+                        continue
+                    on_prog = grid_bar.folder(i, folder) if grid_bar else None
+                    out = build_grid_video(
+                        folder,
+                        layout=layout,
+                        output=out_path,
+                        ffmpeg_params=ff or cfg.transcode.ffmpeg_params,
+                        dry_run=dry_run,
+                        on_progress=on_prog,
+                    )
+                    if out is not None:
+                        built.append(out)
+                grid_files[folder] = built
+                if reporter is not None:
+                    reporter.item_done()
+        if grid_skipped:
+            log.info(
+                "%sGrid: %d already exist — skipping (use --force to rebuild)",
+                "[dry-run] " if dry_run else "",
+                grid_skipped,
+            )
+
+    if do_transfer:
+        # Grids go to <take>/Renderings, into the take's final folder.
+        n_copied = 0
+        rendering_failed = 0
+        for folder, built in grid_files.items():
+            dest = folder_dest.get(folder)
+            if dest is None or not built:
+                continue
+            verify, checksum = folder_verify[folder]
+            result = transfer_folder(
+                folder,
+                dest / "Renderings",
+                files_only=built,
+                dry_run=dry_run,
+                verify=verify,
+                checksum=checksum,
+                include_summary=False,
+            )
+            n_copied += len(result.copied)
+            rendering_failed += len(result.failed)
+            folder_failed[folder] = folder_failed.get(folder, 0) + len(result.failed)
+        transfer_failed += rendering_failed
+        if grid_files and not dry_run:
+            log.info("Transfer (grids): %d copied, %d failed", n_copied, rendering_failed)
+
+        # --- Phase 5: delete-after-transfer -----------------------------------
+        # After the grids, which are built from the local videos.
         # Evaluated (and logged) under --dry-run too — a caller deciding
         # whether it's safe to reclaim local disk space needs to see exactly
         # what this would remove before it actually removes anything;
@@ -6613,32 +6713,17 @@ def _grid_and_transfer(
                         "delete-after-transfer: failed to remove %s: %s", src_2p, e
                     )
 
-        # --- Phase 5: automatic fly-scoped reconcile ------------------------
-        # Deliberately after delete-after-transfer, not before: a rename only
-        # ever touches the NAS tree, never the local recording folder, so a
-        # local folder that outlives a rename could get re-processed later
-        # and re-created at its pre-rename path (not destructive — same-
-        # filesystem rename never overwrites an existing target, so at worst
-        # a re-processed duplicate gets its own next RecordingN — but running
-        # this last, after local folders are already gone, closes the gap
-        # for the common case of a rig that also uses --delete-after-transfer.
-        if not no_auto_reconcile_recordings:
-            reconcile_targets: dict[Path, set[Path]] = {}
-            for folder, dest in folder_dest.items():
-                cfg = folder_cfgs[folder]
-                assert cfg.transfer is not None
-                twophoton_cfg = cfg.transfer.twophoton
-                if twophoton_cfg is None or not twophoton_cfg.reconcile_recordings:
-                    continue
-                reconcile_dest_root = Path(resolve_dir_template(cfg.transfer.directory))
-                reconcile_targets.setdefault(reconcile_dest_root, set()).add(dest.parent)
-            for reconcile_dest_root, fly_dirs in reconcile_targets.items():
-                _auto_reconcile_fly_dirs(reconcile_dest_root, fly_dirs, dry_run)
+        # --- Phase 6: renderings — synced behavior+2P videos, Z-stack MIPs ---
+        # Last: quick-look output only, rendered from the NAS copy (the take's
+        # final, possibly renamed folder), so it never delays the data.
+        if not dry_run and render_queue:
+            from octacam.synced_render import render_synced_video
 
-        # --- Phase 6: Z-stack MIP renders -------------------------------------
-        # After reconcile, so the PNGs land in the final RecordingN_2P_<detail>/
-        # Renderings/ wrapper. Scoped to the fly folders this run touched —
-        # where its anatomical Z-stacks were just attributed by the sweep.
+            for dest, start_s, options in render_queue:
+                render_synced_video(_current_take_dest(dest, start_s), options)
+        # Z-stack MIPs land in the final RecordingN_2P_<detail>/Renderings/
+        # wrapper. Scoped to the fly folders this run touched — where its
+        # anatomical Z-stacks were just attributed by the sweep.
         if not dry_run:
             mip_targets: dict[Path, object] = {}
             for folder, dest in folder_dest.items():
@@ -7170,7 +7255,7 @@ def process(
         typer.Option("--_job-dir", hidden=True),
     ] = None,
 ) -> None:
-    """Post-recording pipeline: transcode, build grids, and transfer recordings.
+    """Post-recording pipeline: transcode, transfer, then build grids and renders.
 
     Every setting — encoder args, grid layouts, transfer destination — is read
     from each recording's own octacam_config.toml (copied in at record time), so

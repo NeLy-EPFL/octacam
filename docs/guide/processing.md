@@ -20,11 +20,19 @@ and it does the rest.
 | Step | Skip flag | What it does |
 | --- | --- | --- |
 | Transcode | `--no-transcode` | Re-encode each recording to mp4 per its `recording_summary.json`. |
-| Grid | `--no-grid` | Build one composite tiled video per recording folder. |
-| Transfer | `--no-transfer` | Copy the outputs to the `[transfer]` destination. |
+| Transfer | `--no-transfer` | Copy the recordings (and matched 2P data) to the `[transfer]` destination. |
+| Grid | `--no-grid` | Build one composite tiled video per recording folder (copied to the NAS once built). |
 
 So `--no-transcode --no-transfer` regenerates just the grids after a layout
 change, and `--no-grid` skips the composite step.
+
+The data reaches the NAS before anything is rendered: after transcoding,
+`process` copies the behavior videos and any matched 2P data, gives the
+take folders their final `RecordingN` names, and only then builds the grids
+(hours, for a full day), copies them to `Renderings/`, deletes local copies
+if asked, and renders the synced behavior+2P videos and Z-stack MIPs. So you
+can start working with a day's data on the NAS while the grids are still
+being built.
 
 Other options:
 

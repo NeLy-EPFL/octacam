@@ -233,13 +233,46 @@ def test_plan_assembly_duplicate_frame_index_is_a_problem(tmp_path):
     assert ch.status == "problem"
 
 
-def test_plan_assembly_timepoints_mismatch_is_a_problem(tmp_path):
-    _write_experiment_xml(tmp_path, timepoints=10, zsteps=1, zenable="0")
-    _write_streaming_channel(tmp_path, "ChanA", 8)  # only 8 of the declared 10
+def test_plan_assembly_stopped_early_capture_is_assembled(tmp_path):
+    # octacam stops with ThorImage since 2026-10-14, so a capture stopped
+    # early (fly dropped the ball) is a real take: 8 of the declared 10
+    # frames, contiguous from the first, is everything that was acquired.
+    _write_experiment_xml(tmp_path, timepoints=10, zsteps=101, zenable="1", streaming_enable="1")
+    _write_streaming_channel(tmp_path, "ChanA", 8)
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "ready"
+    assert (ch.axis, ch.frame_count, ch.declared_count) == ("T", 8, 10)
+
+    dest = tmp_path / "out" / "ChanA.tif"
+    dest.parent.mkdir()
+    result = assemble_channel_stack(
+        ch.source_files, dest, axis="T", experiment_xml=tmp_path / "Experiment.xml",
+        full_verify=True, declared_count=ch.declared_count,
+    )
+    assert result.ok and result.frame_count == 8
+    with tifffile.TiffFile(dest) as tf:
+        assert len(tf.pages) == 8
+        assert "stopped early: 8 of 10" in tf.ome_metadata
+
+
+def test_plan_assembly_more_frames_than_declared_is_a_problem(tmp_path):
+    _write_experiment_xml(tmp_path, timepoints=10)
+    _write_streaming_channel(tmp_path, "ChanA", 12)
     plan = plan_assembly(tmp_path)
     (ch,) = plan.channels
     assert ch.status == "problem"
     assert "timepoints=10" in ch.reason
+
+
+def test_plan_assembly_partial_not_starting_at_first_frame_is_a_problem(tmp_path):
+    # Frames missing at the start is not "stopped early" — something was lost.
+    _write_experiment_xml(tmp_path, timepoints=10)
+    for t in range(3, 9):
+        _write_frame(tmp_path, "ChanA", (1, 1, 1, t), value=t)
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "problem"
 
 
 def test_plan_assembly_channel_declared_but_no_files_is_silently_skipped(tmp_path):

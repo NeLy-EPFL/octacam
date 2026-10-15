@@ -56,6 +56,22 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Changed
 
+- **2P captures stopped early are now stacked like complete ones.** Since
+  octacam stops with ThorImage, a capture ended before its declared
+  timepoints (e.g. the fly dropped the ball) is a real take: its frames,
+  contiguous from the first one, become `ChanA.tif`/`ChanB.tif` as usual,
+  with "N of M frames declared" in the stack's metadata, instead of being
+  copied as thousands of loose per-frame files. Matching against ThorSync
+  now expects the frames actually recorded, so such a take still verifies.
+
+- **`octacam process` puts the data on the NAS before rendering anything.**
+  Behavior videos and matched 2P data are transferred, and the take folders
+  renamed to their final `RecordingN` names, before the grids are built;
+  the synced behavior+2P videos and Z-stack MIPs come last. Previously the
+  grids (hours for a full day) ran first and held the whole transfer back.
+  A re-run after an interruption now writes into an already-renamed take
+  instead of re-creating its old folder.
+
 - **Instant GUI startup** — `octacam gui` now binds the web server and serves the
   page *before* opening the cameras. The browser shows the full UI immediately
   (with a "connecting to cameras" placeholder in the preview area); the cameras

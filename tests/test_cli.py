@@ -1843,6 +1843,102 @@ def test_process_pixel_verifies_assembled_stack_when_checksum_on(tmp_path, monke
     assert ("every frame verified" in " ".join(result.output.split())) is checksum
 
 
+def test_process_transfers_data_before_rendering_and_reruns_into_renamed_take(
+    tmp_path, monkeypatch
+):
+    # Matthias, 2026-10-15: a day's grids took ~8 h and blocked the NAS copy
+    # of the data behind them. Order is now: behavior + 2P data, the
+    # RecordingN rename, then grids, then the synced render — and a re-run
+    # writes into the renamed take instead of re-creating its old folder.
+    pytest.importorskip("tifffile")
+    from octacam import cli as cli_mod
+    from octacam import grid as grid_mod
+    from octacam import synced_render
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(source_root, "MB247_CI63", "Fly1", u_time=take_start - 5, n_frames=4)
+    folder = tmp_path / "data" / "day1" / "Fly1" / "001"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"match_window_s = 60\n"
+            f"settle_s = 60\n"
+        ),
+        extra_summary={
+            "relative_directory": "day1/Fly1/001",
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": 10.0,
+            "plugins": {"twophoton": {"armed": True}},
+        },
+    )
+    (folder / "grid.mp4").unlink()
+    old_take = dest_root / "day1" / "Fly1" / "001"
+    events = []
+
+    real_finalize = cli_mod._finalize_twophoton_matches
+
+    def finalize(*args, **kwargs):
+        events.append("2p")
+        return real_finalize(*args, **kwargs)
+
+    def fake_grid(folder, *, output, **_kwargs):
+        events.append(("grid", old_take.exists()))
+        output.write_bytes(b"grid")
+        return output
+
+    def fake_render(take_dir, options=None, **_kwargs):
+        events.append(("render", take_dir.name))
+        return None
+
+    monkeypatch.setattr(cli_mod, "_finalize_twophoton_matches", finalize)
+    monkeypatch.setattr(grid_mod, "build_grid_video", fake_grid)
+    monkeypatch.setattr(synced_render, "render_synced_video", fake_render)
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode"])
+    assert result.exit_code == 0, result.output
+    # Data first; the grid is built once the take already has its final name.
+    assert events == ["2p", ("grid", False), ("render", "Recording1_Synced")]
+    renamed = dest_root / "day1" / "Fly1" / "Recording1_Synced"
+    assert (renamed / "2P" / "Fly1" / "ChanA.tif").is_file()
+    assert (renamed / "Behavior" / "camera_LF.mp4").is_file()
+    assert (renamed / "Renderings" / "grid.mp4").is_file()
+    assert not old_take.exists()
+
+    # Re-run (e.g. after an interruption): everything lands in the renamed
+    # take; the old path is never re-created and nothing is duplicated.
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode"])
+    assert result.exit_code == 0, result.output
+    assert not old_take.exists()
+    assert sorted(p.name for p in (dest_root / "day1" / "Fly1").iterdir() if p.is_dir()) == [
+        "Recording1_Synced"
+    ]
+
+
+def test_current_take_dest_finds_a_renamed_take(tmp_path):
+    from octacam.cli import _current_take_dest
+
+    fly = tmp_path / "day1" / "Fly1"
+    renamed = fly / "Recording3_Synced_Streaming"
+    renamed.mkdir(parents=True)
+    (renamed / "recording_summary.json").write_text(json.dumps({"start_time_ns": 1_500_000_000_000}))
+    other = fly / "Recording2_Beh"
+    other.mkdir()
+    (other / "recording_summary.json").write_text(json.dumps({"start_time_ns": 1_400_000_000_000}))
+
+    assert _current_take_dest(fly / "003", 1500.0) == renamed
+    assert _current_take_dest(fly / "004", 1600.0) == fly / "004"  # new take: unchanged
+    assert _current_take_dest(fly / "003", None) == fly / "003"
+    (fly / "003").mkdir()
+    assert _current_take_dest(fly / "003", 1500.0) == fly / "003"  # existing folder wins
+
+
 def _make_fastz_folder_2p(root, experiment, name, *, u_time, zsteps, timepoints, channel="ChanA"):
     """A real "FastZ" (simultaneous multi-plane) ThorImage folder — matches
     real data exactly: ZStage itself reports enable="0" (Z motion is

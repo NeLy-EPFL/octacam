@@ -776,3 +776,23 @@ def test_correlate_sync_folder_to_image_returns_none_with_no_candidates(tmp_path
         frameout_per_segment=[50],
     )
     assert correlate_sync_folder_to_image(sync, []) is None
+
+
+def test_expected_frameout_edges_counts_frames_of_a_stopped_early_capture(tmp_path):
+    # FrameOut only pulses for frames actually scanned: a capture stopped
+    # after 418 of 3000 declared frames must verify against ~418 edges (real
+    # 2026-10-14 Fly4_Streaming: 418 files, 419 FrameOut edges).
+    from octacam.twophoton_transfer import thorimage_expected_frameout_edges
+
+    xml = tmp_path / "Experiment.xml"
+    xml.write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Wavelengths>'
+        '<Wavelength name="ChanA" /><Wavelength name="ChanB" /></Wavelengths>'
+        '<Streaming enable="1" zFastEnable="0" /><Timelapse timepoints="3000" />'
+        "</ThorImageExperiment>"
+    )
+    assert thorimage_expected_frameout_edges(xml) == 3000  # nothing on disk yet
+    for t in range(1, 419):
+        (tmp_path / f"ChanA_001_001_001_{t:03d}.tif").write_bytes(b"")
+    (tmp_path / "ChanA_Preview.tif").write_bytes(b"")
+    assert thorimage_expected_frameout_edges(xml) == 418

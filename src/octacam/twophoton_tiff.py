@@ -257,6 +257,9 @@ class ChannelPlan:
     axis: Literal["T", "Z"] | None = None
     frame_count: int | None = None
     reason: str | None = None
+    # Set when the acquisition stopped early: what Experiment.xml declared
+    # (frame_count is what was actually recorded).
+    declared_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -335,10 +338,18 @@ def plan_assembly(folder: Path) -> AssemblyPlan:
             ))
             continue
         n = len(indices)
+        declared: int | None = None
         if timepoints is not None and n == timepoints:
             axis: Literal["T", "Z"] | None = "T"
         elif zsteps is not None and n == zsteps:
             axis = "Z"
+        elif indices[0] == 1 and (stopped := _stopped_early(n, timepoints, zsteps)):
+            # Stopped early (since 2026-10-14 octacam stops with ThorImage,
+            # so an early stop is a real, usable take — e.g. the fly dropped
+            # the ball): every frame from the first one on, none missing, is
+            # a complete record of what was acquired. Stack it, keeping the
+            # declared count in the metadata.
+            axis, declared = stopped
         else:
             plans.append(ChannelPlan(
                 channel, "problem", [p for p, _ in ordered], dest_name,
@@ -349,9 +360,23 @@ def plan_assembly(folder: Path) -> AssemblyPlan:
             continue
         plans.append(ChannelPlan(
             channel, "ready", [p for p, _ in ordered], dest_name,
-            axis=axis, frame_count=n,
+            axis=axis, frame_count=n, declared_count=declared,
         ))
     return AssemblyPlan(folder, plans)
+
+
+def _stopped_early(
+    n: int, timepoints: int | None, zsteps: int | None
+) -> tuple[Literal["T", "Z"], int] | None:
+    """``(axis, declared count)`` when *n* contiguous frames are fewer than a
+    streaming capture's declared timepoints (or, for a single-timepoint
+    capture, a Z-stack's declared slices) — an acquisition stopped early.
+    Streaming captures also carry an enabled ``ZStage``, so timepoints win."""
+    if timepoints is not None and timepoints > 1:
+        return ("T", timepoints) if n < timepoints else None
+    if zsteps is not None and zsteps > 1 and n < zsteps:
+        return ("Z", zsteps)
+    return None
 
 
 @dataclass(frozen=True)
@@ -377,6 +402,11 @@ def _ome_metadata(plan: ChannelPlan, experiment_xml: Path) -> dict:
         f"Assembled by octacam from {plan.frame_count} per-frame TIFFs "
         f"(channel {plan.channel})"
     )
+    if plan.declared_count is not None:
+        metadata["Description"] += (
+            f"; acquisition stopped early: {plan.frame_count} of "
+            f"{plan.declared_count} frames declared in Experiment.xml"
+        )
     return metadata
 
 
@@ -404,6 +434,7 @@ def assemble_channel_stack(
     experiment_xml: Path | None = None,
     full_verify: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
+    declared_count: int | None = None,
 ) -> AssembleResult:
     """Stream *source_files* (already frame-ordered by the caller) into one
     OME-TIFF at *dest_path* — one frame at a time, so this is safe on a
@@ -431,6 +462,7 @@ def assemble_channel_stack(
         plan_stub = ChannelPlan(
             channel=dest_path.stem, status="ready", source_files=source_files,
             dest_name=dest_path.name, axis=axis, frame_count=n,
+            declared_count=declared_count,
         )
         metadata = _ome_metadata(plan_stub, experiment_xml)
 
