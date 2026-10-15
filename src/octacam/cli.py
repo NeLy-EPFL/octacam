@@ -4256,7 +4256,10 @@ def _current_take_dest(dest: Path, start_time_s: float | None) -> Path:
     if dest.is_dir() or start_time_s is None or not dest.parent.is_dir():
         return dest
     for cand in sorted(dest.parent.glob("Recording*")):
-        summary = _read_summary(cand / RECORDING_SUMMARY_FILENAME) or {}
+        summary_path = cand / RECORDING_SUMMARY_FILENAME
+        if not summary_path.is_file():  # a 2P-only session has none
+            continue
+        summary = _read_summary(summary_path) or {}
         start_ns = summary.get("start_time_ns")
         if isinstance(start_ns, (int, float)) and abs(start_ns / 1e9 - start_time_s) < 1e-3:
             return cand
@@ -5109,7 +5112,9 @@ def _attribute_unclaimed_folder(
     (:func:`~octacam.twophoton_transfer.correlate_sync_folder_to_image`,
     among every discovered image folder in *image_candidates* — claimed or
     not), then the same prefix check runs against that correlated folder's
-    name. Falls back to a coarser leading-``Fly<N>``-token match (see
+    name. Only flies recorded the same day as *folder* are candidates (day
+    folders are named ``YYMMDD_...``). Falls back to a coarser
+    leading-``Fly<N>``-token match (see
     :func:`~octacam.twophoton_transfer._fly_prefix`) when the precise
     modality-preserving check finds nothing — covers a fly whose claimed
     anchor used a *different* modality word than *folder* (e.g. anchored via
@@ -5125,16 +5130,31 @@ def _attribute_unclaimed_folder(
             return None
         name = image_match.path.name
 
+    # ThorImage reuses names every day ("Fly1_Zstack" in many experiments'
+    # days): only a fly recorded the same day can claim the folder. Real
+    # 2026-10-14: today's Fly1_Zstack matched September's Fly1 (it alone had a
+    # Fly1_Zstack on file) and was filed there.
+    day = time.strftime("%y%m%d", time.localtime(folder.start_time))
+
+    def same_day(fly_dir: Path) -> bool:
+        prefix = fly_dir.parent.name[:6]
+        return not prefix.isdigit() or prefix == day
+
     candidates = {
         fly_dir
         for (exp, base), fly_dirs in fly_basenames.items()
         if exp == experiment and (name == base or name.startswith(base + "_"))
         for fly_dir in fly_dirs
+        if same_day(fly_dir)
     }
     if not candidates:
         fly_token = _fly_prefix(name)
         if fly_token is not None:
-            candidates = fly_basenames.get((experiment, f"fly:{fly_token}"), set())
+            candidates = {
+                fly_dir
+                for fly_dir in fly_basenames.get((experiment, f"fly:{fly_token}"), set())
+                if same_day(fly_dir)
+            }
     return next(iter(candidates)) if len(candidates) == 1 else None
 
 
@@ -5483,6 +5503,42 @@ def _take_2p_detail(take_folder: Path) -> str:
     return ""
 
 
+def _pair_2p_only_sync_folders(
+    entries: list[tuple[float, str, Path]],
+) -> tuple[list[tuple[float, str, Path]], dict[Path, list[Path]]]:
+    """Fold each 2P-only ``SyncData`` entry into the 2P-only acquisition it
+    recorded (a Z-stack's own ThorSync — one CaptureOn segment per slice —
+    or a stream's, by FrameOut count; see
+    :func:`~octacam.twophoton_transfer.correlate_sync_folder_to_image`):
+    ThorSync is specific to a session, so both belong in one ``RecordingN``.
+    Returns the entries without those sync folders, and ``{image leaf: [sync
+    leaves]}``. A sync folder that pairs with nothing stays its own session.
+    """
+    from octacam.twophoton_transfer import (
+        classify_twophoton_folder,
+        correlate_sync_folder_to_image,
+    )
+
+    folders = {
+        path: classify_twophoton_folder(path)
+        for _start, kind, path in entries
+        if kind == "2P"
+    }
+    images = [f for f in folders.values() if f is not None and f.kind == "image"]
+    companions: dict[Path, list[Path]] = {}
+    if not images:
+        return entries, companions
+    paired: set[Path] = set()
+    for path, folder in folders.items():
+        if folder is None or folder.kind != "sync":
+            continue
+        image = correlate_sync_folder_to_image(folder, images)
+        if image is not None:
+            companions.setdefault(image.path, []).append(path)
+            paired.add(path)
+    return [e for e in entries if e[2] not in paired], companions
+
+
 def _reconcile_sessions(
     sessions: dict[Path, list[tuple[float, str, Path]]],
     dest_root: Path,
@@ -5508,9 +5564,11 @@ def _reconcile_sessions(
     for fly_dir, entries in sorted(sessions.items()):
         if not entries:
             continue
+        entries, companions = _pair_2p_only_sync_folders(entries)
         entries.sort(key=lambda e: e[0])
         fly_moves: list[tuple[Path, Path]] = []
         planned: list[tuple[Path, Path]] = []
+        companion_moves: list[tuple[Path, Path]] = []
         for i, (_start, kind, current_path) in enumerate(entries, 1):
             detail = (
                 _thorimage_detail(current_path.name)
@@ -5536,6 +5594,14 @@ def _reconcile_sessions(
             else:
                 source = current_path
                 target = fly_dir / name
+            # This acquisition's own ThorSync folder joins it (unless it
+            # already shares its wrapper, which then moves with it).
+            for sync_leaf in companions.get(current_path, []):
+                if already_wrapped and sync_leaf.parent.parent == current_path.parent.parent:
+                    continue
+                sync_target = fly_dir / name / "2P" / sync_leaf.name
+                if sync_leaf != sync_target:
+                    companion_moves.append((sync_leaf, sync_target))
             if source == target:
                 n_unchanged += 1
                 continue
@@ -5545,6 +5611,15 @@ def _reconcile_sessions(
         # yet), so a straight in-order rename collides. Only a top-level name
         # held by a session that is NOT itself moving is a real conflict.
         moving_away = {src for src, _ in planned if src.parent == fly_dir}
+        # A ThorSync folder alone in its own wrapper leaves it empty.
+        moving_away |= {
+            leaf.parent.parent
+            for leaf, _ in companion_moves
+            if leaf.parent.name == "2P"
+            and _RECONCILED_2P_DIR_RE.match(leaf.parent.parent.name)
+            and [c.name for c in leaf.parent.parent.iterdir()] == ["2P"]
+            and [c.name for c in leaf.parent.iterdir()] == [leaf.name]
+        }
         moves: list[tuple[Path, Path]] = []
         for source, target in planned:
             top = fly_dir / target.relative_to(fly_dir).parts[0]
@@ -5554,9 +5629,22 @@ def _reconcile_sessions(
                 continue
             moves.append((source, target))
         if dry_run:
-            for source, target in moves:
+            for source, target in [*moves, *companion_moves]:
                 log.info("[dry-run] reconcile: %s -> %s", source, target)
             continue
+        # Paired ThorSync folders are parked first (freeing a wrapper of their
+        # own) and placed last, once their acquisition's wrapper has its name.
+        parked_sync: list[tuple[Path, Path, Path]] = []
+        for k, (source, target) in enumerate(companion_moves):
+            tmp = fly_dir / f".reconcile-sync-{k}-{source.name}"
+            try:
+                source.rename(tmp)
+            except OSError as e:
+                n_conflict += 1
+                log.error("reconcile: failed to move %s -> %s: %s", source, target, e)
+                continue
+            _prune_empty_dirs(source.parent, dest_root)
+            parked_sync.append((source, tmp, target))
         # Two phases: park every top-level mover under a unique temporary name
         # first, then place each at its final name — so no target is still
         # occupied.
@@ -5587,6 +5675,19 @@ def _reconcile_sessions(
             log.info("reconcile: %s -> %s", source, target)
             fly_moves.append((source, target))
             _prune_empty_dirs(source.parent, dest_root)
+        for source, tmp, target in parked_sync:
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp.rename(target)
+            except OSError as e:
+                n_conflict += 1
+                log.error(
+                    "reconcile: failed to move %s -> %s (left at %s): %s", source, target, tmp, e
+                )
+                continue
+            n_moved += 1
+            log.info("reconcile: %s -> %s (its acquisition's ThorSync)", source, target)
+            fly_moves.append((source, target))
         if not dry_run:
             _append_reconciliation_log(fly_dir, dest_root, fly_moves)
     return n_moved, n_unchanged, n_conflict

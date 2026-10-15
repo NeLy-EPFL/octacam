@@ -116,6 +116,13 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **2P-only data is only filed under a fly of its own day.** ThorImage
+  reuses folder names every day ("Fly1_Zstack"), and a new day's Z-stack was
+  filed under an older day's Fly1 of the same experiment.
+- **A Z-stack and its own ThorSync recording are one session.** The renumber
+  folds a 2P-only `SyncData` folder into the acquisition it recorded (matched
+  by its signal) instead of giving it a `RecordingN_2P` of its own.
+
 - **2P audit fixes (data-loss risks first).**
   - A take synced with ThorImage now pairs with its ThorSync recording by
     trigger signal again: the board keeps triggering the cameras ~2 s after

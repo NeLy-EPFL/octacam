@@ -4157,8 +4157,10 @@ def test_sweep_reattributes_later_data_to_a_pure_2p_only_fly(tmp_path, monkeypat
     (fly_dir,) = [d for d in day_dir.iterdir() if d.is_dir()]
     assert not (dest_root / "2p_only").exists()
 
-    # Week 2: a third folder for the SAME fly shows up on the live share.
-    _make_bare_image_folder_2p(source_root, "exp1", "Fly1_005", u_time="90000", mtime=90000)
+    # Later that day (a later sweep run): a third folder for the SAME fly
+    # shows up on the live share. Same day only: ThorImage reuses "Fly1"
+    # every day for a different fly (real 2026-10-14 misfile).
+    _make_bare_image_folder_2p(source_root, "exp1", "Fly1_005", u_time="9000", mtime=9000)
     result = runner.invoke(app, ["process", "--twophoton-sweep", "--config", str(config_dir)])
     assert result.exit_code == 0, result.output
 
@@ -4187,8 +4189,10 @@ def test_reconcile_recordings_attributes_prefix_match_not_a_new_fly(tmp_path, mo
     dest_root = tmp_path / "dest"
     # Z-stack first (start 500), matching the real workflow — chronologically
     # ahead of take 001 (start 1000), so it should land as Recording1.
+    # Day folder dated like the synthetic epoch times (fly attribution only
+    # considers flies of the 2P folder's own day).
     _write_take(
-        dest_root, "260903_PAM7xCI63/Fly1/001", start_time_ns=1_000_000_000_000,
+        dest_root, "700101_PAM7xCI63/Fly1/001", start_time_ns=1_000_000_000_000,
         duration_s=10.0, matched_paths=["PAM7xCI63/Fly1_001"],
     )
     orphan = dest_root / "2p_only" / "PAM7xCI63" / "260903" / "Fly1_Zstack"
@@ -4206,10 +4210,10 @@ def test_reconcile_recordings_attributes_prefix_match_not_a_new_fly(tmp_path, mo
         app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
-    fly1 = dest_root / "260903_PAM7xCI63" / "Fly1"
+    fly1 = dest_root / "700101_PAM7xCI63" / "Fly1"
     assert (fly1 / "Recording1_2P_Zstack" / "2P" / "Fly1_Zstack" / "Experiment.xml").exists()
     assert (fly1 / "Recording2_Synced" / "recording_summary.json").exists()
-    assert not (dest_root / "260903_PAM7xCI63" / "Fly2").exists()
+    assert not (dest_root / "700101_PAM7xCI63" / "Fly2").exists()
 
 
 def test_reconcile_recordings_reuses_day_folder_despite_digit_mismatch(tmp_path, monkeypatch):
@@ -5009,3 +5013,87 @@ def test_record_explicit_duration_is_not_overridden_by_thorimage(tmp_path, monke
     result = runner.invoke(app, ["record", str(tmp_path), *args])
     assert result.exit_code == 0, result.output
     assert started["plugin_params"]["twophoton"]["match_thorimage"] is match
+
+
+def test_unclaimed_2p_folder_is_only_attributed_to_a_fly_of_its_own_day(tmp_path):
+    # Real 2026-10-14: today's Fly1_Zstack was filed under September's Fly1,
+    # the only fly with a Fly1_Zstack on file (today's Fly1 had Fly1_Streaming
+    # takes). ThorImage reuses names every day: only the same day counts.
+    from octacam.cli import _attribute_unclaimed_folder
+    from octacam.twophoton_transfer import TwoPhotonFolder
+
+    dest = tmp_path / "dest"
+    september = dest / "260903_PAM07xCI80" / "Fly1"
+    today = dest / "261014_PAM7xCI80" / "Fly1"
+    basenames = {
+        ("PAM7xCI80", "Fly1_Zstack"): {september},
+        ("PAM7xCI80", "fly:Fly1"): {september, today},
+        ("PAM7xCI80", "Fly1_Streaming"): {today},
+    }
+    start = time.mktime((2026, 10, 14, 11, 31, 0, 0, 0, -1))
+    zstack = TwoPhotonFolder(
+        path=tmp_path / "share" / "PAM7xCI80" / "Fly1_Zstack", kind="image",
+        start_time=start, last_mtime=start,
+    )
+    assert _attribute_unclaimed_folder(zstack, "PAM7xCI80", basenames, []) == today
+    # A different day's folder with no fly that day stays in the generic bucket.
+    later = TwoPhotonFolder(
+        path=zstack.path, kind="image", start_time=start + 3 * 86400, last_mtime=start,
+    )
+    assert _attribute_unclaimed_folder(later, "PAM7xCI80", basenames, []) is None
+
+
+def test_reconcile_puts_a_zstack_and_its_thorsync_in_one_session(tmp_path, monkeypatch):
+    # ThorSync is specific to a session: a Z-stack's own SyncData (one
+    # CaptureOn segment per slice) belongs in the Z-stack's RecordingN, not in
+    # a RecordingN_2P of its own (real 2026-10-14: Fly2's SyncData171 became
+    # Recording3_2P after the takes).
+    h5py = pytest.importorskip("h5py")
+    import numpy as np
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    fly = dest_root / "261014_PAM7xCI80" / "Fly2"
+    t0 = 1_791_000_000.0
+    zstack = fly / "Recording1_2P_Zstack" / "2P" / "Fly2_Zstack"
+    zstack.mkdir(parents=True)
+    (zstack / "Experiment.xml").write_text(
+        f'<?xml version="1.0"?><ThorImageExperiment><Date uTime="{int(t0)}" />'
+        '<ZStage steps="3" enable="1" /><Streaming enable="0" />'
+        '<Timelapse timepoints="1" /><LSM averageMode="0" /></ThorImageExperiment>'
+    )
+    _write_take(dest_root, "261014_PAM7xCI80/Fly2/Recording2_Synced_Streaming",
+                start_time_ns=int((t0 + 300) * 1e9), duration_s=10.0,
+                matched_paths=["PAM7xCI80/Fly2_Streaming"])
+    sync = fly / "Recording3_2P" / "2P" / "SyncData171"
+    sync.mkdir(parents=True)
+    capture = np.zeros((300, 1), np.uint32)
+    frameout = np.zeros((300, 1), np.uint32)
+    for k in range(3):  # 3 slices, 1 frame each
+        capture[10 + 90 * k: 60 + 90 * k] = 1
+        frameout[20 + 90 * k] = 1
+    with h5py.File(sync / "Episode001.h5", "w") as f:
+        di = f.create_group("DI")
+        di.create_dataset("CaptureOn", data=capture)
+        di.create_dataset("FrameOut", data=frameout)
+        di.create_dataset("Cameras", data=np.zeros((300, 1), np.uint32))
+    (sync / "ThorRealTimeDataSettings.xml").write_text("<ThorData/>")
+    os.utime(sync / "ThorRealTimeDataSettings.xml", (t0 - 60, t0 - 60))
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir),
+              str(dest_root / "261014_PAM7xCI80")],
+    )
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in fly.iterdir() if p.is_dir()) == [
+        "Recording1_2P_Zstack", "Recording2_Synced_Streaming",
+    ]
+    assert sorted(p.name for p in (fly / "Recording1_2P_Zstack" / "2P").iterdir()) == [
+        "Fly2_Zstack", "SyncData171",
+    ]
+    assert "SyncData171" in (fly / "reconciliation_log.md").read_text()

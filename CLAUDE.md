@@ -822,6 +822,14 @@ against a real 2P rig; the durable findings:
   ThorSync's NI6363 `duration="320"` cap cut every ~394 s take's episode at
   32 M samples — `CaptureOn` never falls, no segment, so those fall back to
   start-time pairing and get no synced render.
+  **Fly attribution is same-day only; a 2P-only acquisition keeps its
+  ThorSync (2026-10-15).** `_attribute_unclaimed_folder` only considers flies
+  whose day folder (`YYMMDD_...`) is the 2P folder's own day: real 2026-10-14,
+  today's `Fly1_Zstack` matched September's Fly1 (the only fly with that exact
+  name on file) and was filed there. `_pair_2p_only_sync_folders` folds a
+  2P-only `SyncData` into the acquisition it recorded
+  (`correlate_sync_folder_to_image`) during the renumber, so a Z-stack's
+  ThorSync lands in its `RecordingN_2P_Zstack/2P/` (parked first, placed last).
   **2P audit fixes (2026-10-15).** One ThorSync sample rate everywhere
   (`thorsync_sample_rate`: active board first); a `CaptureOn` high at sample 0
   rises at 0; the synced render only uses a segment within 2 camera pulses
