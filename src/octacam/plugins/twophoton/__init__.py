@@ -32,7 +32,8 @@ flashed via `octacam.firmware`.
 
 The take's 2P facts (armed, synced with ThorImage, the board's STOP report) go
 to `octacam_recording/twophoton.json` when it ends; `octacam process` pairs the
-take with its ThorImage/ThorSync data from there.
+take with its ThorImage/ThorSync data from there (`process`, set up by the
+`source` option and the others in `settings`).
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ from pathlib import Path
 from octacam import firmware as fw
 from octacam.plugins.serial import SerialLink, SerialPlugin
 from octacam.plugins.twophoton.layout import TAKE_INFO_FILENAME
+from octacam.plugins.twophoton.process import TwoPhotonSteps
 
 log = logging.getLogger("octacam")
 
@@ -86,6 +88,14 @@ _EXPECTED_BANNER = "2PHOTON"
 # misparse the longer arm, so it is refused (WRONG_VERSION) until reflashed.
 _PROTOCOL_VERSION = 2
 _STOP_PREFIX = "STOP"
+_NO_SOURCE_MSG = (
+    "twophoton: no `source` option \N{EM DASH} `octacam process` will not pair "
+    "takes with their ThorImage/ThorSync data"
+)
+_LEGACY_SETTINGS_MSG = (
+    "twophoton: move [transfer.twophoton] into the plugin's [plugins.options] "
+    "(it is still read for now)"
+)
 _STOP_REASONS = {"I": "thorimage", "C": "ceiling"}
 
 
@@ -265,6 +275,7 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
     default_device = DEFAULT_DEVICE
     reconnect_path = "/api/twophoton/reconnect"
     state_topic = "twophoton_state"
+    process_steps = TwoPhotonSteps
 
     def __init__(
         self,
@@ -627,3 +638,67 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
             path.write_text(json.dumps(self.take_info(), indent=2) + "\n")
         except OSError as e:
             log.error("twophoton: could not write %s: %s", path, e)
+
+    # ------------------------------------------------------------ doctor
+
+    @classmethod
+    def doctor(
+        cls, options: dict, config, config_dir: Path | None
+    ) -> list[tuple[str, str]]:
+        """The 2P checks: a share to pair takes with, reachable, and ThorSync
+        set to record as long as a take can run (it silently stops at its own
+        acquisition duration: real 2026-10-14, 320 s against 394 s takes).
+        """
+        from octacam.config import duration_to_seconds
+        from octacam.plugins.twophoton.matching import latest_thorimage_plan
+        from octacam.plugins.twophoton.settings import settings_for
+        from octacam.plugins.twophoton.signals import latest_thorsync_limit
+
+        config_file = config_dir / "octacam_config.toml" if config_dir else None
+        settings = settings_for(config, config_file)
+        moved: list[tuple[str, str]] = []
+        if settings is not None and not options.get("source"):
+            moved.append(("warn", _LEGACY_SETTINGS_MSG))
+        if settings is None or settings.source_root is None:
+            return [("warn", _NO_SOURCE_MSG)]
+        source = settings.source_root
+        if not source.is_dir():
+            return [
+                *moved,
+                ("warn", f"twophoton: the 2P share {source} is not reachable"),
+            ]
+        checks = [*moved, ("ok", f"twophoton: 2P share {source}")]
+        latest = latest_thorsync_limit(source)
+        if latest is None:
+            return [
+                *checks,
+                ("info", f"ThorSync duration: no SyncData folder under {source}"),
+            ]
+        folder, limit = latest
+        label = f"{folder.parent.name}/{folder.name}"
+        if not limit:
+            return [*checks, ("info", f"ThorSync duration: not readable from {label}")]
+        take_source = None
+        if not _as_bool(options.get("match_thorimage"), DEFAULT_MATCH_THORIMAGE):
+            record = config.record
+            longest = duration_to_seconds(
+                record.duration, record.duration_unit, record.fps
+            )
+        elif (plan := latest_thorimage_plan(source)) is not None:
+            longest, take_source = plan[1], f"{plan[0].parent.name}/{plan[0].name}"
+        else:
+            longest = _as_number(
+                options, "max_duration_s", float, DEFAULT_MAX_DURATION_S
+            )
+        if limit < longest:
+            return [
+                *checks,
+                ("warn", thorsync_limit_message(label, limit, longest, take_source)),
+            ]
+        return [
+            *checks,
+            (
+                "ok",
+                f"ThorSync duration {limit:g} s (from {label}) covers the longest take",
+            ),
+        ]

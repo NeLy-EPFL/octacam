@@ -41,7 +41,7 @@ import os
 import re
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from octacam.plugins.twophoton.signals import (
@@ -58,6 +58,9 @@ SYNC_FOLDER_PREFIX = "SyncData"
 # the take's own recorded frame count / ThorImage's own timepoints) -- shared
 # by match_takes_to_twophoton_batch and correlate_sync_folder_to_image.
 _VERIFY_TOLERANCE = 1
+# No acquisition outlasts this (the plugin's ceiling defaults to 1 h): an
+# older start rules a folder out without reading its files' mtimes.
+_LONGEST_ACQUISITION_S = 4 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -67,7 +70,17 @@ class TwoPhotonFolder:
     path: Path
     kind: str  # "sync" | "image"
     start_time: float  # unix seconds, best-effort
-    last_mtime: float  # max mtime across every file in the folder, recursively
+    # The latest mtime of any file in it, recursively (see last_write): None
+    # until asked, as it stats every frame file (thousands, over a share).
+    last_mtime: float | None = field(default=None, compare=False, hash=False)
+
+
+def last_write(folder: TwoPhotonFolder) -> float:
+    """*folder*'s latest file mtime, computed once when first asked."""
+    if folder.last_mtime is None:
+        object.__setattr__(folder, "last_mtime", _folder_last_mtime(folder.path))
+    assert folder.last_mtime is not None
+    return folder.last_mtime
 
 
 @dataclass(frozen=True)
@@ -404,7 +417,7 @@ def classify_twophoton_folder(candidate: Path) -> TwoPhotonFolder | None:
         start = _thorimage_start_time(experiment_xml)
         if start is None:
             start = candidate.stat().st_mtime
-        return TwoPhotonFolder(candidate, "image", start, _folder_last_mtime(candidate))
+        return TwoPhotonFolder(candidate, "image", start)
     if candidate.name.startswith(SYNC_FOLDER_PREFIX):
         # ThorSync writes its settings file once, at the start: on the share
         # its mtime equals the folder's (real data: to the 0.1 s), and unlike
@@ -415,7 +428,7 @@ def classify_twophoton_folder(candidate: Path) -> TwoPhotonFolder | None:
             start = settings.stat().st_mtime
         except OSError:
             start = candidate.stat().st_mtime
-        return TwoPhotonFolder(candidate, "sync", start, _folder_last_mtime(candidate))
+        return TwoPhotonFolder(candidate, "sync", start)
     return None
 
 
@@ -475,7 +488,7 @@ def is_settled(
     it half-written and then skips the complete one as "already present".
     """
     now = time.time() if now is None else now
-    quiet_s = now - folder.last_mtime
+    quiet_s = now - last_write(folder)
     if folder.kind == "image" and not _has_image_data(folder.path):
         return quiet_s >= max(settle_s, _EMPTY_IMAGE_FOLDER_SETTLE_S)
     return quiet_s >= settle_s
@@ -507,7 +520,7 @@ def _end_gap_seconds(take_end: float, candidate: TwoPhotonFolder) -> float:
     so this can differ by a lot and must never gate a match -- see
     :func:`_start_gap_seconds` for the one criterion that does.
     """
-    return candidate.last_mtime - take_end
+    return last_write(candidate) - take_end
 
 
 def _overlaps(
@@ -522,10 +535,11 @@ def _overlaps(
     the timestamp-only decision itself; see :func:`_start_gap_seconds` for
     that.
     """
-    return not (
-        candidate.start_time > take_end + window_s
-        or candidate.last_mtime < take_start - window_s
-    )
+    if candidate.start_time > take_end + window_s:
+        return False
+    if candidate.start_time < take_start - window_s - _LONGEST_ACQUISITION_S:
+        return False  # ended long before, whatever its last write
+    return last_write(candidate) >= take_start - window_s
 
 
 def match_take_to_twophoton(

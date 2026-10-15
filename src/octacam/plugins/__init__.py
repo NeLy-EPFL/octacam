@@ -29,7 +29,9 @@ _PLUGINS = {
 # name -> "module:app" of a plugin's typer command group, mounted as
 # `octacam <name>`. Kept apart from the plugin module so the CLI starts without
 # importing every plugin's hardware layer.
-_COMMANDS: dict[str, str] = {}
+_COMMANDS: dict[str, str] = {
+    "twophoton": "octacam.plugins.twophoton.cli:app",
+}
 
 # Old plugin names, still loaded (with a warning) so no rig loses its plugin.
 _ALIASES = {"arduino": "flywheel"}

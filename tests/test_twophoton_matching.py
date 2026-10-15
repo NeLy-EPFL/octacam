@@ -20,6 +20,7 @@ from octacam.plugins.twophoton.matching import (
     correlate_sync_folder_to_image,
     discover_twophoton_folders,
     is_settled,
+    last_write,
     match_take_to_twophoton,
     match_takes_to_twophoton_batch,
     render_twophoton_manifest,
@@ -79,7 +80,7 @@ def test_discover_image_start_time_from_experiment_xml_not_directory_mtime(tmp_p
     )
     (folder,) = discover_twophoton_folders(tmp_path)
     assert folder.start_time == 1000.0
-    assert folder.last_mtime == 1200.0
+    assert last_write(folder) == 1200.0
 
 
 def test_discover_image_falls_back_to_directory_mtime_without_utime(tmp_path):
@@ -106,7 +107,7 @@ def test_discover_last_mtime_is_max_across_nested_files(tmp_path):
     folder = _make_sync_folder(tmp_path, "exp", "SyncData001", mtime=1000.0)
     _touch(folder / "later.txt", 1500.0)
     (found,) = discover_twophoton_folders(tmp_path)
-    assert found.last_mtime == 1500.0
+    assert last_write(found) == 1500.0
 
 
 # --- is_settled ---------------------------------------------------------------

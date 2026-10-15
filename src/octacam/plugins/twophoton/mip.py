@@ -197,9 +197,9 @@ def _render(image_dir: Path, opts: MipOptions, force: bool) -> Path | None:
     for chan, path in stacks.items():
         with tifffile.TiffFile(path) as tif:
             mip = None
-            for page in tif.pages:
-                # pages[i].asarray(), never imread(): see twophoton_tiff.
-                img = page.asarray().astype(np.float32)  # type: ignore[union-attr]
+            for k in range(len(tif.pages)):
+                # One page at a time, never imread(): see twophoton_tiff.
+                img = tif.asarray(key=k).astype(np.float32)
                 if opts.smooth_px > 0:
                     img = _box_blur(img, opts.smooth_px)
                 mip = img if mip is None else np.maximum(mip, img)

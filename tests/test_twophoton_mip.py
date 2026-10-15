@@ -120,13 +120,12 @@ def test_unassembled_zstack_is_skipped(tmp_path):
     assert list(find_zstacks(tmp_path)) == []
 
 
-@pytest.mark.skip(reason="the `octacam render` command is not ported yet")
 def test_render_command_renders_mips_and_dry_run_writes_nothing(tmp_path):
     day = tmp_path / "261007_Exp"
     z = _make_zstack(day / "Fly1" / "Recording1_2P_Zstack" / "2P" / "Fly1_Zstack")
-    result = runner.invoke(app, ["render", str(day), "--dry-run"])
+    result = runner.invoke(app, ["twophoton", "render", str(day), "--dry-run"])
     assert result.exit_code == 0, result.output
     assert not (mip_output_dir(z) / MIP_FILENAMES["dual"]).exists()
-    result = runner.invoke(app, ["render", str(day), "--no-synced"])
+    result = runner.invoke(app, ["twophoton", "render", str(day), "--no-synced"])
     assert result.exit_code == 0, result.output
     assert (mip_output_dir(z) / MIP_FILENAMES["dual"]).exists()
