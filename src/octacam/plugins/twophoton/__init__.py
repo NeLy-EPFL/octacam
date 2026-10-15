@@ -217,7 +217,9 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
 
     # -------------------------------------------------- recording lifecycle
 
-    def default_start_params(self, fps: float, duration_s: float) -> dict:
+    def default_start_params(
+        self, fps: float, duration_s: float, *, fixed_duration: bool = False
+    ) -> dict:
         """The arm slice for headless `octacam record`, without which the board
         is never armed and the cameras wait forever.
         """

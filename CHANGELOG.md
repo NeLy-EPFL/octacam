@@ -34,6 +34,9 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   `duration_s`. Every summary now also has `first_frame_time_ns`, when the
   first frames were in (for an external trigger, possibly long after Start),
   and plugins tell the operator through `controller.event(level, message)`.
+  `octacam record --duration` is exact: `Plugin.default_start_params` gets
+  `fixed_duration=True`, so such a plugin leaves that take to the duration (a
+  plugin overriding the hook must accept the new keyword).
 
 - **`--set KEY=VALUE` on `gui` and `record`** overrides any config key for one
   launch by its dotted path (`--set record.save_method=raw`), the same flag

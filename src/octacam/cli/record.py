@@ -131,7 +131,8 @@ def record(
             "--duration",
             "-d",
             help="Recording duration in seconds (default: the config's "
-            "`record.duration` and `record.duration_unit`).",
+            "`record.duration` and `record.duration_unit`). Given here, it is "
+            "exact: a plugin that would end the take itself does not.",
         ),
     ] = None,
     out: Annotated[
@@ -259,7 +260,7 @@ def record(
             # No GUI posts plugin_params here: without a start slice triggerbox
             # never arms and its cameras wait forever for a trigger.
             plugin_params = plugins.default_start_params(
-                settings.fps, settings.duration_s
+                settings.fps, settings.duration_s, fixed_duration=duration is not None
             )
             result = controller.start_recording(
                 confirm_overwrite=True, plugin_params=plugin_params or None
