@@ -262,9 +262,10 @@ def transfer_folder(
     dry_run: bool = False,
     verify: bool = True,
     on_progress: TransferCallback | None = None,
+    metadata: bool = True,
 ) -> TransferResult:
-    """Copy *files_only* (the processed videos) and the recording's metadata
-    from *folder* into *dest*.
+    """Copy *files_only* (the processed videos) and, with *metadata*, the
+    recording's metadata from *folder* into *dest*.
 
     *dry_run* touches nothing and reports a file already matching at *dest* as
     skipped, any other (even an output not produced yet) as copied. *verify*
@@ -272,9 +273,9 @@ def transfer_folder(
     its size. *on_progress* gets a `TransferProgress` per chunk.
     """
     candidates = list(files_only)
-    metadata = _metadata_files(folder)
-    candidates += [f for f in metadata if f not in candidates]
-    by_content = set(metadata)
+    meta_files = _metadata_files(folder) if metadata else []
+    candidates += [f for f in meta_files if f not in candidates]
+    by_content = set(meta_files)
 
     result = TransferResult(dest=dest)
 

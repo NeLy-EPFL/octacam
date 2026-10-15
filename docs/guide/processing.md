@@ -18,13 +18,18 @@ that keep them flat beside the videos are processed just the same.
 
 ## The three steps
 
-`process` runs three steps in order; skip any of them:
+`process` runs three steps; skip any of them:
 
 | Step | Skip flag | What it does |
 | --- | --- | --- |
 | Transcode | `--no-transcode` | Re-encode each recording to mp4 per its `recording_summary.json`. |
-| Grid | `--no-grid` | Build one composite tiled video per `[[visualization]]` entry — **opt-in**, see below. |
 | Transfer | `--no-transfer` | Copy the outputs to the `[transfer]` destination. |
+| Grid | `--no-grid` | Build one composite tiled video per `[[visualization]]` entry — **opt-in**, see below. |
+
+The data comes first: the videos and metadata are transferred before any grid
+is built (a full day's grids take hours), then the grids are built and
+transferred on their own. A plugin can add steps of its own — data steps right
+after the transfer, slow renders at the very end.
 
 Transcode and transfer run by default. The grid step only does something for a
 rig whose config asks for one, so `--no-transcode --no-transfer` regenerates just
@@ -160,7 +165,7 @@ octacam process --all           # every folder still in the cache
 ## The one-command end-of-day workflow
 
 Because each recording embeds its own config, the entire pipeline — transcode →
-grid → transfer — is one command:
+transfer → grid — is one command:
 
 ```bash
 octacam process --all

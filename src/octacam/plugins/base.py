@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from fastapi import APIRouter
 
     from octacam.controller import RecordingController
+    from octacam.process import ProcessSteps
 
 log = logging.getLogger("octacam")
 
@@ -30,6 +31,9 @@ class Plugin:
     # on_recording_start arms idle cameras.
     generates_trigger: ClassVar[bool] = False
     web_dir: ClassVar[Path | None] = None  # serves <name>.js (+ <name>.css)
+    # `octacam process` steps for recordings whose config enables the plugin
+    # (no instance, no hardware): see process.ProcessSteps.
+    process_steps: ClassVar[type[ProcessSteps] | None] = None
     controller: RecordingController | None = None  # set by PluginManager.attach
 
     def broadcast(self, topic: str, payload: dict, /) -> None:
