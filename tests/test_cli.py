@@ -1621,8 +1621,13 @@ def test_process_dry_run_lists_no_work_for_a_finished_recording(
     ]
     assert "[dry-run] Transcode: 0 to transcode, 1 already done" in process_log.messages
     assert "[dry-run] Grid: 0 to build, 1 already exist" in process_log.messages
-    # The mp4, the grid, the summary and the config snapshot.
-    assert "[dry-run] Transfer: 0 to copy, 4 already up to date" in process_log.messages
+    # The mp4, the summary and the config snapshot; then the grid on its own
+    # (the data first, the presentation outputs after).
+    assert "[dry-run] Transfer: 0 to copy, 3 already up to date" in process_log.messages
+    assert (
+        "[dry-run] Transfer (grids): 0 to copy, 1 already up to date"
+        in process_log.messages
+    )
 
 
 # --- process: the progress bar (transcode, grid and transfer) ----------------
@@ -2759,3 +2764,53 @@ def test_benchmark_rejects_an_unknown_choice(tmp_path, option):
     result = runner.invoke(app, ["benchmark", str(tmp_path), option, "bogus"])
     assert result.exit_code == 2
     assert option in result.output
+
+
+def test_plugin_process_steps_run_after_the_data_and_render_last(tmp_path, monkeypatch):
+    # A plugin's data steps (e.g. twophoton pairing and copying its own data)
+    # run once the recordings' own data is on the destination and before the
+    # grids (hours for a day); its renders run last.
+    from octacam import plugins as plugins_mod
+    from octacam.plugins.base import Plugin
+    from octacam.process import ProcessSteps
+
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=_transfer_toml(dest_root) + '[[plugins]]\nname = "spy"\n',
+    )
+    (folder / "grid.mp4").unlink()  # built by this run
+    events = []
+
+    class SpySteps(ProcessSteps):
+        def after_transfer(self, ctx):
+            (dest,) = ctx.dests.values()
+            events.append(
+                ("data", ctx.folders == [folder], (dest / "camera_LF.mp4").exists())
+            )
+            return 0
+
+        def render(self, ctx):
+            (dest,) = ctx.dests.values()
+            events.append(("render", (dest / "grid.mp4").exists()))
+            return 1  # a failed render counts as a failure
+
+    class Spy(Plugin):
+        name = "spy"
+        process_steps = SpySteps
+
+    def build_grid(*args, output, **kwargs):
+        events.append(("grid",))
+        output.write_bytes(b"grid")
+        return output
+
+    monkeypatch.setitem(plugins_mod._PLUGINS, "spy", "tests:unused")
+    monkeypatch.setattr(plugins_mod, "plugin_class", lambda name: Spy)
+    monkeypatch.setattr("octacam.process.build_grid_video", build_grid)
+    _forbid(monkeypatch, "octacam.process.transcode_file")
+
+    result = runner.invoke(app, ["process", str(folder)])
+    assert events == [("data", True, True), ("grid",), ("render", True)]
+    assert result.exit_code != 0  # the failed render is reported

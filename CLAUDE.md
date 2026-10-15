@@ -766,8 +766,15 @@ opens a camera (safe during a live session). A rig **instance-lock**
 prevents two octacams owning one rig; doctor names its holder with
 `locks.holder`, a `files.flock_held` probe that never takes or blocks the lock.
 
-`process.run(folders, ProcessOptions, reporter)` drives transcode → grid →
-transfer. The run side is `process_jobs`: `worker(jd)` yields the run's reporter
+`process.run(folders, ProcessOptions, reporter)` drives transcode → transfer
+(videos + metadata) → plugin data steps → grid → transfer (grids, no metadata)
+→ plugin renders: the data reaches the destination before the grids (hours
+for a full day). A plugin contributes steps through its class attribute
+`process_steps` (a `process.ProcessSteps`: `after_transfer(ctx)` and
+`render(ctx)`, each returning its failed-file count, with a `ProcessContext`
+of the recordings whose config enables it, their destinations, configs,
+options and reporter); `process` never instantiates a plugin or touches its
+hardware. The run side is `process_jobs`: `worker(jd)` yields the run's reporter
 (a `NullReporter` outside a detached job) and records done/cancelled/failed, and
 `pause_gate` holds a work unit while a gui/record has the cameras.
 

@@ -11,6 +11,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **`octacam process` transfers the data before building grids**, so a day's
+  videos are on the destination hours earlier; grids are built and transferred
+  after. **Plugins can add processing steps** (`Plugin.process_steps`, a
+  `process.ProcessSteps`): data steps right after the transfer, renders at the
+  very end. `process` never instantiates a plugin or touches its hardware.
 - **A plugin can end the take itself**: `Plugin.take_ceiling_s` returns a
   safety ceiling that replaces the set duration (deadline and pulse count),
   and `controller.finish_recording(name)` ends the take as *completed* (not an
