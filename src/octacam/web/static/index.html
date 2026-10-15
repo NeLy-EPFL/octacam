@@ -44,7 +44,11 @@
       <fieldset id="record-fields" disabled>
         <!-- Essentials: always visible. Everything else lives under the
              Advanced-options switch below (see record.js). -->
-<<<<<<< HEAD
+        <label class="row" id="user-row"
+          title="Who is recording: your data goes to your own folders (set when you add yourself). Kept in this rig's config, so everyone on this rig sees the same users."><span>User:</span>
+          <select id="user-select"></select>
+        </label>
+        <span id="user-hint" class="hint" hidden></span>
         <!-- Offered by a plugin that can end the take itself (twophoton:
              "Synced with ThorImage"): ticked hides the Duration row, unticked
              the duration applies. Hidden unless offered (record.js
@@ -53,14 +57,6 @@
           <input id="duration-sync" type="checkbox">
         </label>
         <label class="row" id="duration-row" title="How long each recording runs before it stops automatically"><span>Duration:</span>
-=======
-        <label class="row" id="user-row"
-          title="Who is recording: your data goes to your own folders (set when you add yourself). Kept in this rig's config, so everyone on this rig sees the same users."><span>User:</span>
-          <select id="user-select"></select>
-        </label>
-        <span id="user-hint" class="hint" hidden></span>
-        <label class="row" title="How long each recording runs before it stops automatically"><span>Duration:</span>
->>>>>>> pr/users
           <span class="duration">
             <input id="duration-value" type="number" min="0.01" step="any" value="20"
               title="Recording length, in the unit selected at right">

@@ -345,11 +345,8 @@ async function main() {
   // Apply a /api/system descriptor (the WS handshake or the init's push).
   function applySystem(sys) {
     systemReady = Boolean(sys.ready);
-<<<<<<< HEAD
     if (sys.jobs) jobsNotice.apply(sys.jobs);
-=======
     ready.refresh(true); // the cameras (or their failure) are in
->>>>>>> pr/users
     initError = sys.init_error || null;
     showMissingCameras(sys);
     record.setManagedAvailable(!!sys.managed_trigger_available);
