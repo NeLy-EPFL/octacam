@@ -1,0 +1,486 @@
+"""TIFF stack assembly: consolidating ThorImage's per-frame streaming-mode
+TIFFs into one OME-TIFF stack per channel.
+
+Synthetic per-frame tif fixtures built with tifffile itself (an actual dev
+dependency, not a fake) -- shaped like real data inspected during design: a
+4-numeric-group filename (``Chan<name>_NNN_NNN_NNN_NNN.tif``), a varying
+position that differs between a streaming acquisition (position 3, T) and a
+Z-stack (position 2, Z) -- both confirmed on real NAS data before writing
+this test file -- and a real stray ``Chan<name>_Preview.tif`` file with no
+numeric groups at all, also confirmed present alongside genuine per-frame
+files on real data.
+"""
+
+from pathlib import Path
+
+import pytest
+
+tifffile = pytest.importorskip("tifffile")
+import numpy as np
+
+from octacam.plugins.twophoton import tiff as ttiff
+from octacam.plugins.twophoton.tiff import (
+    assemble_channel_stack,
+    plan_assembly,
+    tifffile_available,
+)
+
+EXPERIMENT_XML_TEMPLATE = """<?xml version="1.0"?>
+<ThorImageExperiment>
+  <Wavelengths>
+    <Wavelength name="ChanA" exposureTimeMS="0" />
+    <Wavelength name="ChanB" exposureTimeMS="0" />
+  </Wavelengths>
+  <ZStage name="ThorZPiezo" steps="{zsteps}" enable="{zenable}" />
+  <Streaming enable="{streaming_enable}" frames="0" zFastEnable="{zfast}" />
+  <Timelapse timepoints="{timepoints}" intervalSec="0" triggerMode="0" />
+  <LSM pixelSizeUM="0.089" />
+</ThorImageExperiment>
+"""
+
+
+def _write_experiment_xml(
+    folder: Path,
+    *,
+    timepoints: int,
+    zsteps: int = 1,
+    zenable: str = "0",
+    streaming_enable: str = "0",
+    zfast: str = "0",
+) -> Path:
+    xml = folder / "Experiment.xml"
+    xml.write_text(
+        EXPERIMENT_XML_TEMPLATE.format(
+            timepoints=timepoints,
+            zsteps=zsteps,
+            zenable=zenable,
+            streaming_enable=streaming_enable,
+            zfast=zfast,
+        )
+    )
+    return xml
+
+
+def _write_frame(
+    folder: Path,
+    channel: str,
+    groups: tuple[int, int, int, int],
+    value: int,
+    shape=(16, 16),
+) -> Path:
+    name = (
+        f"{channel}_{groups[0]:03d}_{groups[1]:03d}_{groups[2]:03d}_{groups[3]:03d}.tif"
+    )
+    path = folder / name
+    tifffile.imwrite(path, np.full(shape, value, dtype=np.uint16))
+    return path
+
+
+def _write_streaming_channel(folder: Path, channel: str, n: int) -> None:
+    for t in range(1, n + 1):
+        _write_frame(folder, channel, (1, 1, 1, t), value=t)
+
+
+def _write_zstack_channel(folder: Path, channel: str, n: int) -> None:
+    for z in range(1, n + 1):
+        _write_frame(folder, channel, (1, 1, z, 1), value=z)
+
+
+def _write_fastz_channel(
+    folder: Path, channel: str, zsteps: int, timepoints: int
+) -> None:
+    """A simultaneous multi-plane ("FastZ") channel -- matches real data
+    (a real Fly1_FastZ_Test: ZStage steps=4, Timelapse timepoints=50, 200
+    files, every Z-plane's own T-sequence contiguous 1..50).
+    """
+    for z in range(1, zsteps + 1):
+        for t in range(1, timepoints + 1):
+            _write_frame(folder, channel, (1, 1, z, t), value=z * 1000 + t)
+
+
+# ------------------------------------------------------- _thorimage_zstage_steps
+
+
+def test_thorimage_zstage_steps_traditional_zstack_enable(tmp_path):
+    xml = _write_experiment_xml(tmp_path, timepoints=1, zsteps=4, zenable="1")
+    assert ttiff._thorimage_zstage_steps(xml) == 4
+
+
+def test_thorimage_zstage_steps_fastz_streaming_enable(tmp_path):
+    # Real shape: ZStage itself is enable="0" -- Z motion is signaled by
+    # Streaming's own zFastEnable="1" instead (confirmed on real data).
+    xml = _write_experiment_xml(
+        tmp_path,
+        timepoints=1,
+        zsteps=4,
+        zenable="0",
+        streaming_enable="1",
+        zfast="1",
+    )
+    assert ttiff._thorimage_zstage_steps(xml) == 4
+
+
+def test_thorimage_zstage_steps_none_when_neither_enabled(tmp_path):
+    xml = _write_experiment_xml(tmp_path, timepoints=1, zsteps=4, zenable="0")
+    assert ttiff._thorimage_zstage_steps(xml) is None
+
+
+def test_thorimage_zstage_steps_none_when_streaming_enabled_without_zfast(tmp_path):
+    # Streaming enabled but zFastEnable="0" -- a plain streaming acquisition,
+    # not FastZ, must not be mistaken for one.
+    xml = _write_experiment_xml(
+        tmp_path,
+        timepoints=1,
+        zsteps=4,
+        zenable="0",
+        streaming_enable="1",
+        zfast="0",
+    )
+    assert ttiff._thorimage_zstage_steps(xml) is None
+
+
+# --------------------------------------------------------------- plan_assembly
+
+
+def test_plan_assembly_noop_for_single_file(tmp_path):
+    _write_experiment_xml(tmp_path, timepoints=1)
+    _write_frame(tmp_path, "ChanA", (1, 1, 1, 1), value=0)
+    plan = plan_assembly(tmp_path)
+    assert plan.channels == []
+
+
+def test_plan_assembly_streaming_orders_by_last_group(tmp_path):
+    _write_experiment_xml(tmp_path, timepoints=12)
+    # Write out of order, and cross a zero-padding-width boundary (9 -> 10)
+    # to pin the int-sort behavior over a naive lexicographic sort.
+    for t in [3, 1, 12, 2, 9, 10, 11, 4, 5, 6, 7, 8]:
+        _write_frame(tmp_path, "ChanA", (1, 1, 1, t), value=t)
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "ready"
+    assert ch.axis == "T"
+    assert ch.frame_count == 12
+    ordered_values = [
+        int(p.name.rsplit("_", 1)[1].split(".")[0]) for p in ch.source_files
+    ]
+    assert ordered_values == list(range(1, 13))
+
+
+def test_plan_assembly_zstack_orders_by_third_group(tmp_path):
+    _write_experiment_xml(tmp_path, timepoints=1, zsteps=5, zenable="1")
+    _write_zstack_channel(tmp_path, "ChanA", 5)
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "ready"
+    assert ch.axis == "Z"
+    assert ch.frame_count == 5
+
+
+def test_plan_assembly_ambiguous_varying_position_is_a_problem(tmp_path):
+    _write_experiment_xml(tmp_path, timepoints=3)
+    # Both position 2 and position 3 vary at once.
+    _write_frame(tmp_path, "ChanA", (1, 1, 1, 1), value=0)
+    _write_frame(tmp_path, "ChanA", (1, 1, 2, 2), value=0)
+    _write_frame(tmp_path, "ChanA", (1, 1, 3, 3), value=0)
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "problem"
+    assert "ambiguous" in ch.reason
+
+
+def test_plan_assembly_fastz_produces_one_file_per_z_plane(tmp_path):
+    # Matches the real Fly1_FastZ_Test shape exactly: ZStage itself reports
+    # enable="0" (it's not a traditional step-and-shoot Z-stack) -- Z motion
+    # is instead signaled by Streaming's own zFastEnable="1".
+    _write_experiment_xml(
+        tmp_path,
+        timepoints=50,
+        zsteps=4,
+        zenable="0",
+        streaming_enable="1",
+        zfast="1",
+    )
+    _write_fastz_channel(tmp_path, "ChanA", zsteps=4, timepoints=50)
+    plan = plan_assembly(tmp_path)
+    assert len(plan.channels) == 4
+    assert all(ch.status == "ready" for ch in plan.channels)
+    assert all(ch.axis == "T" for ch in plan.channels)
+    assert all(ch.frame_count == 50 for ch in plan.channels)
+    assert {ch.dest_name for ch in plan.channels} == {
+        "ChanA_Z01.tif",
+        "ChanA_Z02.tif",
+        "ChanA_Z03.tif",
+        "ChanA_Z04.tif",
+    }
+    # Each plane's own 50 files, ordered by timepoint.
+    z1 = next(ch for ch in plan.channels if ch.dest_name == "ChanA_Z01.tif")
+    ordered_t = [int(p.name.rsplit("_", 1)[1].split(".")[0]) for p in z1.source_files]
+    assert ordered_t == list(range(1, 51))
+
+
+def test_plan_assembly_fastz_with_gap_in_one_plane_is_a_problem(tmp_path):
+    # Every plane must independently be contiguous -- a gap in just one plane
+    # must not silently assemble the other, otherwise-clean planes.
+    _write_experiment_xml(tmp_path, timepoints=5, zsteps=3, zenable="1")
+    _write_fastz_channel(tmp_path, "ChanA", zsteps=3, timepoints=5)
+    (tmp_path / "ChanA_001_001_002_003.tif").unlink()  # drop Z=2, T=3
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "problem"
+
+
+def test_plan_assembly_fastz_unresolvable_when_axis_counts_collide(tmp_path):
+    # zsteps == timepoints: which of the two varying positions is Z and
+    # which is T can't be told apart from counts alone -- never guessed.
+    _write_experiment_xml(tmp_path, timepoints=4, zsteps=4, zenable="1")
+    _write_fastz_channel(tmp_path, "ChanA", zsteps=4, timepoints=4)
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "problem"
+    assert "ambiguous" in ch.reason
+
+
+def test_plan_assembly_gap_in_frame_indices_is_a_problem(tmp_path):
+    _write_experiment_xml(tmp_path, timepoints=3)
+    for t in (1, 2, 4):  # missing 3
+        _write_frame(tmp_path, "ChanA", (1, 1, 1, t), value=t)
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "problem"
+    assert "non-contiguous" in ch.reason
+
+
+def test_plan_assembly_duplicate_frame_index_is_a_problem(tmp_path):
+    # The only way two files can share identical numeric groups (the varying
+    # position can't have a real duplicate value otherwise -- that would mean
+    # two files with the same filename) is a differing extension.
+    _write_experiment_xml(tmp_path, timepoints=2)
+    _write_frame(tmp_path, "ChanA", (1, 1, 1, 1), value=1)
+    (tmp_path / "ChanA_001_001_001_001.tiff").write_bytes(
+        (tmp_path / "ChanA_001_001_001_001.tif").read_bytes()
+    )
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "problem"
+
+
+def test_plan_assembly_stopped_early_capture_is_assembled(tmp_path):
+    # octacam stops with ThorImage since 2026-10-14, so a capture stopped
+    # early (fly dropped the ball) is a real take: 8 of the declared 10
+    # frames, contiguous from the first, is everything that was acquired.
+    _write_experiment_xml(
+        tmp_path, timepoints=10, zsteps=101, zenable="1", streaming_enable="1"
+    )
+    _write_streaming_channel(tmp_path, "ChanA", 8)
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "ready"
+    assert (ch.axis, ch.frame_count, ch.declared_count) == ("T", 8, 10)
+
+    dest = tmp_path / "out" / "ChanA.tif"
+    dest.parent.mkdir()
+    result = assemble_channel_stack(
+        ch.source_files,
+        dest,
+        axis="T",
+        experiment_xml=tmp_path / "Experiment.xml",
+        full_verify=True,
+        declared_count=ch.declared_count,
+    )
+    assert result.ok and result.frame_count == 8
+    with tifffile.TiffFile(dest) as tf:
+        assert len(tf.pages) == 8
+        assert "stopped early: 8 of 10" in tf.ome_metadata
+
+
+def test_plan_assembly_more_frames_than_declared_is_a_problem(tmp_path):
+    _write_experiment_xml(tmp_path, timepoints=10)
+    _write_streaming_channel(tmp_path, "ChanA", 12)
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "problem"
+    assert "timepoints=10" in ch.reason
+
+
+def test_plan_assembly_partial_not_starting_at_first_frame_is_a_problem(tmp_path):
+    # Frames missing at the start is not "stopped early" -- something was lost.
+    _write_experiment_xml(tmp_path, timepoints=10)
+    for t in range(3, 9):
+        _write_frame(tmp_path, "ChanA", (1, 1, 1, t), value=t)
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "problem"
+
+
+def test_plan_assembly_channel_declared_but_no_files_is_silently_skipped(tmp_path):
+    _write_experiment_xml(tmp_path, timepoints=5)
+    _write_streaming_channel(tmp_path, "ChanA", 5)
+    # ChanB is declared in <Wavelengths> but never wrote anything (e.g. an
+    # aborted rawData=1 test capture) -- must not appear as a "problem".
+    plan = plan_assembly(tmp_path)
+    assert [c.channel for c in plan.channels] == ["ChanA"]
+
+
+def test_plan_assembly_ignores_preview_and_unrelated_files(tmp_path):
+    _write_experiment_xml(tmp_path, timepoints=3)
+    _write_streaming_channel(tmp_path, "ChanB", 3)
+    tifffile.imwrite(
+        tmp_path / "ChanB_Preview.tif", np.zeros((16, 16), dtype=np.uint16)
+    )
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "ready"
+    assert ch.frame_count == 3
+    assert all("Preview" not in p.name for p in ch.source_files)
+
+
+def test_plan_assembly_empty_when_tifffile_unavailable(tmp_path, monkeypatch):
+    _write_experiment_xml(tmp_path, timepoints=3)
+    _write_streaming_channel(tmp_path, "ChanA", 3)
+    monkeypatch.setattr(ttiff, "tifffile_available", lambda: False)
+    plan = plan_assembly(tmp_path)
+    assert plan.channels == []
+
+
+def test_tifffile_available_true_in_this_env():
+    assert tifffile_available() is True
+
+
+# ----------------------------------------------------------- assemble_channel_stack
+
+
+def test_assemble_channel_stack_writes_pages_in_given_order(tmp_path):
+    folder = tmp_path / "rec"
+    folder.mkdir()
+    xml = _write_experiment_xml(folder, timepoints=5)
+    _write_streaming_channel(folder, "ChanA", 5)
+    plan = plan_assembly(folder)
+    (ch,) = plan.channels
+    dest = folder / ch.dest_name
+    result = assemble_channel_stack(
+        ch.source_files, dest, axis=ch.axis, experiment_xml=xml, full_verify=True
+    )
+    assert result.ok
+    assert result.frame_count == 5
+    with tifffile.TiffFile(dest) as tf:
+        assert len(tf.pages) == 5
+        assert tf.series[0].axes == "TYX"
+        for i in range(5):
+            page = tf.pages[i].asarray()
+            assert (page == i + 1).all()  # frame value == its 1-based index
+
+
+def test_assemble_channel_stack_embeds_ome_metadata(tmp_path):
+    folder = tmp_path / "rec"
+    folder.mkdir()
+    xml = _write_experiment_xml(folder, timepoints=3)
+    _write_streaming_channel(folder, "ChanA", 3)
+    plan = plan_assembly(folder)
+    (ch,) = plan.channels
+    dest = folder / ch.dest_name
+    result = assemble_channel_stack(
+        ch.source_files, dest, axis=ch.axis, experiment_xml=xml
+    )
+    assert result.ok
+    with tifffile.TiffFile(dest) as tf:
+        desc = tf.pages[0].description
+        assert "ChanA" in desc
+        assert "PhysicalSizeX" in desc
+
+
+def test_assemble_channel_stack_full_verify_catches_mismatch(tmp_path, monkeypatch):
+    folder = tmp_path / "rec"
+    folder.mkdir()
+    _write_experiment_xml(folder, timepoints=3)
+    _write_streaming_channel(folder, "ChanA", 3)
+    plan = plan_assembly(folder)
+    (ch,) = plan.channels
+    dest = folder / ch.dest_name
+
+    real_read = ttiff._read_single_page
+    call_count = {"n": 0}
+
+    def _tampering_read(path):
+        call_count["n"] += 1
+        frame = real_read(path)
+        if call_count["n"] > len(ch.source_files):  # only tamper during verify pass
+            return frame + 100
+        return frame
+
+    monkeypatch.setattr(ttiff, "_read_single_page", _tampering_read)
+    result = assemble_channel_stack(ch.source_files, dest, full_verify=True)
+    assert not result.ok
+    assert "does not match" in result.error
+    assert not list(folder.glob("*.octacam-assemble-part*"))
+    assert not dest.exists()
+
+
+def test_assemble_channel_stack_missing_source_file_fails_cleanly(tmp_path):
+    folder = tmp_path / "rec"
+    folder.mkdir()
+    _write_experiment_xml(folder, timepoints=3)
+    _write_streaming_channel(folder, "ChanA", 3)
+    plan = plan_assembly(folder)
+    (ch,) = plan.channels
+    ch.source_files[1].unlink()
+    dest = folder / ch.dest_name
+    result = assemble_channel_stack(ch.source_files, dest)
+    assert not result.ok
+    assert not dest.exists()
+    assert not list(folder.glob("*.octacam-assemble-part*"))
+
+
+def test_assemble_channel_stack_corrupt_source_file_fails_cleanly(tmp_path):
+    folder = tmp_path / "rec"
+    folder.mkdir()
+    _write_experiment_xml(folder, timepoints=3)
+    _write_streaming_channel(folder, "ChanA", 3)
+    plan = plan_assembly(folder)
+    (ch,) = plan.channels
+    ch.source_files[1].write_bytes(b"not a tiff file")
+    dest = folder / ch.dest_name
+    result = assemble_channel_stack(ch.source_files, dest)
+    assert not result.ok
+    assert not dest.exists()
+    assert not list(folder.glob("*.octacam-assemble-part*"))
+
+
+def test_plan_assembly_fastz_stopped_early_keeps_whole_volumes(tmp_path):
+    # Audit 2026-10-15: a FastZ capture stopped early was never assembled (its
+    # timepoint count had to equal the declared one). Now: whole volumes go in
+    # the per-plane stacks; a stop mid-volume leaves the first planes one
+    # frame longer -- that frame stays out (copied loose), like a partial frame.
+    _write_experiment_xml(
+        tmp_path,
+        timepoints=50,
+        zsteps=4,
+        zenable="0",
+        streaming_enable="1",
+        zfast="1",
+    )
+    _write_fastz_channel(tmp_path, "ChanA", zsteps=4, timepoints=30)
+    for z in (1, 2):  # stopped while scanning volume 31
+        _write_frame(tmp_path, "ChanA", (1, 1, z, 31), value=0)
+    plan = plan_assembly(tmp_path)
+    assert len(plan.ready) == 4
+    assert {(ch.frame_count, ch.declared_count) for ch in plan.ready} == {(30, 50)}
+    planned = {p for ch in plan.ready for p in ch.source_files}
+    assert tmp_path / "ChanA_001_001_001_031.tif" not in planned
+
+
+def test_plan_assembly_streaming_stopped_at_exactly_zsteps_frames_is_a_time_series(
+    tmp_path,
+):
+    # A streaming capture also carries an enabled ZStage (real Fly1_Streaming:
+    # steps="201"); stopped at exactly 201 frames it is still a time series.
+    _write_experiment_xml(
+        tmp_path, timepoints=3000, zsteps=201, zenable="1", streaming_enable="1"
+    )
+    _write_streaming_channel(tmp_path, "ChanA", 201)
+    (ch,) = plan_assembly(tmp_path).channels
+    assert (ch.status, ch.axis, ch.frame_count, ch.declared_count) == (
+        "ready",
+        "T",
+        201,
+        3000,
+    )
