@@ -352,8 +352,21 @@ def _flip_advanced(page, on: bool) -> None:
 # regression that pushes an essential into the advanced block (or leaves an
 # advanced knob among the essentials) fails a named case -- not just the two-field
 # spot-check the toggle test would otherwise give.
-ESSENTIAL_IDS = ["duration-value", "fps", "record-dir", "relative-dir", "transfer-dir"]
+# The base and transfer directories come from the rig and the user: they sit
+# under Advanced, for a one-session change.
+ESSENTIAL_IDS = [
+    "user-select",
+    "duration-value",
+    "fps",
+    "take-experiment",
+    "take-fly",
+    "take-take",
+    "next-fly-btn",
+    "relative-dir",
+]
 ADVANCED_IDS = [
+    "record-dir",
+    "transfer-dir",
     "trigger-source",
     "preview-trigger-source",
     "format",
@@ -1898,5 +1911,202 @@ def test_twophoton_offers_synced_with_thorimage_and_warns_about_thorsync(
             "() => document.getElementById('duration-sync-row').hidden"
         )
         assert not page.evaluate("() => document.getElementById('duration-row').hidden")
+    finally:
+        page.close()
+
+
+# --- users, recording name, readiness ---------------------------------------- #
+
+
+def test_the_recording_name_is_experiment_fly_take_with_next_fly(page):
+    sent = []
+    page.route(
+        "**/api/settings",
+        lambda route: (
+            sent.append(json.loads(route.request.post_data or "{}")),
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"relative_directory": sent[-1]["relative_directory"]}),
+            ),
+        ),
+    )
+    make_tab(page)
+    shown = page.evaluate(
+        """() => {
+            window.__tab.setConnected(true);
+            window.__tab.applySettings({relative_directory: '261016_Exp/Fly2/005'});
+            const v = (id) => document.getElementById(id).value;
+            return {
+                parts: [v('take-experiment'), v('take-fly'), v('take-take')],
+                split: !document.getElementById('take-name').hidden,
+                raw: !document.getElementById('relative-row').hidden,
+            };
+        }"""
+    )
+    assert shown == {
+        "parts": ["261016_Exp", "Fly2", "005"],
+        "split": True,
+        "raw": False,
+    }
+    page.click("#next-fly-btn")
+    page.wait_for_function("() => document.getElementById('take-fly').value === 'Fly3'")
+    assert sent[-1] == {"relative_directory": "261016_Exp/Fly3/001"}
+    # A folder without three levels keeps the raw field.
+    raw = page.evaluate(
+        """() => {
+            window.__tab.applySettings({relative_directory: 'test_take'});
+            return !document.getElementById('relative-row').hidden
+                && document.getElementById('take-name').hidden;
+        }"""
+    )
+    assert raw
+
+
+def test_next_fly_logic(page):
+    page.goto(page.url)
+    result = page.evaluate(
+        """async () => {
+            const m = await import('./js/record.js');
+            return [
+                m.nextFly({experiment: 'E', fly: 'Fly9', take: '012'}),
+                m.nextFly({experiment: 'E', fly: 'fly', take: 'take3'}),
+                m.splitRecording('a/b/Fly1/001'),
+            ];
+        }"""
+    )
+    assert result == [
+        {"experiment": "E", "fly": "Fly10", "take": "001"},
+        {"experiment": "E", "fly": "fly2", "take": "take1"},
+        {"experiment": "a/b", "fly": "Fly1", "take": "001"},
+    ]
+
+
+_USERS = {
+    "users": [
+        {
+            "initials": "MD",
+            "name": "Matthias",
+            "transfer_directory": "/nas/MD/BallPushing",
+            "plugins": {"twophoton": {"source": "/share/MD"}},
+        }
+    ],
+    "active": "",
+    "discovered": ["MA"],
+    "user_options": {"twophoton": {"source": "Your 2P data on the share"}},
+}
+
+
+def test_users_are_picked_and_added_from_the_record_tab(static_server, browser):
+    page = browser.new_page()
+    calls = []
+    state = {"users": json.loads(json.dumps(_USERS))}
+
+    def json_route(builder):
+        def handle(route):
+            calls.append((route.request.method, route.request.url.split("/api/")[1]))
+            body = builder(route)
+            route.fulfill(
+                status=200, content_type="application/json", body=json.dumps(body)
+            )
+
+        return handle
+
+    def select(route):
+        state["users"]["active"] = json.loads(route.request.post_data)["initials"]
+        return {**state["users"], "settings": {"user": state["users"]["active"]}}
+
+    def add(route):
+        new = json.loads(route.request.post_data)
+        state["users"]["users"].append({**new, "name": new["name"]})
+        state["users"]["discovered"] = []
+        state["users"]["active"] = new["initials"]
+        return {**state["users"], "settings": {"user": new["initials"]}}
+
+    page.route("**/api/**", json_route(lambda r: {}))
+    page.route("**/api/system", json_route(lambda r: _system_payload(ready=True)))
+    page.route("**/api/state", json_route(lambda r: _state_payload(ready=True)))
+    page.route(
+        "**/api/users",
+        json_route(lambda r: add(r) if r.request.method == "POST" else state["users"]),
+    )
+    page.route("**/api/users/select", json_route(select))
+    page.route(
+        "**/api/users/suggest*",
+        json_route(
+            lambda r: {
+                "transfer_directory": "/nas/MA",
+                "transfer_status": "ok",
+                "plugins": {
+                    "twophoton": {"source": {"path": "/share/MA", "status": "ok"}}
+                },
+            }
+        ),
+    )
+    page.route("**/api/paths/status*", json_route(lambda r: {"status": "ok"}))
+    page.route(
+        "**/api/ready*",
+        json_route(
+            lambda r: {
+                "checks": [
+                    {"status": "ok", "label": "Cameras", "detail": "1 open"},
+                    {
+                        "status": "warn",
+                        "label": "twophoton",
+                        "detail": "ThorSync stops after 320 s",
+                    },
+                ]
+            }
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => document.querySelectorAll('#user-select option').length > 2"
+        )
+        labels = page.eval_on_selector_all(
+            "#user-select option", "els => els.map(e => e.textContent)"
+        )
+        assert labels == [
+            "Choose who you are\N{HORIZONTAL ELLIPSIS}",
+            "MD \N{EM DASH} Matthias",
+            "MA (on the NAS \N{EM DASH} set up\N{HORIZONTAL ELLIPSIS})",
+            "+ Add yourself\N{HORIZONTAL ELLIPSIS}",
+        ]
+        # The strip says what needs attention before recording.
+        page.wait_for_function("() => !document.getElementById('ready-strip').hidden")
+        strip = page.text_content("#ready-strip")
+        assert "1 thing to check before recording" in strip
+        assert "ThorSync stops after 320 s" in strip
+
+        page.select_option("#user-select", "MD")
+        page.wait_for_function(
+            "() => document.getElementById('user-hint').title === '/nas/MD/BallPushing'"
+        )
+        assert ("POST", "users/select") in calls
+
+        # A NAS folder not set up yet opens the dialog with its folders guessed.
+        page.evaluate(
+            "() => { document.getElementById('record-fields').disabled = false; }"
+        )
+        page.select_option("#user-select", "__new__:MA")
+        page.wait_for_function(
+            "() => document.getElementById('user-transfer').value === '/nas/MA'"
+        )
+        assert page.input_value("#user-initials") == "MA"
+        assert page.input_value("#user-twophoton-source") == "/share/MA"
+        page.wait_for_function(
+            "() => document.querySelector('[data-status-for=user-transfer]')"
+            ".textContent === '\N{CHECK MARK}'"
+        )
+        page.fill("#user-name", "Someone")
+        page.click("#user-create")
+        page.wait_for_function(
+            "() => document.getElementById('user-select').value === 'MA'"
+        )
+        assert page.eval_on_selector(
+            "#user-dialog", "e => e.classList.contains('hidden')"
+        )
     finally:
         page.close()

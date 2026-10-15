@@ -38,10 +38,21 @@ export class DirPicker extends Modal {
   }
 
   async open() {
+    this._once = null;
     this.error.textContent = "";
     this.newName.value = "";
     super.open();
     await this._load(this.getStart?.() ?? "");
+  }
+
+  // Pick a folder for another field (the add-user dialog): `onPick(path)`
+  // once, starting at `start`.
+  async pick(start, onPick) {
+    this.error.textContent = "";
+    this.newName.value = "";
+    super.open();
+    this._once = onPick;
+    await this._load(start || "");
   }
 
   async _load(path) {
@@ -98,7 +109,9 @@ export class DirPicker extends Modal {
     if (this.busy || !this.path) return;
     const extra = this.newName.value.trim();
     const chosen = extra ? this._join(this.path, extra) : this.path;
-    this.onPick?.(chosen);
+    const onPick = this._once || this.onPick;
+    this._once = null;
+    onPick?.(chosen);
     this.close();
   }
 }

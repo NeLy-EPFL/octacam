@@ -13,7 +13,9 @@ from octacam.cli._common import (
     EnabledPlugins,
     NoPlugins,
     Sets,
+    User,
     Verbose,
+    check_user,
     command,
     open_rig,
     resolve_config_arg,
@@ -166,6 +168,7 @@ def record(
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
     sets: Sets = None,
+    user: User = None,
     verbose: Verbose = False,
 ) -> None:
     """Record videos headlessly from the cameras in `config_dir`.
@@ -179,11 +182,16 @@ def record(
     from octacam.config import RecordingSettings, load_config_dir
     from octacam.controller import RecordingController
     from octacam.plugins import build_plugins
+    from octacam.users import recording_user, settings_for_user
 
     config_dir = resolve_config_arg(config_dir)
     config = with_sets(load_config_dir(config_dir), sets)
 
+    check_user(config, user)
     settings = RecordingSettings.from_config(config, fps=fps)
+    initials = recording_user(config, config_dir, user)
+    if initials:
+        settings = settings.updated(**settings_for_user(config, initials))
     if duration is not None:
         settings.duration_s = duration
     if out is not None:
@@ -225,6 +233,8 @@ def record(
             )
 
         plugins = build_plugins(config, resolve_enabled(enabled_plugins, no_plugins))
+        if initials:
+            plugins.on_user(config.users[initials].plugins)
         plugins.setup_all()
 
         # Wrong firmware would record against the wrong protocol, or get no

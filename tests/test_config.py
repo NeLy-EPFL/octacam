@@ -557,6 +557,7 @@ def test_from_config_takes_the_config_as_it_loads(monkeypatch):
         "transcode_ffmpeg_params": "-c:v libx265",
         "transfer_directory": "/store",
         "transfer_checksum": False,
+        "user": "",  # chosen at launch, never from the config itself
     }
     # The fps override applies before a frame-count duration converts.
     overridden = RecordingSettings.from_config(config, fps=100.0)
