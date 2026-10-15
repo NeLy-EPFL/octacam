@@ -45,6 +45,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 from octacam import firmware as fw
 from octacam.plugins.serial import SerialLink, SerialPlugin
@@ -276,6 +277,10 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
     reconnect_path = "/api/twophoton/reconnect"
     state_topic = "twophoton_state"
     process_steps = TwoPhotonSteps
+    # Each user's own 2P folder on the share ([users.MD.twophoton] source).
+    user_options: ClassVar[dict[str, str]] = {
+        "source": "Your 2P data on the share (ThorImage/ThorSync)"
+    }
 
     def __init__(
         self,
@@ -309,6 +314,7 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         self.stop_idle_ms = max(MIN_STOP_IDLE_MS, min(0xFFFF, int(stop_idle_ms)))
         self.max_duration_s = max(1.0, float(max_duration_s))
         self.source = source
+        self._configured_source = source  # the rig's, when the user sets none
         # The take in progress (or the last one): its folder, whether it was
         # armed and synced with ThorImage, and the board's STOP report for it.
         self._take_dir: Path | None = None
@@ -340,6 +346,25 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
                 options, "max_duration_s", float, DEFAULT_MAX_DURATION_S
             ),
             source=str(options.get("source") or ""),
+        )
+
+    def on_user(self, options: dict) -> None:
+        """The chosen user's 2P share folder (else the rig's); the ThorSync
+        check then reads theirs.
+        """
+        source = str(options.get("source") or self._configured_source)
+        if source != self.source:
+            self.source = source
+            self.thorsync = None
+            self.refresh_thorsync_limit()
+            self._push_state()
+
+    def snapshot_options(self, params: dict | None) -> dict | None:
+        """A recording made for a user keeps their share in its snapshot, so
+        `octacam process` looks for its 2P data there.
+        """
+        return (
+            {"source": self.source} if self.source != self._configured_source else None
         )
 
     def busy_reason(self) -> str | None:
@@ -656,6 +681,9 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
 
         config_file = config_dir / "octacam_config.toml" if config_dir else None
         settings = settings_for(config, config_file)
+        if settings is not None and options.get("source"):
+            # The chosen user's share (the GUI's Ready? strip passes theirs).
+            settings = settings.model_copy(update={"source": str(options["source"])})
         moved: list[tuple[str, str]] = []
         if settings is not None and not options.get("source"):
             moved.append(("warn", _LEGACY_SETTINGS_MSG))

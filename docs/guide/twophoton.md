@@ -44,6 +44,12 @@ checksum = true
 | `synced_fastz_projection` | `mean` | How a FastZ timepoint's planes are combined (`mean` or `max`). |
 | `render_zstack_mip` | `true` | Render each anatomical Z-stack's max projections. |
 
+Each person keeps their own share folder as a user (see
+[Users](configuration.md#users)): `[users.MD.twophoton] source = ...`, set from
+the Record tab's **+ Add yourself…**, which suggests it from the other users'.
+Picking the user points the ThorSync check and `octacam process` at it (the
+recording's snapshot keeps it).
+
 Install the extra for the signal pairing and the stacks:
 `pip install 'octacam[twophoton]'`. A recording made with the older
 `[transfer.twophoton]` table is still processed with it; `octacam doctor`

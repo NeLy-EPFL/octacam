@@ -1107,3 +1107,35 @@ def test_a_synced_take_is_compared_with_thorimage_s_own_plan(tmp_path):
     plugin.refresh_thorsync_limit(wait=True)
     assert plugin.thorsync_warning(3600, synced=True) is None
     assert plugin.thorsync_warning(3600, synced=False) is not None  # a 1 h take
+
+
+# ---------------------------------------------------------------------------
+# Users: each user's own 2P share
+# ---------------------------------------------------------------------------
+
+
+def test_a_user_s_share_is_used_and_kept_in_the_snapshot(tmp_path):
+    plugin = TwoPhotonPlugin(source="/share/rig")
+    assert plugin.user_options == {
+        "source": "Your 2P data on the share (ThorImage/ThorSync)"
+    }
+    assert plugin.snapshot_options(None) is None
+    plugin.on_user({"source": str(tmp_path)})
+    assert plugin.source == str(tmp_path)
+    # The recording's snapshot points `process` at the user's share.
+    assert plugin.snapshot_options(None) == {"source": str(tmp_path)}
+    plugin.on_user({})  # a user without their own: the rig's again
+    assert plugin.source == "/share/rig"
+    assert plugin.snapshot_options(None) is None
+
+
+def test_doctor_checks_the_user_s_share(tmp_path):
+    from octacam.config import OctacamConfig, PluginConfig
+
+    config = OctacamConfig(
+        plugins=[PluginConfig(name="twophoton", options={"source": "/no/rig/share"})]
+    )
+    rig = TwoPhotonPlugin.doctor({"source": "/no/rig/share"}, config, None)
+    assert any("not reachable" in text for _status, text in rig)
+    theirs = TwoPhotonPlugin.doctor({"source": str(tmp_path)}, config, None)
+    assert ("ok", f"twophoton: 2P share {tmp_path}") in theirs

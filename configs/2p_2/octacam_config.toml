@@ -109,3 +109,10 @@ layout = [
 directory = "/mnt/upramdya_data/MD/BallPushing_Imaging"
 checksum = true
 delete_after_transfer = true
+
+[users.MD]
+name = "Matthias Durrieu"
+transfer_directory = "/mnt/upramdya_data/MD/BallPushing_Imaging"
+
+[users.MD.twophoton]
+source = "/mnt/windows_share/MD"
