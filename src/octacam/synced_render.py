@@ -249,7 +249,10 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
 
     from octacam.transform import RECORDING_SUMMARY_FILENAME
     from octacam.twophoton_signals import read_segment_edge_times
-    from octacam.twophoton_transfer import EXPERIMENT_XML_FILENAME
+    from octacam.twophoton_transfer import (
+        EXPERIMENT_XML_FILENAME,
+        thorimage_frame_average,
+    )
     from octacam.writer import find_ffmpeg
 
     out = take_dir / RENDERINGS_DIRNAME / SYNCED_VIDEO_FILENAME
@@ -292,7 +295,10 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
     reader = _TwoPhotonReader(stacks, opts.fastz_projection)
     try:
         xml = inputs.image_dir / EXPERIMENT_XML_FILENAME
-        per_volume = _volume_frames(xml, reader.n_planes)
+        # FrameOut pulses once per scan: a frame-averaged capture scans
+        # `average` times per saved frame (real 2026-10-14 Fly4/003: x4).
+        average = thorimage_frame_average(xml)
+        per_volume = _volume_frames(xml, reader.n_planes) * average
         n_vol = min(reader.n_frames, len(frameout_times) // per_volume)
         if n_vol == 0:
             log.info("synced render: skipping %s (no complete 2P volume)", take_dir)
@@ -303,7 +309,11 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
                 "— aligning the first %d",
                 take_dir, len(frameout_times), reader.n_frames, per_volume, n_vol,
             )
-        vol_times = frameout_times[: n_vol * per_volume : per_volume]
+        if average > 1:
+            # An averaged frame spans its scans: time it at their middle.
+            vol_times = frameout_times[: n_vol * per_volume].reshape(n_vol, per_volume).mean(axis=1)
+        else:
+            vol_times = frameout_times[: n_vol * per_volume : per_volume]
 
         # Fixed contrast limits per channel from frames sampled across the run.
         sample_idx = np.unique(np.linspace(0, n_vol - 1, min(n_vol, _N_CONTRAST_SAMPLES)).astype(int))

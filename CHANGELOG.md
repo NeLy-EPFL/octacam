@@ -89,6 +89,13 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **Frame-averaged 2P captures** (ThorImage `averageMode="1"`, e.g. rolling
+  average left on) now verify against ThorSync and render in sync: FrameOut
+  pulses once per scan, so a capture averaging N scans per saved frame
+  records N edges per frame. Matching expects frames x N, and the synced
+  video times each averaged frame at the middle of its scans instead of
+  squeezing the whole run into its first 1/N.
+
 - **Assembled 2P TIFF stacks are now checked frame by frame on transfer.**
   When `[transfer].checksum` is on (or `--delete-after-transfer` depends on
   the copy), each stack is read back from the NAS and every page compared to

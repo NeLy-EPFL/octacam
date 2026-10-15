@@ -30,7 +30,8 @@ def _edges(start: int, n: int, step: int) -> list[int]:
 
 
 def _make_take(
-    tmp_path: Path, *, planes: int, timepoints: int, behavior_frames: int = 40
+    tmp_path: Path, *, planes: int, timepoints: int, behavior_frames: int = 40,
+    average: int = 1,
 ) -> Path:
     take = tmp_path / "Fly1" / "001"
     (take / "Renderings").mkdir(parents=True)
@@ -55,7 +56,8 @@ def _make_take(
     fastz = planes > 1
     (image / "Experiment.xml").write_text(
         '<?xml version="1.0"?><ThorImageExperiment><Date date="x" uTime="1" />'
-        '<LSM pixelX="32" pixelY="16" widthUM="64" heightUM="32" />'
+        '<LSM pixelX="32" pixelY="16" widthUM="64" heightUM="32" '
+        f'averageMode="{int(average > 1)}" averageNum="{average}" />'
         f'<ZStage steps="{planes}" enable="{int(fastz)}" />'
         f'<Streaming enable="1" zFastEnable="{int(fastz)}" flybackFrames="1" />'
         f'<Timelapse timepoints="{timepoints}" /></ThorImageExperiment>'
@@ -71,7 +73,7 @@ def _make_take(
 
     sync = take / "2P" / "SyncData001"
     sync.mkdir()
-    per_volume = planes + 1 if fastz else 1
+    per_volume = (planes + 1 if fastz else 1) * average  # FrameOut pulses per scan
     total = 3000
     capture = np.zeros((total, 1), np.uint32)
     capture[100:2900] = 1
@@ -147,3 +149,16 @@ def test_options_from_config():
     )
     assert opts is not None
     assert (opts.green_channel, opts.red_channel, opts.fastz_projection) == ("ChanB", "ChanA", "max")
+
+
+def test_frame_averaged_capture_aligns_each_frame_to_its_scans(tmp_path, caplog):
+    # ThorImage's rolling average (real 2026-10-14 Fly4/003, N=4) saves one
+    # frame per 4 scans, and FrameOut pulses per scan: 10 frames = 40 edges.
+    # Mapping frame j to edge j squeezed the whole 2P run into its first
+    # quarter (and logged an edge/frame mismatch).
+    take = _make_take(tmp_path, planes=1, timepoints=10, average=4)
+    with caplog.at_level("WARNING", logger="octacam.synced_render"):
+        out = render_synced_video(take, SyncedRenderOptions(fps=10, height=64))
+    assert out is not None
+    assert _frame_count(out) == 20
+    assert "FrameOut edges" not in caplog.text

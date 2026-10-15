@@ -812,7 +812,13 @@ against a real 2P rig; the durable findings:
   FastZ is unchanged (an early stop usually cuts a volume short).
   `thorimage_expected_frameout_edges` likewise counts the frames on disk for
   a short streaming capture (`_frames_recorded`) — FrameOut only pulses for
-  scanned frames (real: 418 files ↔ 419 edges). One OME-TIFF per channel, not one combined file — a
+  scanned frames (real: 418 files ↔ 419 edges).
+  **Frame averaging** (`LSM averageMode="1" averageNum=N`, e.g. rolling
+  average left on; real 2026-10-14 Fly4/003: 476 frames ↔ 1906 edges):
+  FrameOut pulses per *scan*, so `thorimage_frame_average` multiplies the
+  expected edges by N for streaming captures, `thorimage_frameout_tolerance`
+  allows up to N (an early stop cuts the last group short), and the synced
+  render takes N edges per saved frame, timed at their mean. One OME-TIFF per channel, not one combined file — a
   structural/reference channel (motion-correction only) and a functional
   channel (e.g. GCaMP, ROI/ΔF-F extraction) are consumed by different
   pipeline stages that never need both loaded together, and combining them

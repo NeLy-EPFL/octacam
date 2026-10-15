@@ -796,3 +796,32 @@ def test_expected_frameout_edges_counts_frames_of_a_stopped_early_capture(tmp_pa
         (tmp_path / f"ChanA_001_001_001_{t:03d}.tif").write_bytes(b"")
     (tmp_path / "ChanA_Preview.tif").write_bytes(b"")
     assert thorimage_expected_frameout_edges(xml) == 418
+
+
+def test_expected_frameout_edges_and_tolerance_for_a_frame_averaged_capture(tmp_path):
+    # Real 2026-10-14 Fly4/003: rolling average N=4, stopped early — 476
+    # saved frames, 1906 FrameOut edges (one pulse per scan, the last group
+    # cut short by the stop).
+    from octacam.twophoton_transfer import (
+        thorimage_expected_frameout_edges,
+        thorimage_frame_average,
+        thorimage_frameout_tolerance,
+    )
+
+    xml = tmp_path / "Experiment.xml"
+    xml.write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Wavelengths>'
+        '<Wavelength name="ChanA" /></Wavelengths>'
+        '<LSM averageMode="1" averageNum="4" />'
+        '<Streaming enable="1" zFastEnable="0" /><Timelapse timepoints="3000" />'
+        "</ThorImageExperiment>"
+    )
+    for t in range(1, 477):
+        (tmp_path / f"ChanA_001_001_001_{t:03d}.tif").write_bytes(b"")
+    assert thorimage_frame_average(xml) == 4
+    assert thorimage_expected_frameout_edges(xml) == 1904
+    assert abs(1906 - 1904) <= thorimage_frameout_tolerance(xml)
+
+    xml.write_text(xml.read_text().replace('averageMode="1"', 'averageMode="0"'))
+    assert thorimage_frame_average(xml) == 1
+    assert thorimage_expected_frameout_edges(xml) == 476

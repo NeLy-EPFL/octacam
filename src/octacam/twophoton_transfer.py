@@ -139,6 +139,8 @@ def thorimage_timepoints(experiment_xml: Path) -> int | None:
 def thorimage_expected_frameout_edges(experiment_xml: Path) -> int | None:
     """How many ``FrameOut`` edges ThorSync should record for this ThorImage
     acquisition — what a verified segment's edge count is compared against.
+    A frame-averaged streaming capture scans N times per saved frame
+    (:func:`thorimage_frame_average`), so that count is multiplied by N.
 
     ``FrameOut`` pulses once per *scanned frame*, not per timepoint. For a
     plain streaming capture those are the same (``timepoints``), but a FastZ
@@ -164,13 +166,42 @@ def thorimage_expected_frameout_edges(experiment_xml: Path) -> int | None:
         and zstage_el is not None
     )
     if not fastz or streaming_el is None or zstage_el is None:
-        return _frames_recorded(experiment_xml.parent, timepoints)
+        if timepoints <= 1:
+            return timepoints  # Z-stacks: see thorimage_zstack_signature
+        return _frames_recorded(experiment_xml.parent, timepoints) * thorimage_frame_average(
+            experiment_xml
+        )
     try:
         steps = int(zstage_el.get("steps", "1"))
         flyback = int(streaming_el.get("flybackFrames", "0"))
     except ValueError:
         return timepoints
     return timepoints * (steps + flyback)
+
+
+def thorimage_frame_average(experiment_xml: Path) -> int:
+    """Scans averaged into each saved frame: ``LSM averageNum`` when
+    ``averageMode="1"``, else 1. ``FrameOut`` pulses once per *scan*, so an
+    averaged capture records N edges per saved frame — real 2026-10-14
+    Fly4/003 (rolling average left on, N=4): 1906 edges for 476 frames. A
+    Z-stack shows the same N edges per slice (thorimage_zstack_signature)."""
+    try:
+        lsm = ET.parse(experiment_xml).getroot().find("LSM")
+    except (ET.ParseError, OSError):
+        return 1
+    if lsm is None or lsm.get("averageMode") != "1":
+        return 1
+    try:
+        return max(1, int(lsm.get("averageNum", "1")))
+    except ValueError:
+        return 1
+
+
+def thorimage_frameout_tolerance(experiment_xml: Path) -> int:
+    """Allowed ``|FrameOut edges - expected|`` for this capture: an averaged
+    capture stopped early can end mid-group, leaving up to N-1 scans that
+    never became a saved frame, plus the one being scanned at the stop."""
+    return max(_VERIFY_TOLERANCE, thorimage_frame_average(experiment_xml))
 
 
 def _frames_recorded(folder: Path, declared: int) -> int:
@@ -234,7 +265,7 @@ def thorimage_zstack_signature(experiment_xml: Path) -> tuple[int, int] | None:
         root = ET.parse(experiment_xml).getroot()
     except (ET.ParseError, OSError):
         return None
-    z, stream, lsm = root.find("ZStage"), root.find("Streaming"), root.find("LSM")
+    z, stream = root.find("ZStage"), root.find("Streaming")
     timepoints = thorimage_timepoints(experiment_xml) or 1
     if z is None or z.get("enable") != "1" or timepoints > 1:
         return None
@@ -242,10 +273,9 @@ def thorimage_zstack_signature(experiment_xml: Path) -> tuple[int, int] | None:
         return None
     try:
         steps = int(z.get("steps", "0"))
-        averaged = lsm is not None and lsm.get("averageMode") == "1"
-        per_slice = int(lsm.get("averageNum", "1")) if averaged and lsm is not None else 1
     except ValueError:
         return None
+    per_slice = thorimage_frame_average(experiment_xml)
     return (steps, per_slice) if steps > 1 else None
 
 
@@ -545,7 +575,7 @@ def match_takes_to_twophoton_batch(
                 if timepoints is None:
                     continue
                 diff = frameout_edge_diff(segment, timepoints)
-                if diff <= _VERIFY_TOLERANCE:
+                if diff <= thorimage_frameout_tolerance(c.path / EXPERIMENT_XML_FILENAME):
                     image_ranked.append((diff, image_gap, c))
             if image_ranked:
                 image_ranked.sort(key=lambda r: (r[0], r[1]))
@@ -836,9 +866,12 @@ def correlate_sync_folder_to_image(
                 if diff <= tolerance:
                     ranked.append((diff, gap, candidate))
             continue
+        seg_tolerance = max(
+            tolerance, thorimage_frameout_tolerance(candidate.path / EXPERIMENT_XML_FILENAME)
+        )
         for segment in segments:
             diff = frameout_edge_diff(segment, timepoints)
-            if diff <= tolerance:
+            if diff <= seg_tolerance:
                 ranked.append((diff, gap, candidate))
     if not ranked:
         return None
