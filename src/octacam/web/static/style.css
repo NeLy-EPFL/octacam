@@ -121,6 +121,45 @@ body {
   border-color: var(--text-dim);
 }
 
+/* ---------------------------------------- background-processing notice */
+
+/* A detached `octacam process` job running/paused while the GUI is open
+   (js/jobs.js). Along the bottom of the camera area, so it never collides
+   with the connection/update banners at the top. */
+#jobs-banner {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: calc(var(--sidebar-width) + var(--resizer-width));
+  z-index: 98;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 5px 10px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  color: var(--text);
+  border-top: 1px solid var(--accent);
+  font-size: 12.5px;
+}
+#jobs-banner .jobs-line.paused {
+  color: var(--text-dim);
+}
+#jobs-banner .jobs-notify-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+}
+#jobs-banner .jobs-notify-btn:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
 /* ------------------------------------------------------- camera grid */
 
 #grid {
@@ -1424,4 +1463,5 @@ kbd {
      desktop value). */
   #banner,
   #update-banner { right: 0; }
+  #jobs-banner { right: 0; }
 }

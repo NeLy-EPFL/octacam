@@ -84,6 +84,12 @@ class JobStatus:
     files_done: int = 0
     current_file: str | None = None
     percent: float = 0.0  # progress within the current phase, 0..100
+    item_started: str | None = None  # when the current item started (ISO)
+    item_percent: float | None = None  # progress within the current item, if known
+    # Every WARNING/ERROR the run logged (the first _MAX_KEPT_WARNINGS kept
+    # verbatim): `jobs list` and the GUI say "finished with N warnings".
+    warning_count: int = 0
+    warnings: list[str] = field(default_factory=list)
     exit_code: int | None = None
     error: str | None = None
     argv: list[str] = field(default_factory=list)
@@ -337,6 +343,27 @@ class NullReporter:
     def transfer_progress(self, index: int, total: int) -> TransferCallback | None:
         return None
 
+    def add_warning(self, message: str) -> None:
+        pass
+
+
+_MAX_KEPT_WARNINGS = 50
+
+
+class _WarningCapture(logging.Handler):
+    """Records every WARNING+ the run logs into its job's status."""
+
+    def __init__(self, reporter: NullReporter) -> None:
+        super().__init__(level=logging.WARNING)
+        self._reporter = reporter
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = " ".join(record.getMessage().split())
+            self._reporter.add_warning(f"{record.levelname}: {message}")
+        except Exception:  # never break the run over its own bookkeeping
+            pass
+
 
 class JobReporter(NullReporter):
     """A detached job's progress, written (best effort) to its status.json."""
@@ -362,15 +389,21 @@ class JobReporter(NullReporter):
         self._status.files_done = 0
         self._status.current_file = None
         self._status.percent = 0.0
+        self._status.item_started = None
+        self._status.item_percent = None
         log.info("Phase: %s (%d item(s))", phase, total)
         self._flush(force=True)
 
     def item_started(
         self, index: int, total: int, path: str | os.PathLike[str]
     ) -> None:
-        name = Path(path).name
+        # The last two parts ("Fly1/003", "003/camera_F.mkv"): a bare take
+        # number doesn't say which fly.
+        name = "/".join(Path(path).parts[-2:])
         self._status.files_total = total
         self._status.current_file = name
+        self._status.item_started = _now_iso()
+        self._status.item_percent = None
         self._set_percent(index - 1, total)
         log.info("[%s %d/%d] %s", self._status.phase or "?", index, total, name)
         self._flush(force=True)
@@ -388,14 +421,23 @@ class JobReporter(NullReporter):
     def manually_paused(self) -> bool:
         return is_manually_paused(self._dir)
 
+    def add_warning(self, message: str) -> None:
+        self._status.warning_count += 1
+        if len(self._status.warnings) < _MAX_KEPT_WARNINGS:
+            self._status.warnings.append(message)
+        self._flush(force=True)
+
     def transcode_progress(self, index: int, total: int) -> ProgressCallback:
-        """A transcode.ProgressCallback refining within-file transcode percent."""
+        """A transcode.ProgressCallback refining the within-item percent of any
+        ffmpeg encode with a known frame count (a transcode, or a grid).
+        """
         base = index - 1
 
         def _cb(prog: TranscodeProgress) -> None:
             frac = (
                 min(1.0, prog.frame / prog.total_frames) if prog.total_frames else 0.0
             )
+            self._status.item_percent = round(100.0 * frac, 1)
             self._set_percent(base + frac, total)
             self._flush()
 
@@ -409,6 +451,7 @@ class JobReporter(NullReporter):
             self._status.current_file = prog.filename
             file_frac = prog.bytes_done / prog.file_size if prog.file_size else 0.0
             within = (prog.file_index - 1 + file_frac) / max(prog.file_count, 1)
+            self._status.item_percent = round(100.0 * within, 1)
             self._set_percent(base + within, total)
             self._flush()
 
@@ -495,18 +538,36 @@ def worker(jd: Path | None) -> Iterator[NullReporter]:
         yield NullReporter()
         return
     job = worker_start(jd)
+    # Anything sketchy the run logs is counted and surfaced (status.json, `jobs
+    # list`, the GUI), not left in log.txt only.
+    capture = _WarningCapture(job.reporter)
+    octacam_log = logging.getLogger("octacam")
+    octacam_log.addHandler(capture)
+
+    def finish(state: str, exit_code: int, error: str | None = None) -> None:
+        octacam_log.removeHandler(capture)
+        status = job.status
+        if status.warning_count:
+            log.warning(
+                "Finished with %d warning(s)/error(s) \N{EM DASH} review them: %s%s",
+                status.warning_count,
+                " | ".join(status.warnings[:5]),
+                " | ..." if status.warning_count > 5 else "",
+            )
+        job.finish(state, exit_code, error)
+
     try:
         yield job.reporter
     except KeyboardInterrupt:
-        job.finish(CANCELLED, 130)
+        finish(CANCELLED, 130)
         raise
     except SystemExit as e:
-        job.finish(FAILED, 1, e.code if isinstance(e.code, str) else "process failed")
+        finish(FAILED, 1, e.code if isinstance(e.code, str) else "process failed")
         raise
     except BaseException as e:
-        job.finish(FAILED, 1, repr(e))
+        finish(FAILED, 1, repr(e))
         raise
-    job.finish(DONE, 0)
+    finish(DONE, 0)
 
 
 def pause_gate(
@@ -713,6 +774,48 @@ def _age(started: str) -> str:
     return f"{secs // 86400}d"
 
 
+def is_finished(status: JobStatus) -> bool:
+    """Whether *status* is terminal (done, failed or cancelled)."""
+    return status.state in _TERMINAL
+
+
+def item_eta_s(status: JobStatus, now: float | None = None) -> float | None:
+    """Seconds left on the job's current item, extrapolated from its own
+    progress so far; None until it has moved enough to say (2 %), or when the
+    step reports no progress.
+    """
+    pct = status.item_percent
+    if not status.item_started or pct is None or pct < 2 or pct >= 100:
+        return None
+    try:
+        started = datetime.datetime.fromisoformat(status.item_started).timestamp()
+    except ValueError:
+        return None
+    elapsed = (time.time() if now is None else now) - started
+    if elapsed <= 0:
+        return None
+    return elapsed * (100.0 - pct) / pct
+
+
+def notice_dict(status: JobStatus) -> dict:
+    """What the GUI's background-processing notice shows about one job."""
+    eta = item_eta_s(status)
+    return {
+        "job_id": status.job_id,
+        "state": status.state,
+        "phase": status.phase,
+        "paused": status.paused,
+        "paused_reason": status.paused_reason,
+        "current_file": status.current_file,
+        "files_done": status.files_done,
+        "files_total": status.files_total,
+        "item_percent": status.item_percent,
+        "eta_s": None if eta is None else round(eta),
+        "warning_count": status.warning_count,
+        "warnings": status.warnings[:5],
+    }
+
+
 def render_table(jobs: list[JobStatus], console: Console | None = None) -> None:
     from rich.console import Console
     from rich.table import Table
@@ -729,6 +832,7 @@ def render_table(jobs: list[JobStatus], console: Console | None = None) -> None:
     table.add_column("Progress", justify="right")
     table.add_column("Age", justify="right")
     table.add_column("Folders", justify="right")
+    table.add_column("Warnings", justify="right")
     for s in jobs:
         table.add_row(
             s.job_id,
@@ -737,6 +841,7 @@ def render_table(jobs: list[JobStatus], console: Console | None = None) -> None:
             f"{s.percent:.0f}%",
             _age(s.started),
             str(len(s.folders)),
+            f"[yellow]{s.warning_count}[/yellow]" if s.warning_count else "0",
         )
     console.print(table)
 
