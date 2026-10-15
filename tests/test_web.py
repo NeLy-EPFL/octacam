@@ -1670,3 +1670,44 @@ def test_system_surfaces_injected_update_notice(client):
     assert data["update"]["available"] is True
     assert data["update"]["latest"] == "0.9.0"
     assert data["update"]["command"] == "uv tool upgrade octacam"
+
+
+def test_jobs_notice_reports_live_job_then_its_end(client, tmp_path, monkeypatch):
+    # The GUI's background-processing notice: a live detached job is listed
+    # (with what it is doing), and once it ends it moves to `ended` so the
+    # frontend can say so. A job that was never live during this GUI session
+    # is not announced.
+    import fcntl
+
+    from octacam import process_jobs as pj
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    state = client.app.state.app_state
+    pj.write_status(pj.job_dir("old"), pj.JobStatus(job_id="old", state="done"))
+    jd = pj.job_dir("j1")
+    pj.write_status(
+        jd,
+        pj.JobStatus(
+            job_id="j1", state="running", phase="grid", current_file="003",
+            files_done=2, files_total=16, started="2026-10-15T09:31:00+02:00",
+        ),
+    )
+    lock = open(pj._lock_path(jd), "a+")
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    try:
+        assert state.refresh_jobs() is True
+        jobs = client.get("/api/system").json()["jobs"]
+        (live,) = jobs["live"]
+        assert (live["job_id"], live["phase"], live["current_file"]) == ("j1", "grid", "003")
+        assert (live["files_done"], live["files_total"]) == (2, 16)
+        assert live["paused"] is False
+        assert jobs["ended"] == []
+        assert state.refresh_jobs() is False  # unchanged: nothing to push
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
+    pj.write_status(jd, pj.JobStatus(job_id="j1", state="done"))
+    assert state.refresh_jobs() is True
+    jobs = client.get("/api/system").json()["jobs"]
+    assert jobs["live"] == []
+    assert jobs["ended"] == [{"job_id": "j1", "state": "done", "error": None}]

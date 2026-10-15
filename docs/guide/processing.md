@@ -493,7 +493,7 @@ octacam process --all           # every folder still in the cache
 ## The one-command end-of-day workflow
 
 Because each recording embeds its own config, the entire pipeline — transcode →
-grid → transfer — is one command:
+transfer → grid → renders — is one command:
 
 ```bash
 octacam process --all
@@ -543,3 +543,13 @@ watch from a terminal with `octacam jobs attach`.
     the encoder between units (it holds no GPU/NVENC session while paused) and is
     crash-safe — if the gui/record crashes, the job resumes on its own. `octacam
     gui`/`record` also print a one-line note at startup when a job is active.
+
+    The GUI shows this as a strip along the bottom of the camera view: what the
+    job is doing right now (e.g. *building a grid video (Fly2/001, 7 of 16,
+    ~15 min left)*), then *paused — it resumes when you close octacam* once
+    that step is done. The event log notes when it pauses and when it ends
+    (and **Notify me** turns those into desktop notifications). If you press
+    Start recording while a step is still running, octacam asks first:
+    recording then shares the workstation with it. A typical ~30 min setup
+    (light, fly) usually covers the step that is in flight, so nothing is
+    redone.

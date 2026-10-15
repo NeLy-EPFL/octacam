@@ -83,7 +83,7 @@ class JobStatus:
 
     job_id: str
     state: str = STARTING  # starting|running|done|failed|cancelled
-    phase: str | None = None  # transcode|grid|transfer|None
+    phase: str | None = None  # transcode|transfer|grid|render|None
     paused: bool = False
     paused_reason: str | None = None  # None|manual|capture-active|capture-active+manual
     pid: int | None = None
@@ -95,6 +95,8 @@ class JobStatus:
     files_done: int = 0
     current_file: str | None = None
     percent: float = 0.0  # progress within the current phase, 0..100
+    item_started: str | None = None  # when the current item started (ISO)
+    item_percent: float | None = None  # progress within the current item, when known
     exit_code: int | None = None
     error: str | None = None
     argv: list[str] = field(default_factory=list)
@@ -357,13 +359,19 @@ class JobReporter:
         self._status.files_done = 0
         self._status.current_file = None
         self._status.percent = 0.0
+        self._status.item_started = None
+        self._status.item_percent = None
         log.info("Phase: %s (%d item(s))", phase, total)
         self._flush(force=True)
 
     def item_started(self, index: int, total: int, path: str | os.PathLike[str]) -> None:
-        name = Path(path).name
+        # Last two parts ("Fly1/003", "003/camera_F.mkv"): a bare take number
+        # doesn't say which fly.
+        name = "/".join(Path(path).parts[-2:])
         self._status.files_total = total
         self._status.current_file = name
+        self._status.item_started = _now_iso()
+        self._status.item_percent = None
         self._set_percent(index - 1, total)
         log.info("[%s %d/%d] %s", self._status.phase or "?", index, total, name)
         self._flush(force=True)
@@ -379,7 +387,8 @@ class JobReporter:
         self._flush(force=True)
 
     def transcode_progress(self, index: int, total: int) -> ProgressCallback:
-        """A writer.ProgressCallback refining within-file transcode percent."""
+        """A writer.ProgressCallback refining within-item percent for any ffmpeg
+        encode with a known frame count (a transcode, or a grid)."""
         base = index - 1
 
         def _cb(prog: object) -> None:
@@ -388,6 +397,7 @@ class JobReporter:
             tf = getattr(prog, "total_frames", None)
             if tf:
                 frac = min(1.0, frames / tf)
+            self._status.item_percent = round(100.0 * frac, 1)
             self._set_percent(base + frac, total)
             self._flush()
 
@@ -404,6 +414,7 @@ class JobReporter:
             size = getattr(prog, "file_size", 0) or 0
             done = getattr(prog, "bytes_done", 0)
             within = (fi - 1 + (done / size if size else 0.0)) / count
+            self._status.item_percent = round(100.0 * within, 1)
             self._set_percent(base + within, total)
             self._flush()
 
@@ -469,6 +480,45 @@ def worker_start(jd: Path) -> Worker:
 # ---------------------------------------------------------------------------
 # Admin / read API
 # ---------------------------------------------------------------------------
+
+
+def is_finished(status: JobStatus) -> bool:
+    """Whether *status* is terminal (done, failed or cancelled)."""
+    return status.state in _TERMINAL
+
+
+def item_eta_s(status: JobStatus, now: float | None = None) -> float | None:
+    """Seconds left on the job's current item, extrapolated from its own
+    progress so far — None until the item has moved enough to say (2 %), or
+    when the step reports no progress."""
+    pct = status.item_percent
+    if not status.item_started or pct is None or pct < 2 or pct >= 100:
+        return None
+    try:
+        started = datetime.datetime.fromisoformat(status.item_started).timestamp()
+    except ValueError:
+        return None
+    elapsed = (time.time() if now is None else now) - started
+    if elapsed <= 0:
+        return None
+    return elapsed * (100.0 - pct) / pct
+
+
+def notice_dict(status: JobStatus) -> dict:
+    """What the GUI's background-processing notice shows about one job."""
+    eta = item_eta_s(status)
+    return {
+        "job_id": status.job_id,
+        "state": status.state,
+        "phase": status.phase,
+        "paused": status.paused,
+        "paused_reason": status.paused_reason,
+        "current_file": status.current_file,
+        "files_done": status.files_done,
+        "files_total": status.files_total,
+        "item_percent": status.item_percent,
+        "eta_s": None if eta is None else round(eta),
+    }
 
 
 def list_jobs() -> list[JobStatus]:

@@ -44,7 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from starlette.websockets import WebSocketState
 
 import octacam
-from octacam import config_writer, updates
+from octacam import config_writer, process_jobs, updates
 from octacam.config import OctacamConfig, find_config_file, parse_config
 from octacam.controller import (
     RecordingController,
@@ -61,6 +61,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 # import() URL, so only allow names that can't escape the /plugins/ prefix.
 _PLUGIN_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
 TELEMETRY_INTERVAL_S = 0.5
+# How often the GUI re-reads detached `octacam process` jobs for its
+# background-processing notice (a few small status.json reads).
+JOBS_INTERVAL_S = 3.0
 # How many recent controller events to replay to a (re)connecting client so the
 # event log shows history immediately instead of starting blank. The controller
 # keeps a bounded event deque; this is a recent slice of it (and is bounded by
@@ -606,6 +609,10 @@ class _AppState:
         # (see create_app). None until the check runs / if it is skipped; octacam
         # never updates itself, this only advises. See octacam.updates.
         self._update_notice: updates.UpdateNotice | None = None
+        # Detached `octacam process` jobs on this machine, for the GUI's
+        # background-processing notice (see refresh_jobs).
+        self._jobs: dict = {"live": [], "ended": []}
+        self._jobs_seen: set[str] = set()
 
     def refresh_update_notice(self) -> None:
         """Populate _update_notice from a PyPI check. Fail-soft; never raises."""
@@ -613,6 +620,36 @@ class _AppState:
             self._update_notice = updates.check()
         except Exception:
             log.debug("update check failed", exc_info=True)
+
+    def refresh_jobs(self) -> bool:
+        """Re-read detached processing jobs into the GUI notice; True when it
+        changed. A job that is live while this GUI is open pauses at its next
+        step boundary (the GUI marks capture-active for its whole session) —
+        this only makes that visible. A job seen live during this session that
+        has since ended is listed under ``ended`` so the GUI can say so.
+        Fail-soft; never raises."""
+        try:
+            jobs = process_jobs.list_jobs()
+        except Exception:
+            log.debug("job status read failed", exc_info=True)
+            return False
+        live = [j for j in jobs if not process_jobs.is_finished(j)]
+        self._jobs_seen.update(j.job_id for j in live)
+        payload = {
+            "live": [process_jobs.notice_dict(j) for j in live],
+            "ended": [
+                {"job_id": j.job_id, "state": j.state, "error": j.error}
+                for j in jobs
+                if j.job_id in self._jobs_seen and process_jobs.is_finished(j)
+            ],
+        }
+        changed = payload != self._jobs
+        self._jobs = payload
+        return changed
+
+    def jobs_status(self) -> dict:
+        """The background-processing notice: {live: [...], ended: [...]}."""
+        return self._jobs
 
     def update_status(self) -> dict | None:
         """The update notice for /api/system, or None if not (yet) known."""
@@ -700,6 +737,9 @@ class _AppState:
             # Newer-release advice for the dismissible GUI banner (None until the
             # background check runs, or if skipped). octacam never self-updates.
             "update": self.update_status(),
+            # Detached `octacam process` jobs (see refresh_jobs); also pushed
+            # live as WS "jobs" messages.
+            "jobs": self.jobs_status(),
             # False while the cameras are still opening on the init thread.
             "ready": controller.ready,
             # Set if that background init failed to open any camera, so the SPA
@@ -900,6 +940,14 @@ class _AppState:
                 messages.append((index, header + jpeg.tobytes(), group))
         return messages
 
+    async def jobs_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            changed = await loop.run_in_executor(None, self.refresh_jobs)
+            if changed and self.clients:
+                self._broadcast_text("jobs", json.dumps({"type": "jobs", **self._jobs}))
+            await asyncio.sleep(JOBS_INTERVAL_S)
+
     async def telemetry_loop(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
@@ -977,6 +1025,10 @@ def create_app(
             asyncio.create_task(state.preview_loop()),
             asyncio.create_task(state.telemetry_loop()),
         ]
+        # Skipped under the test suite, which must not read (or prune) the
+        # real job cache; tests drive refresh_jobs directly.
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            tasks.append(asyncio.create_task(state.jobs_loop()))
         yield
         for task in tasks:
             task.cancel()

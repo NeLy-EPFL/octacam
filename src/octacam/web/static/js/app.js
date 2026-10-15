@@ -14,6 +14,7 @@ import { ShutdownDialog } from "./shutdown.js";
 import { DirPicker } from "./dirpicker.js";
 import { initShortcuts } from "./shortcuts.js";
 import { initUpdateBanner } from "./update.js";
+import { JobsNotice } from "./jobs.js";
 
 // The server replays a recent slice of its event backlog on (re)connect, so the
 // client keeps a generous scrollback to actually hold that history plus the
@@ -254,6 +255,9 @@ async function main() {
     addEvent(evt);
     record?.handleEvent(evt);
   };
+  // Background `octacam process` jobs: banner + pause/end announcements (jobs.js).
+  const jobsNotice = new JobsNotice({ notify });
+  jobsNotice.apply(system.jobs);
 
   let connMode = "offline";
   let userDisconnected = false; // user clicked Disconnect — suppress reconnect
@@ -290,6 +294,8 @@ async function main() {
 
   record = new RecordTab({
     formats: system.formats,
+    // "Record anyway?" while a background job is still mid-step (jobs.js).
+    backgroundJobWarning: () => jobsNotice.busyMessage(),
     transferUsers: system.transfer_users,
     activeUser: system.active_user,
     // Collect each plugin's start-params slice ({name: params}); record.js
@@ -513,6 +519,9 @@ async function main() {
         // connected) and sent the current camera list + plugin readiness.
         applySystem(msg);
         break;
+      case "jobs":
+        jobsNotice.apply(msg);
+        break;
       case "state":
       case "telemetry":
         recordingActive = ["waiting", "recording", "finishing"].includes(
@@ -701,6 +710,7 @@ async function main() {
   // the managed-trigger option, and forward each plugin's readiness to its tab.
   function applySystem(sys) {
     systemReady = Boolean(sys.ready);
+    if (sys.jobs) jobsNotice.apply(sys.jobs);
     initError = sys.init_error || null;
     record.setManagedAvailable(!!sys.managed_trigger_available);
     for (const [name, info] of Object.entries(sys.plugins ?? {})) {

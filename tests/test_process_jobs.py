@@ -1,5 +1,6 @@
 """The detached-processing job store (octacam.process_jobs) + worker path."""
 
+import datetime
 import json
 import os
 import signal
@@ -371,3 +372,40 @@ def test_python_dash_m_octacam_runs():
     )
     assert r.returncode == 0
     assert r.stdout.strip()  # prints a version
+
+
+# ------------------------------------------------- GUI background-processing notice
+
+
+def test_reporter_tracks_item_progress_for_an_eta(cache_dir):
+    from types import SimpleNamespace
+
+    jd = pj.job_dir("j-eta")
+    status = _job("j-eta", state="running")
+    reporter = pj.JobReporter(jd, status)
+    reporter.begin_phase("grid", 4)
+    reporter.item_started(2, 4, "/data/Fly1/002")
+    assert status.item_started and status.item_percent is None
+    assert pj.item_eta_s(status) is None  # no progress reported yet
+
+    reporter.transcode_progress(2, 4)(SimpleNamespace(frame=250, total_frames=1000))
+    assert status.item_percent == 25.0
+    started = datetime.datetime.fromisoformat(status.item_started).timestamp()
+    # 25 % in 10 min -> 30 min left.
+    assert pj.item_eta_s(status, now=started + 600) == pytest.approx(1800)
+
+    notice = pj.notice_dict(status)
+    assert notice["phase"] == "grid"
+    assert notice["current_file"] == "Fly1/002"
+    assert (notice["files_done"], notice["files_total"]) == (0, 4)
+    # A new item starts with no progress (and so no ETA) of its own.
+    reporter.item_done()
+    reporter.item_started(3, 4, "/data/Fly1/003")
+    assert status.item_percent is None and pj.item_eta_s(status) is None
+
+
+def test_item_eta_needs_some_progress(cache_dir):
+    status = _job("j", item_started="2026-10-15T10:00:00+02:00", item_percent=1.0)
+    assert pj.item_eta_s(status) is None
+    status.item_percent = 100.0
+    assert pj.item_eta_s(status) is None

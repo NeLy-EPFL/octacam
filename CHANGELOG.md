@@ -11,6 +11,16 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **The GUI shows background processing.** While a detached `octacam
+  process` job is running, a strip along the bottom of the camera view says
+  what it is doing and how long the current step has left (*building a grid
+  video (Fly2/001, 7 of 16, ~15 min left)*); once that step is done the job
+  pauses until the GUI closes, as before, and the strip says so. The event log
+  (and, with **Notify me**, a desktop notification) records when it pauses
+  and ends, and Start recording asks first while a step is still running.
+  Jobs now report grid and render progress (a new `render` phase) and name
+  items as `Fly1/003`.
+
 - **2-photon: stop when ThorImage stops (new default)** — the `twophoton`
   plugin no longer needs a duration: the Arduino keeps watching its ThorSync
   input after the start edge and ends the camera trigger once that input has

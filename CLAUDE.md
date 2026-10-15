@@ -1207,6 +1207,21 @@ node-map browser (typed widgets, per-field reset, ROI auto-center; nodes writabl
 only while not grabbing cycle the preview grab). Plugin tabs live in a responsive
 overflow menu; theme is a rig config option overridable per-browser.
 
+**Background-processing notice** (`js/jobs.js`, 2026-10-15, Matthias's ask):
+a GUI session marks capture-active for its whole lifetime, so a detached
+`process` job finishes its current step and then parks until the GUI closes
+— that mechanism is unchanged; the GUI only makes it visible. `AppState.
+refresh_jobs` (polled every `JOBS_INTERVAL_S` by `jobs_loop`, skipped under
+pytest because it must not read or prune the real job cache) pushes WS
+`jobs` = `{live: [process_jobs.notice_dict], ended: [...]}`, also in
+`/api/system`. The frontend shows a bottom strip, logs the pause and end
+transitions (never what was already so at page load), and `RecordTab._start`
+confirms while a job is mid-step (`backgroundJobWarning`). The ETA comes
+from `JobStatus.item_started`/`item_percent` (`item_eta_s`), so a phase
+needs within-item progress to show one: grids now feed
+`reporter.transcode_progress` when there is no terminal bar, and Phase 6 is
+its own `render` phase.
+
 **Keyboard shortcuts** live in one place: `web/static/js/shortcuts.js`
 (`initShortcuts({grid})`, wired once in `app.js main()`). It installs a single
 document-level `keydown` listener driven by one binding table, from which the `?`

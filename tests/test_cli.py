@@ -1921,6 +1921,87 @@ def test_process_transfers_data_before_rendering_and_reruns_into_renamed_take(
     ]
 
 
+def test_detached_job_reports_transfer_grid_render_phases(tmp_path, monkeypatch):
+    # The GUI's background-processing notice reads these: phases in the new
+    # order, the synced render as its own "render" phase, and the grid encode
+    # reporting its own progress (for "~N min left") even with no terminal bar.
+    pytest.importorskip("tifffile")
+    from types import SimpleNamespace
+
+    from octacam import cli as cli_mod
+    from octacam import grid as grid_mod
+    from octacam import synced_render
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(source_root, "MB247_CI63", "Fly1", u_time=take_start - 5, n_frames=4)
+    folder = tmp_path / "data" / "day1" / "Fly1" / "001"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"match_window_s = 60\n"
+            f"settle_s = 60\n"
+        ),
+        extra_summary={
+            "relative_directory": "day1/Fly1/001",
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": 10.0,
+            "plugins": {"twophoton": {"armed": True}},
+        },
+    )
+    (folder / "grid.mp4").unlink()
+    events = []
+
+    class Reporter:
+        def begin_phase(self, phase, total):
+            events.append(("phase", phase, total))
+
+        def item_started(self, index, total, path):
+            events.append(("item", Path(path).name))
+
+        def item_done(self):
+            pass
+
+        def set_paused(self, flag, reason):
+            pass
+
+        def transfer_progress(self, index, total):
+            return lambda prog: None
+
+        def transcode_progress(self, index, total):
+            events.append(("grid-progress", index))
+            return lambda prog: None
+
+    def fake_grid(folder, *, output, on_progress=None, **_kwargs):
+        assert on_progress is not None
+        on_progress(SimpleNamespace(frame=1, total_frames=2))
+        output.write_bytes(b"grid")
+        return output
+
+    monkeypatch.setattr(grid_mod, "build_grid_video", fake_grid)
+    monkeypatch.setattr(synced_render, "render_synced_video", lambda take, options=None, **kw: None)
+
+    cli_mod._grid_and_transfer(
+        {folder: [folder / "camera_LF.mp4"]},
+        do_grid=True,
+        do_transfer=True,
+        cli_config_dir=None,
+        dry_run=False,
+        show_bar=False,
+        reporter=Reporter(),
+    )
+    phases = [e[1] for e in events if e[0] == "phase"]
+    assert phases == ["transfer", "grid", "render"]
+    assert ("grid-progress", 1) in events
+    assert events[-1] == ("item", "Recording1_Synced")  # rendered in its final folder
+
+
 def test_current_take_dest_finds_a_renamed_take(tmp_path):
     from octacam.cli import _current_take_dest
 

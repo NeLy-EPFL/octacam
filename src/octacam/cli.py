@@ -6608,7 +6608,15 @@ def _grid_and_transfer(
                         grid_skipped += 1
                         built.append(out_path)
                         continue
-                    on_prog = grid_bar.folder(i, folder) if grid_bar else None
+                    on_prog = (
+                        grid_bar.folder(i, folder)
+                        if grid_bar
+                        # A detached job has no bar: report the encode's own
+                        # progress, so the GUI can say how long is left.
+                        else reporter.transcode_progress(i, len(folder_outputs))
+                        if reporter is not None
+                        else None
+                    )
                     out = build_grid_video(
                         folder,
                         layout=layout,
@@ -6715,16 +6723,12 @@ def _grid_and_transfer(
 
         # --- Phase 6: renderings — synced behavior+2P videos, Z-stack MIPs ---
         # Last: quick-look output only, rendered from the NAS copy (the take's
-        # final, possibly renamed folder), so it never delays the data.
-        if not dry_run and render_queue:
-            from octacam.synced_render import render_synced_video
-
-            for dest, start_s, options in render_queue:
-                render_synced_video(_current_take_dest(dest, start_s), options)
-        # Z-stack MIPs land in the final RecordingN_2P_<detail>/Renderings/
-        # wrapper. Scoped to the fly folders this run touched — where its
-        # anatomical Z-stacks were just attributed by the sweep.
+        # final, possibly renamed folder), so it never delays the data. Its
+        # own "render" phase, pausing between items like every other phase.
         if not dry_run:
+            # Z-stack MIPs land in the final RecordingN_2P_<detail>/Renderings/
+            # wrapper. Scoped to the fly folders this run touched — where its
+            # anatomical Z-stacks were just attributed by the sweep.
             mip_targets: dict[Path, object] = {}
             for folder, dest in folder_dest.items():
                 cfg = folder_cfgs[folder]
@@ -6732,10 +6736,31 @@ def _grid_and_transfer(
                 mip_options = zstack_options_from_config(cfg.transfer.twophoton)
                 if mip_options is not None:
                     mip_targets.setdefault(dest.parent, mip_options)
-            for fly_dir, mip_options in mip_targets.items():
-                if fly_dir.is_dir():
-                    for zstack in find_zstacks(fly_dir):
-                        render_zstack_mips(zstack, mip_options)  # type: ignore[arg-type]
+            zstacks = [
+                (zstack, mip_options)
+                for fly_dir, mip_options in mip_targets.items()
+                if fly_dir.is_dir()
+                for zstack in find_zstacks(fly_dir)
+            ]
+            renders = [
+                (_current_take_dest(dest, start_s), "synced", options)
+                for dest, start_s, options in render_queue
+            ] + [(zstack, "mip", mip_options) for zstack, mip_options in zstacks]
+            if renders:
+                from octacam.synced_render import render_synced_video
+
+                if reporter is not None:
+                    reporter.begin_phase("render", len(renders))
+                for i, (target, kind, options) in enumerate(renders, 1):
+                    _pause_gate(reporter, job_dir, unit="render")
+                    if reporter is not None:
+                        reporter.item_started(i, len(renders), target)
+                    if kind == "synced":
+                        render_synced_video(target, options)
+                    else:
+                        render_zstack_mips(target, options)  # type: ignore[arg-type]
+                    if reporter is not None:
+                        reporter.item_done()
 
     return transfer_failed
 

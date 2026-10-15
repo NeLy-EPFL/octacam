@@ -33,7 +33,17 @@ function trimNum(v) {
 }
 
 export class RecordTab {
-  constructor({ formats, getPluginParams, notify, transferUsers, activeUser }) {
+  constructor({
+    formats,
+    getPluginParams,
+    notify,
+    transferUsers,
+    activeUser,
+    backgroundJobWarning,
+  }) {
+    // Returns a confirmation message while a background `octacam process`
+    // job is still mid-step (it pauses once that step is done), else null.
+    this.backgroundJobWarning = backgroundJobWarning;
     // Returns {<plugin name>: <start-params slice>} for the loaded plugin tabs;
     // packed into the recording-start request below. See app.js.
     this.getPluginParams = getPluginParams;
@@ -818,6 +828,10 @@ export class RecordTab {
   }
 
   async _start() {
+    // Recording alongside a still-running processing step (a grid encode,
+    // a 2P transfer) shares the CPU/disk with it: ask first.
+    const busy = this.backgroundJobWarning?.();
+    if (busy && !window.confirm(busy)) return;
     const body = { confirm_overwrite: false };
     const pluginParams = this.getPluginParams?.() ?? {};
     if (Object.keys(pluginParams).length) body.plugin_params = pluginParams;
