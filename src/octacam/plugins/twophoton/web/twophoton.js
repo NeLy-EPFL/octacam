@@ -152,16 +152,23 @@ export default class TwoPhotonTab {
   // settings) would stop before this take can end — it would miss the rest
   // of it (timing, AirFlow). Synced takes can run up to the safety limit;
   // otherwise the manual duration applies.
+  // A synced take lasts as long as ThorImage records: the newest streaming
+  // acquisition's plan (planned_s), when known, rather than the safety limit.
   thorsyncWarning(synced = this.matchThorImage) {
     const t = this.thorsync;
     if (!t || !t.limit_s) return null;
-    const longest = synced ? this.maxDurationS : this._getRecordSettings?.()?.duration_s;
+    const planned = synced && t.planned_s ? t.planned_s : null;
+    const longest = planned ?? (synced ? this.maxDurationS : this._getRecordSettings?.()?.duration_s);
     if (!longest || t.limit_s >= longest) return null;
-    const fmt = (s) => (s >= 120 && s % 60 === 0 ? `${s / 60} min` : `${Math.round(s)} s`);
+    const fmt = (s) =>
+      s >= 120 && s % 60 === 0 ? `${s / 60} min` : s < 600 ? `${Math.round(s)} s` : `~${(s / 60).toFixed(1)} min`;
+    const take = planned
+      ? `ThorImage is set to acquire ${fmt(planned)} (read from ${t.planned_folder})`
+      : `this take can run up to ${fmt(longest)}`;
     return (
       `⚠ ThorSync is set to stop after ${fmt(t.limit_s)} (read from ${t.folder}) ` +
-      `but this take can run up to ${fmt(longest)} — ThorSync would miss the rest ` +
-      "(timing, AirFlow). Raise the acquisition duration in ThorSync."
+      `but ${take} — ThorSync would miss the rest (timing, AirFlow). ` +
+      "Raise the acquisition duration in ThorSync."
     );
   }
 

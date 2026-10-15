@@ -891,10 +891,13 @@ def test_identify_current_and_outdated():
     assert plugin.firmware_provisioning()["state"] == "outdated"
 
 
-def test_identify_unidentified_still_arms():
+def test_identify_unidentified_is_not_armed():
+    # Audit 2026-10-15: the protocol-v2 arm packet is 9 bytes; a silent v1
+    # board would read its 2 extra bytes as commands. Refused, explicitly.
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, None)  # blank / no identify (old firmware)
-    assert plugin._firmware_ok
+    assert plugin._firmware_ok is False
+    assert "did not identify itself" in plugin.status()["error"]
     prov = plugin.firmware_provisioning()
     assert prov["state"] == "unidentified"
     assert prov["needs_flash"] and not prov["safe_to_auto_flash"]
@@ -953,9 +956,17 @@ class _StopSpy:
 
     def __init__(self):
         self.stops: list[bool] = []
+        self.threads: list[str] = []
+        self.called = threading.Event()
 
     def stop_recording(self, abort: bool = False) -> None:
         self.stops.append(abort)
+        self.threads.append(threading.current_thread().name)
+        self.called.set()
+
+    def settle(self) -> None:
+        """The stop runs on its own thread: give a (non-)call time to land."""
+        self.called.wait(0.5)
 
 
 def test_match_thorimage_is_the_default():
@@ -972,7 +983,9 @@ def test_build_parses_match_options():
     # Garbage falls back to the defaults; idle_ms is clamped to the uint16 wire
     # field and never to 0 (which the firmware reads as "fixed duration").
     assert _build({"stop_idle_ms": "x"})._stop_idle_ms == DEFAULT_STOP_IDLE_MS
-    assert _build({"stop_idle_ms": 0})._stop_idle_ms == 1
+    # A stop under 200 ms would end a take between two 2P frames.
+    assert _build({"stop_idle_ms": 0})._stop_idle_ms == 200
+    assert _build({"stop_idle_ms": 10})._stop_idle_ms == 200
     assert _build({"stop_idle_ms": 10**6})._stop_idle_ms == 0xFFFF
 
 
@@ -1040,7 +1053,10 @@ def test_done_after_trigger_stops_recording_in_match_mode():
         {"reason": "thorimage", "edges": 4500, "high_ms": 293_000, "run_ms": 294_000}
     )
     plugin._on_arduino_status("D")
+    spy.settle()
     assert spy.stops == [False]  # a clean stop, not an abort
+    # Off the serial reader thread: stop_recording takes the controller lock.
+    assert spy.threads == ["twophoton-stop"]
     assert plugin.recording_metadata()["stop"]["reason"] == "thorimage"
 
 
@@ -1051,6 +1067,7 @@ def test_done_does_not_stop_a_fixed_duration_take():
     plugin.on_recording_start({"twophoton": {}})
     for status in "ATD":
         plugin._on_arduino_status(status)
+    spy.settle()
     assert spy.stops == []  # the controller's own deadline ends it, as before
 
 
@@ -1065,6 +1082,7 @@ def test_stale_done_never_stops_a_later_take():
     plugin._on_arduino_status("D")  # never saw 'T'
     plugin.on_recording_stop(aborted=False)
     plugin._on_arduino_status("D")
+    spy.settle()
     assert spy.stops == []
 
 
@@ -1157,7 +1175,10 @@ def test_thorsync_limit_is_read_off_thread_and_reported(tmp_path):
     plugin, _ = _plugin_with_fake(match_thorimage=True)
     plugin._controller = _Ctrl(_thorsync_share(tmp_path, 320))
     plugin.refresh_thorsync_limit(wait=True)
-    assert plugin.status()["thorsync"] == {"folder": "PAM7xCI80/SyncData184", "limit_s": 320.0}
+    assert plugin.status()["thorsync"] == {
+        "folder": "PAM7xCI80/SyncData184", "limit_s": 320.0,
+        "planned_folder": None, "planned_s": None,  # no ThorImage folder on this share
+    }
     warning = plugin.thorsync_warning(3600)
     assert warning and "stop after 320 s" in warning and "60 min" in warning
     assert plugin.thorsync_warning(300) is None  # a short take fits
@@ -1181,3 +1202,42 @@ def test_no_thorsync_warning_when_the_limit_covers_the_take(tmp_path):
     plugin.refresh_thorsync_limit(wait=True)
     plugin.on_recording_start({"twophoton": {"fps": 100, "match_thorimage": True}})
     assert ctrl.events == []
+
+
+def test_late_stop_report_never_lands_in_the_next_take():
+    # A STOP line from the previous run arriving after the next take started
+    # (state reset) must not become this take's end-of-run report.
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    plugin.on_recording_start({"twophoton": {}})
+    plugin._on_arduino_status("A")  # armed, not triggered yet
+    plugin._on_stop_report({"reason": "thorimage", "edges": 1, "high_ms": 1, "run_ms": 1})
+    assert "stop" not in plugin.recording_metadata()
+
+
+def _thorimage_plan(share, name, timepoints, frame_rate=7.7):
+    folder = share / "PAM7xCI80" / name
+    folder.mkdir(parents=True)
+    (folder / "Experiment.xml").write_text(
+        f'<?xml version="1.0"?><ThorImageExperiment><LSM frameRate="{frame_rate}" />'
+        f'<Timelapse timepoints="{timepoints}" /></ThorImageExperiment>'
+    )
+
+
+def test_synced_take_is_compared_with_thorimage_s_own_plan(tmp_path):
+    # Audit: comparing synced takes with the 60 min safety limit warned on every
+    # take whenever ThorSync was set below an hour. ThorImage's own plan decides.
+    share = _thorsync_share(tmp_path, 320)
+    _thorimage_plan(share, "Fly5_Streaming", 3000)  # 3000 / 7.7 Hz = 390 s
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    plugin._controller = _Ctrl(share)
+    plugin.refresh_thorsync_limit(wait=True)
+    warning = plugin.thorsync_warning(3600, synced=True)
+    assert "ThorImage is set to acquire 390 s (read from PAM7xCI80/Fly5_Streaming)" in warning
+    assert "stop after 320 s" in warning
+
+    short = _thorsync_share(tmp_path / "b", 320)
+    _thorimage_plan(short, "Fly6_Streaming", 1500)  # 195 s: fits in 320 s
+    plugin._controller = _Ctrl(short)
+    plugin.refresh_thorsync_limit(wait=True)
+    assert plugin.thorsync_warning(3600, synced=True) is None
+    assert plugin.thorsync_warning(3600, synced=False) is not None  # a 1 h manual take

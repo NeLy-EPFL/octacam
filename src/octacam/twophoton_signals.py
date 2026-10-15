@@ -57,8 +57,8 @@ def channel_sample_rate(settings_xml: Path, channel_alias: str) -> float | None:
     its own ``<DataChannel enable="...">`` children. There is no reliable way
     to tell which block was actually active for *this* recording from the
     settings file alone, so this returns the first board's enabled rate where
-    the channel itself is enabled — a diagnostic only (used for a plausibility
-    log line), never something matching correctness depends on.
+    the channel itself is enabled — possibly an inactive preset's. Use
+    :func:`thorsync_sample_rate` (the active board's first) for any timeline.
     """
     try:
         root = ET.parse(settings_xml).getroot()
@@ -96,7 +96,13 @@ class CaptureSegment:
     end_sample: int
     cameras_edges: int
     frameout_edges: int
-    sample_rate: float | None = None  # best-effort; see channel_sample_rate
+    sample_rate: float | None = None  # see thorsync_sample_rate
+    # Where this capture's camera pulses end: the next capture's start (or the
+    # file's end), not CaptureOn's fall — a take synced with ThorImage keeps
+    # triggering the cameras for stop_idle_ms after the capture stops (real
+    # 2026-10-14 SyncData166: 199 of 19817 pulses in the 1.98 s after the fall).
+    # None means end_sample.
+    cameras_end_sample: int | None = None
 
     @property
     def duration_s(self) -> float | None:
@@ -106,12 +112,14 @@ class CaptureSegment:
 
 
 def _rising_edge_indices(signal) -> list[int]:
-    """Sample indices where *signal* transitions from 0 to non-zero."""
+    """Sample indices where *signal* transitions from 0 to non-zero — a
+    signal already high at the first sample rises at 0 (ThorSync started
+    after the capture: its CaptureOn segment must not be lost)."""
     import numpy as np
 
     nonzero = signal.astype(bool)
-    diff = np.diff(nonzero.astype(np.int8))
-    return [int(i) for i in np.flatnonzero(diff == 1) + 1]
+    diff = np.diff(nonzero.astype(np.int8), prepend=np.int8(0))
+    return [int(i) for i in np.flatnonzero(diff == 1)]
 
 
 def _falling_edge_indices(signal) -> list[int]:
@@ -122,8 +130,18 @@ def _falling_edge_indices(signal) -> list[int]:
     return [int(i) for i in np.flatnonzero(diff == -1) + 1]
 
 
+# How long after a capture's CaptureOn fall its camera pulses can still run:
+# a take synced with ThorImage keeps triggering the cameras for the plugin's
+# stop_idle_ms (default 2 s; real data: 199 pulses over 1.98 s) before it ends.
+_CAMERA_TAIL_S = 10.0
+
+
 def _count_edges_in_range(edges: list[int], start: int, end: int) -> int:
-    return sum(1 for e in edges if start <= e < end)
+    """Edges in ``[start, end)`` — *edges* is sorted (bisect, not a scan: a
+    201-slice Z-stack has 201 segments over tens of thousands of edges)."""
+    import bisect
+
+    return bisect.bisect_left(edges, end) - bisect.bisect_left(edges, start)
 
 
 def read_capture_segments(sync_folder: Path) -> list[CaptureSegment] | None:
@@ -149,10 +167,28 @@ def read_capture_segments(sync_folder: Path) -> list[CaptureSegment] | None:
             episodes[0].name,
         )
     episode_path = episodes[0]
+    # One full read per episode per process: matching, the sweep's
+    # correlation and the manifest all ask, and each read is ~384 MB of a
+    # 32 M-sample episode over the network. Keyed by size + mtime, so a file
+    # still growing is never served stale.
+    try:
+        stat = episode_path.stat()
+        cache_key = (str(episode_path), stat.st_size, stat.st_mtime)
+    except OSError:
+        cache_key = None
+    if cache_key is not None and cache_key in _SEGMENT_CACHE:
+        return list(_SEGMENT_CACHE[cache_key])
+    segments = _read_capture_segments(sync_folder, episode_path)
+    if cache_key is not None and segments is not None:
+        _SEGMENT_CACHE[cache_key] = tuple(segments)
+    return segments
 
-    sample_rate = channel_sample_rate(
-        sync_folder / SETTINGS_XML_FILENAME, _CAPTUREON_CHANNEL
-    )
+
+_SEGMENT_CACHE: dict[tuple[str, int, float], tuple[CaptureSegment, ...]] = {}
+
+
+def _read_capture_segments(sync_folder: Path, episode_path: Path) -> list[CaptureSegment] | None:
+    sample_rate = thorsync_sample_rate(sync_folder / SETTINGS_XML_FILENAME)
 
     import h5py
 
@@ -170,7 +206,7 @@ def read_capture_segments(sync_folder: Path) -> list[CaptureSegment] | None:
                 return None
             cameras = _column(di, _CAMERAS_CHANNEL)
             frameout = _column(di, _FRAMEOUT_CHANNEL)
-    except OSError:
+    except Exception:  # noqa: BLE001 — never raise: unreadable means "can't verify"
         log.warning("twophoton verify: could not read %s", episode_path, exc_info=True)
         return None
 
@@ -185,22 +221,30 @@ def read_capture_segments(sync_folder: Path) -> list[CaptureSegment] | None:
     # it rather than guessing an end sample.
     fall_iter = iter(falls)
     next_fall = next(fall_iter, None)
-    for rise in rises:
+    n_samples = len(capture_on)
+    for i, rise in enumerate(rises):
         while next_fall is not None and next_fall <= rise:
             next_fall = next(fall_iter, None)
         if next_fall is None:
             break
+        # The synced stop's tail: up to _CAMERA_TAIL_S after the fall, never
+        # into the next capture.
+        tail = int(_CAMERA_TAIL_S * (sample_rate or 100_000.0))
+        cameras_end = min(
+            rises[i + 1] if i + 1 < len(rises) else n_samples, next_fall + tail
+        )
         segments.append(
             CaptureSegment(
                 start_sample=rise,
                 end_sample=next_fall,
                 cameras_edges=_count_edges_in_range(
-                    cameras_edges_all, rise, next_fall
+                    cameras_edges_all, rise, cameras_end
                 ),
                 frameout_edges=_count_edges_in_range(
                     frameout_edges_all, rise, next_fall
                 ),
                 sample_rate=sample_rate,
+                cameras_end_sample=cameras_end,
             )
         )
         next_fall = next(fall_iter, None)
@@ -211,8 +255,7 @@ def camera_edge_diff(segment: CaptureSegment, camera_frame_counts: list[int]) ->
     """Smallest ``|Cameras edges - frame count|`` across *camera_frame_counts*,
     or None if the list is empty. A caller comparing several candidate
     segments against the same take should rank by this (smaller is better,
-    0 = exact) rather than just checking :func:`verify_camera_match`'s
-    boolean — real data found more than one segment can fall within
+    0 = exact) rather than a yes/no check — real data found more than one segment can fall within
     tolerance of a take's frame count when nearby takes ran for similar
     durations, and the exact match is the one actually confirmed correct."""
     if not camera_frame_counts:
@@ -223,27 +266,6 @@ def camera_edge_diff(segment: CaptureSegment, camera_frame_counts: list[int]) ->
 def frameout_edge_diff(segment: CaptureSegment, timepoints: int) -> int:
     """``|FrameOut edges - timepoints|`` — see :func:`camera_edge_diff`."""
     return abs(segment.frameout_edges - timepoints)
-
-
-def verify_camera_match(
-    segment: CaptureSegment, camera_frame_counts: list[int], tolerance: int = 1
-) -> bool:
-    """Whether *segment*'s Cameras edge count matches any recorded camera's
-    own frame count within *tolerance* (per-camera counts can differ by ±1
-    from independent grab-thread stop races).
-
-    A quick yes/no check; prefer :func:`camera_edge_diff` when ranking more
-    than one candidate against the same take (see its docstring for why)."""
-    diff = camera_edge_diff(segment, camera_frame_counts)
-    return diff is not None and diff <= tolerance
-
-
-def verify_frameout_match(
-    segment: CaptureSegment, timepoints: int, tolerance: int = 1
-) -> bool:
-    """Whether *segment*'s FrameOut edge count matches ThorImage's own
-    ``Experiment.xml <Timelapse timepoints="...">`` within *tolerance*."""
-    return frameout_edge_diff(segment, timepoints) <= tolerance
 
 
 def read_segment_edge_times(
@@ -273,16 +295,18 @@ def read_segment_edge_times(
                 return None
             cameras_col = cameras[:, 0]
             frameout_col = frameout[:, 0]
-    except OSError:
+    except Exception:  # noqa: BLE001 — never raise
         log.warning("synced render: could not read %s", episodes[0], exc_info=True)
         return None
     rate = segment.sample_rate or 100_000.0
-    start, end = segment.start_sample, segment.end_sample
+    start = segment.start_sample
+    cameras_end = segment.cameras_end_sample or segment.end_sample
 
-    def _times(col) -> list[float]:
+    def _times(col, end: int) -> list[float]:
         return [(e - start) / rate for e in _rising_edge_indices(col) if start <= e < end]
 
-    return _times(cameras_col), _times(frameout_col)
+    # The camera pulses run past the capture by the synced stop's idle time.
+    return _times(cameras_col, cameras_end), _times(frameout_col, segment.end_sample)
 
 
 def _active_board(settings_xml: Path):
@@ -292,6 +316,15 @@ def _active_board(settings_xml: Path):
     except (ET.ParseError, OSError):
         return None
     return next((b for b in root.iter("AcquireBoard") if b.get("active") == "1"), None)
+
+
+def thorsync_sample_rate(settings_xml: Path) -> float | None:
+    """ThorSync's sample rate (Hz) — the active board's, falling back to the
+    first enabled one. The single source for every ThorSync timeline
+    (matching, cut-off detection, the synced render): ``channel_sample_rate``
+    alone can return an inactive preset's rate, which would stretch the
+    render's timeline (e.g. 3.3x for a 30 kHz preset listed first)."""
+    return _active_board_rate(settings_xml) or channel_sample_rate(settings_xml, _CAPTUREON_CHANNEL)
 
 
 def _active_board_rate(settings_xml: Path) -> float | None:
@@ -360,7 +393,7 @@ def episode_cut_off(sync_folder: Path) -> EpisodeCutOff | None:
     if not still_on:
         return None
     settings = sync_folder / SETTINGS_XML_FILENAME
-    rate = _active_board_rate(settings) or channel_sample_rate(settings, _CAPTUREON_CHANNEL)
+    rate = thorsync_sample_rate(settings)
     return EpisodeCutOff(
         recorded_s=n / rate if rate else None,
         limit_s=thorsync_duration_limit(settings),
@@ -368,14 +401,23 @@ def episode_cut_off(sync_folder: Path) -> EpisodeCutOff | None:
 
 
 def describe_cut_off(name: str, cut: EpisodeCutOff) -> str:
-    """One explicit sentence for logs, manifests and the GUI."""
-    limit = f" at its {cut.limit_s:g} s duration limit" if cut.limit_s else ""
-    recorded = f" after {cut.recorded_s:.0f} s" if cut.recorded_s and not cut.limit_s else ""
+    """One explicit sentence for logs, manifests and the GUI. Blames the
+    duration limit only when the recording actually ran up to it (ThorSync
+    can also have been stopped by hand)."""
+    at_limit = bool(
+        cut.limit_s and cut.recorded_s and abs(cut.recorded_s - cut.limit_s) <= 1.0
+    )
+    if at_limit:
+        when, advice = f" at its {cut.limit_s:g} s duration limit", (
+            " Raise the acquisition duration in ThorSync."
+        )
+    else:
+        when = f" after {cut.recorded_s:.0f} s" if cut.recorded_s else ""
+        advice = " Was ThorSync stopped before ThorImage?"
     return (
-        f"ThorSync recording {name} stopped{limit}{recorded} while the 2P "
-        "capture was still running — its timing, AirFlow and every other "
-        "ThorSync channel are missing for the rest of the take. Raise the "
-        "acquisition duration in ThorSync."
+        f"ThorSync recording {name} stopped{when} while the 2P capture was "
+        "still running — its timing, AirFlow and every other ThorSync channel "
+        "are missing for the rest of the take." + advice
     )
 
 

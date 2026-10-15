@@ -16,12 +16,9 @@ h5py = pytest.importorskip("h5py")
 import numpy as np  # noqa: E402
 
 from octacam.twophoton_signals import (  # noqa: E402
-    CaptureSegment,
     channel_sample_rate,
     h5py_available,
     read_capture_segments,
-    verify_camera_match,
-    verify_frameout_match,
 )
 
 SETTINGS_XML = """<?xml version="1.0" encoding="utf-8"?>
@@ -120,16 +117,20 @@ def test_read_capture_segments_single_segment_exact_counts(tmp_path):
     assert segment.duration_s == pytest.approx(800 / 100000.0)
 
 
-def test_read_capture_segments_excludes_edges_outside_window(tmp_path):
-    # Pulses before/after the CaptureOn window must not be counted.
+def test_read_capture_segments_counts_the_synced_stops_camera_tail(tmp_path):
+    # Camera pulses before the capture don't belong to it; those right after
+    # CaptureOn falls do: a take synced with ThorImage keeps triggering the
+    # cameras for stop_idle_ms (real 2026-10-14 SyncData166: 19618 inside +
+    # 199 in the 1.98 s after the fall = the take's 19817 frames). FrameOut
+    # stays within the capture.
     folder = _make_sync_folder(
         tmp_path,
         capture_on_ranges=[(500, 1000)],
-        cameras_pulse_starts=[10, 600, 700, 1500],  # only 600, 700 are inside
+        cameras_pulse_starts=[10, 600, 700, 1500],  # 600, 700 inside; 1500 = tail
         frameout_pulse_starts=[50, 1900],  # none inside
     )
     (segment,) = read_capture_segments(folder)
-    assert segment.cameras_edges == 2
+    assert segment.cameras_edges == 3
     assert segment.frameout_edges == 0
 
 
@@ -229,32 +230,6 @@ def test_h5py_available_true_in_this_env():
     assert h5py_available() is True
 
 
-# --- verify_camera_match / verify_frameout_match -----------------------------
-
-
-def test_verify_camera_match_exact():
-    seg = CaptureSegment(0, 100, cameras_edges=19399, frameout_edges=1500)
-    assert verify_camera_match(seg, [19399, 19399, 19399]) is True
-
-
-def test_verify_camera_match_within_tolerance():
-    seg = CaptureSegment(0, 100, cameras_edges=19398, frameout_edges=0)
-    assert verify_camera_match(seg, [19399], tolerance=1) is True
-    assert verify_camera_match(seg, [19399], tolerance=0) is False
-
-
-def test_verify_camera_match_no_match():
-    seg = CaptureSegment(0, 100, cameras_edges=500, frameout_edges=0)
-    assert verify_camera_match(seg, [19399, 12000]) is False
-
-
-def test_verify_frameout_match_exact_and_tolerance():
-    seg = CaptureSegment(0, 100, cameras_edges=0, frameout_edges=1500)
-    assert verify_frameout_match(seg, 1500) is True
-    assert verify_frameout_match(seg, 1501, tolerance=1) is True
-    assert verify_frameout_match(seg, 1600) is False
-
-
 # --- ThorSync duration limit / cut-off episodes ----------------------------
 
 
@@ -286,15 +261,31 @@ def test_episode_cut_off_when_capture_still_on_at_the_end(tmp_path):
         thorsync_duration_limit,
     )
 
-    cut = _thorsync_folder(tmp_path, "SyncData167", capture=[0] * 10 + [1] * 1990)
+    # 2 s at 1 kHz, ThorSync's limit set to 2 s: the limit cut it.
+    cut = _thorsync_folder(tmp_path, "SyncData167", capture=[0] * 10 + [1] * 1990, duration=2)
     done = _thorsync_folder(tmp_path, "SyncData166", capture=[0] * 10 + [1] * 1980 + [0] * 10)
-    assert thorsync_duration_limit(cut / "ThorRealTimeDataSettings.xml") == 320.0
+    assert thorsync_duration_limit(cut / "ThorRealTimeDataSettings.xml") == 2.0
     result = episode_cut_off(cut)
     assert result is not None
-    assert (result.recorded_s, result.limit_s) == (2.0, 320.0)
+    assert (result.recorded_s, result.limit_s) == (2.0, 2.0)
     assert episode_cut_off(done) is None
     message = describe_cut_off("SyncData167", result)
-    assert "320 s duration limit" in message and "AirFlow" in message
+    assert "2 s duration limit" in message and "AirFlow" in message
+    # Stopped well before its 320 s limit: stopped by hand, not the limit.
+    manual = _thorsync_folder(tmp_path, "SyncData168", capture=[0] * 10 + [1] * 1990, duration=320)
+    message = describe_cut_off("SyncData168", episode_cut_off(manual))
+    assert "duration limit" not in message
+    assert "after 2 s" in message and "stopped before ThorImage" in message
+
+
+def test_capture_already_on_at_the_first_sample_is_a_segment(tmp_path):
+    # ThorSync started after ThorImage: CaptureOn is high from sample 0.
+    from octacam.twophoton_signals import read_capture_segments
+
+    folder = _thorsync_folder(tmp_path, "SyncData169", capture=[1] * 50 + [0] * 10)
+    (segment,) = read_capture_segments(folder)
+    assert (segment.start_sample, segment.end_sample) == (0, 50)
+    assert segment.sample_rate == 1000.0  # the active board's, not the inactive preset's
 
 
 def test_latest_thorsync_limit_reads_the_newest_sync_folder(tmp_path):

@@ -75,17 +75,30 @@ from octacam.plugins._serial_link import SerialReaderLink
 from octacam.plugins.base import Plugin
 
 
-def thorsync_limit_message(folder: str, limit_s: float, longest_take_s: float) -> str:
-    """The ThorSync-too-short warning, shared by the GUI, the arm log and doctor."""
+def _fmt_duration(seconds: float) -> str:
+    """320 -> "320 s", 3600 -> "60 min", 1000 -> "~16.7 min"."""
+    if seconds >= 120 and seconds % 60 == 0:
+        return f"{seconds / 60:g} min"
+    if seconds < 600:
+        return f"{seconds:.0f} s"
+    return f"~{seconds / 60:.1f} min"
 
-    def fmt(seconds: float) -> str:
-        if seconds >= 120 and seconds % 60 == 0:
-            return f"{seconds / 60:g} min"
-        return f"{seconds:g} s"
 
+def thorsync_limit_message(
+    folder: str, limit_s: float, longest_take_s: float, take_source: str | None = None
+) -> str:
+    """The ThorSync-too-short warning, shared by the GUI, the arm log and doctor.
+    *take_source* names where the take's length came from (the newest ThorImage
+    acquisition's plan), else the safety limit is meant."""
+    fmt = _fmt_duration
+    take = (
+        f"ThorImage is set to acquire {fmt(longest_take_s)} (read from {take_source})"
+        if take_source
+        else f"takes can run up to {fmt(longest_take_s)}"
+    )
     return (
         f"ThorSync is set to stop after {fmt(limit_s)} (its acquisition duration, "
-        f"read from {folder}) but takes can run up to {fmt(longest_take_s)} — "
+        f"read from {folder}) but {take} — "
         "ThorSync would miss the rest of it (timing, AirFlow and every other "
         "channel). Raise the duration in ThorSync."
     )
@@ -111,6 +124,9 @@ DEFAULT_STOP_IDLE_MS = 2_000
 # The recording's safety ceiling while matching ThorImage (seconds). Only ever
 # reached if the stop signal never comes.
 DEFAULT_MAX_DURATION_S = 3_600.0
+# A stop that waits less than this would end a take between two 2P frames
+# (one frame lasts ~130 ms at 7.7 Hz; Z-stacks pause up to 1.35 s per slice).
+MIN_STOP_IDLE_MS = 200
 
 # How long on_recording_start waits for the firmware's 'A' acknowledgement
 # before warning that the arm may not have taken. The firmware acks within a
@@ -396,7 +412,13 @@ class TwoPhotonPlugin(Plugin):
         self._auto_flash = bool(auto_flash)
         self._match_thorimage = bool(match_thorimage)
         # Clamp to the uint16 wire field; 0 would silently mean "fixed duration".
-        self._stop_idle_ms = max(1, min(0xFFFF, int(stop_idle_ms)))
+        if int(stop_idle_ms) < MIN_STOP_IDLE_MS:
+            log.warning(
+                "2-photon trigger: stop_idle_ms=%s is shorter than ThorImage's own "
+                "frame gaps would allow — using %d ms",
+                stop_idle_ms, MIN_STOP_IDLE_MS,
+            )
+        self._stop_idle_ms = max(MIN_STOP_IDLE_MS, min(0xFFFF, int(stop_idle_ms)))
         self._max_duration_s = max(1.0, float(max_duration_s))
         self._firmware: str | None = None
         self._firmware_ok = True
@@ -444,6 +466,9 @@ class TwoPhotonPlugin(Plugin):
         # off-thread (refresh_thorsync_limit) — status/state pushes also run on
         # the serial reader thread and must never wait on the network share.
         self._thorsync: dict | None = None
+        self._thorsync_lock = threading.Lock()
+        self._thorsync_thread: threading.Thread | None = None
+        self._thorsync_stale = False
 
     def _fw_is_busy(self) -> tuple[bool, str]:
         """Refuse to flash while the trigger is armed or a capture is running."""
@@ -482,35 +507,73 @@ class TwoPhotonPlugin(Plugin):
         """Re-read ThorSync's duration limit from the newest SyncData folder on
         the share, in a background thread (then push the GUI state)."""
 
-        def _read() -> None:
-            from octacam.twophoton_signals import latest_thorsync_limit
+        # One reader at a time (a hung share must not pile up threads, nor an
+        # older read land after a newer one); a request during a read makes
+        # it read once more.
+        with self._thorsync_lock:
+            thread = self._thorsync_thread
+            if thread is not None and thread.is_alive():
+                self._thorsync_stale = True
+            else:
+                self._thorsync_stale = True
+                thread = threading.Thread(
+                    target=self._read_thorsync, name="twophoton-thorsync", daemon=True
+                )
+                self._thorsync_thread = thread
+                thread.start()
+        if wait:
+            thread.join(10)
 
+    def _read_thorsync(self) -> None:
+        from octacam.twophoton_signals import latest_thorsync_limit
+        from octacam.twophoton_transfer import latest_thorimage_plan
+
+        while True:
+            with self._thorsync_lock:
+                if not self._thorsync_stale:
+                    self._thorsync_thread = None
+                    return
+                self._thorsync_stale = False
             source = self._twophoton_source()
             latest = latest_thorsync_limit(source) if source else None
+            plan = latest_thorimage_plan(source) if source else None
             self._thorsync = (
-                {"folder": f"{latest[0].parent.name}/{latest[0].name}", "limit_s": latest[1]}
+                {
+                    "folder": f"{latest[0].parent.name}/{latest[0].name}",
+                    "limit_s": latest[1],
+                    # What ThorImage is set to record (synced takes last that long).
+                    "planned_folder": f"{plan[0].parent.name}/{plan[0].name}" if plan else None,
+                    "planned_s": plan[1] if plan else None,
+                }
                 if latest
                 else None
             )
             self._broadcast_state()
 
-        thread = threading.Thread(target=_read, name="twophoton-thorsync", daemon=True)
-        thread.start()
-        if wait:
-            thread.join(10)
-
-    def thorsync_warning(self, longest_take_s: float) -> str | None:
-        """An explicit warning when ThorSync would stop before a take of
-        *longest_take_s* — every ThorSync channel (timing, AirFlow, ...) would
-        be lost for the rest of it (real 2026-10-14: 320 s limit, 394 s takes)."""
+    def thorsync_warning(self, longest_take_s: float, *, synced: bool = False) -> str | None:
+        """An explicit warning when ThorSync would stop before the take ends —
+        every ThorSync channel (timing, AirFlow, ...) would be lost for the rest
+        of it (real 2026-10-14: 320 s limit, 394 s takes). A *synced* take lasts
+        as long as ThorImage records: its newest acquisition's plan, when known,
+        rather than the safety limit (which would warn on every take)."""
         info = self._thorsync
         limit = (info or {}).get("limit_s")
-        if not info or not limit or limit >= longest_take_s:
+        if not info or not limit:
             return None
-        return thorsync_limit_message(info["folder"], limit, longest_take_s)
+        source = None
+        if synced and info.get("planned_s"):
+            longest_take_s, source = info["planned_s"], info["planned_folder"]
+        if limit >= longest_take_s:
+            return None
+        return thorsync_limit_message(info["folder"], limit, longest_take_s, source)
 
     def _on_stop_report(self, report: dict) -> None:
-        """Reader-thread hook: the board's end-of-run report (just before 'D')."""
+        """Reader-thread hook: the board's end-of-run report (just before 'D').
+        Only a run this plugin saw trigger owns it: a late report from the
+        previous run must not land in the next take's metadata."""
+        if self._arduino_state != "triggered":
+            log.info("2-photon trigger: ignoring an end-of-run report outside a run: %s", report)
+            return
         self._stop_report = report
         log.info(
             "2-photon trigger: run ended (%s) after %.1f s — input saw %d rising "
@@ -536,7 +599,15 @@ class TwoPhotonPlugin(Plugin):
         self._set_arduino_state(state)
         if ends_take and self._controller is not None:
             log.info("2-photon trigger: ThorImage stopped — stopping the recording")
-            self._controller.stop_recording(abort=False)
+            # Never on this (serial reader) thread: stop_recording takes the
+            # controller lock, which a camera operation can hold for seconds,
+            # and the reader must keep draining the board meanwhile.
+            threading.Thread(
+                target=self._controller.stop_recording,
+                kwargs={"abort": False},
+                name="twophoton-stop",
+                daemon=True,
+            ).start()
 
     def _on_link_broken(self) -> None:
         """Reader-thread hook: the serial port died mid-session. Re-broadcast the
@@ -630,7 +701,7 @@ class TwoPhotonPlugin(Plugin):
         """Fallback when the sketch source is unavailable (no fingerprint):
         compatible unless the banner is a foreign name or a different version."""
         if not banner:
-            return True
+            return False  # unidentified: it might be a v1 board (see _verify_identity)
         name, version, _ = fw.parse_banner(banner)
         if name != _EXPECTED_BANNER.upper():
             return False
@@ -639,16 +710,26 @@ class TwoPhotonPlugin(Plugin):
     def _verify_identity(self) -> None:
         """Read the firmware banner and classify it against the sketch source.
 
-        An OUTDATED or UNIDENTIFIED board still arms fine (the arm protocol is
-        unchanged); a foreign banner or wrong version disables arming and offers a
-        reflash."""
+        An OUTDATED board (protocol v2, other build) still arms fine. An
+        UNIDENTIFIED board does not: the protocol-v2 arm packet is 9 bytes, and
+        a silent v1 board would read its two extra bytes as commands (cancel or
+        re-arm) — so it is refused with an explicit reason (reconnect, or
+        reflash with `octacam flash`), like a foreign banner or wrong version."""
         banner = self._link.identify()
         self._firmware = banner
         check = self._fw.classify(banner)
         if check is None:
             self._firmware_ok = self._banner_arm_compatible(banner)
             return
-        self._firmware_ok = fw.arm_compatible(check)
+        self._firmware_ok = fw.arm_compatible(check) and (
+            check.state is not fw.FirmwareState.UNIDENTIFIED
+        )
+        if check.state is fw.FirmwareState.UNIDENTIFIED:
+            self._last_error = (
+                f"the board on {self.device} did not identify itself — not arming it "
+                "(an old protocol-v1 board would misread the arm packet); reconnect, "
+                "or reflash with `octacam flash`"
+            )
         if check.needs_flash and check.state is not fw.FirmwareState.OUTDATED:
             log.warning("2-photon trigger: %s — %s; run `octacam flash` to update.",
                         self.device, check.detail)
@@ -769,7 +850,10 @@ class TwoPhotonPlugin(Plugin):
             )
             return
         longest_s = arm.duration_ms / 1000
-        warning = self.thorsync_warning(longest_s)
+        reading = self._thorsync_thread
+        if self._thorsync is None and reading is not None:
+            reading.join(5)  # headless `record` arms right after startup's read began
+        warning = self.thorsync_warning(longest_s, synced=self._match_this_take)
         if warning:
             log.warning("2-photon trigger: %s", warning)
             emit = getattr(self._controller, "_event", None)

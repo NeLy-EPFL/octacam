@@ -35,6 +35,7 @@ render can never fail a transfer.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -167,7 +168,15 @@ class _TwoPhotonReader:
     def __init__(self, stacks: dict[str, list[Path]], projection: str):
         import tifffile
 
-        self._files = {c: [tifffile.TiffFile(p) for p in ps] for c, ps in stacks.items()}
+        self._files: dict = {}
+        try:
+            for c, ps in stacks.items():
+                self._files[c] = []
+                for p in ps:
+                    self._files[c].append(tifffile.TiffFile(p))
+        except BaseException:
+            self.close()  # don't leak the handles opened so far
+            raise
         self.n_planes = max(len(v) for v in self._files.values())
         self.n_frames = min(len(f.pages) for v in self._files.values() for f in v)
         self._projection = projection
@@ -216,12 +225,23 @@ def _probe_size(ffmpeg: str, video: Path) -> tuple[int, int] | None:
     return (int(m[1]), int(m[2])) if m else None
 
 
+# The take's own CaptureOn segment counts one Cameras edge per behavior frame
+# (±1 for the grab threads' stop race), like the matcher's verified tier.
+_SEGMENT_TOLERANCE = 2
+
+
 def _pick_segment(sync_dir: Path, frame_counts: list[int]):
+    """The CaptureOn segment that is this take's own — its Cameras edges match
+    the take's frame count. Never merely the closest: a take whose own segment
+    is missing (ThorSync cut off before it ended) must not be aligned on
+    another capture's clock."""
     from octacam.twophoton_signals import camera_edge_diff, read_capture_segments
 
     segments = read_capture_segments(sync_dir) or []
     ranked = [
-        (d, s) for s in segments if (d := camera_edge_diff(s, frame_counts)) is not None
+        (d, s)
+        for s in segments
+        if (d := camera_edge_diff(s, frame_counts)) is not None and d <= _SEGMENT_TOLERANCE
     ]
     if not ranked:
         return None
@@ -279,7 +299,19 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
     ]
     segment = _pick_segment(inputs.sync_dir, frame_counts)
     if segment is None:
-        log.info("synced render: skipping %s (no verified CaptureOn segment)", take_dir)
+        from octacam.twophoton_signals import describe_cut_off, episode_cut_off
+
+        cut = episode_cut_off(inputs.sync_dir)
+        if cut is not None:
+            log.warning(
+                "synced render: skipping %s — %s",
+                take_dir, describe_cut_off(inputs.sync_dir.name, cut),
+            )
+        else:
+            log.info(
+                "synced render: skipping %s (no CaptureOn segment in %s matches the "
+                "take's %s frames)", take_dir, inputs.sync_dir.name, frame_counts[:1],
+            )
         return None
     edges = read_segment_edge_times(inputs.sync_dir, segment)
     if edges is None or not edges[0] or not edges[1]:
@@ -419,12 +451,21 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
                     log.info("synced render: %s %d%%", out.name, round(100 * k / n_out))
         except BrokenPipeError:
             ok = False
+        except BaseException:
+            # Any other failure mid-render (an unreadable page, a cancel):
+            # stop the encoder before it finalizes a truncated but valid file.
+            encode.kill()
+            ok = False
+            raise
         finally:
-            encode.stdin.close()
+            with contextlib.suppress(OSError):
+                encode.stdin.close()
             decode.stdout.close()
             decode.kill()
             decode.wait()
             ok = encode.wait() == 0 and ok
+            if not ok:
+                tmp.unlink(missing_ok=True)
         if not ok:
             log.error("synced render: ffmpeg failed for %s", take_dir)
             tmp.unlink(missing_ok=True)

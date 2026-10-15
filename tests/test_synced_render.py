@@ -162,3 +162,46 @@ def test_frame_averaged_capture_aligns_each_frame_to_its_scans(tmp_path, caplog)
     assert out is not None
     assert _frame_count(out) == 20
     assert "FrameOut edges" not in caplog.text
+
+
+def test_render_skips_a_take_whose_own_segment_is_missing(tmp_path, caplog):
+    # Audit 2026-10-15: the closest segment was used whatever its distance, so
+    # a take whose own segment was missing (ThorSync cut off) got aligned on
+    # another capture's clock. Now: no matching segment, no render.
+    take = _make_take(tmp_path, planes=1, timepoints=10, behavior_frames=40)
+    summary = take / "recording_summary.json"
+    summary.write_text(json.dumps({"cameras": [{"name": "camera_F", "frames": 4000}]}))
+    assert render_synced_video(take, SyncedRenderOptions(fps=10, height=64)) is None
+    assert not (take / "Renderings" / SYNCED_VIDEO_FILENAME).exists()
+    assert not list((take / "Renderings").glob("*.partial.mp4"))
+
+
+def test_failed_render_leaves_no_partial_file(tmp_path, monkeypatch):
+    from octacam import synced_render as sr
+
+    take = _make_take(tmp_path, planes=1, timepoints=10)
+
+    real_frame = sr._TwoPhotonReader.frame
+    calls = {"n": 0}
+    started = {"encode": False}
+    real_popen = sr.subprocess.Popen
+
+    def popen(cmd, *a, **kw):
+        if "-i" in cmd and cmd[cmd.index("-i") + 1] == "-":
+            started["encode"] = True
+        return real_popen(cmd, *a, **kw)
+
+    def frame_failing_once_encoding(self, index, smooth_px=0):
+        if started["encode"]:
+            calls["n"] += 1
+            if calls["n"] > 3:  # a few frames already encoded
+                raise RuntimeError("unreadable page")
+        return real_frame(self, index, smooth_px)
+
+    monkeypatch.setattr(sr.subprocess, "Popen", popen)
+    monkeypatch.setattr(sr._TwoPhotonReader, "frame", frame_failing_once_encoding)
+    with pytest.raises(RuntimeError):
+        sr._render(take, SyncedRenderOptions(fps=10, height=64), force=False)
+    assert started["encode"]
+    names = sorted(p.name for p in (take / "Renderings").glob("*.mp4"))
+    assert names == ["grid.mp4"]  # no synced_2p.mp4, no synced_2p.partial.mp4

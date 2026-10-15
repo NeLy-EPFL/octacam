@@ -1607,6 +1607,7 @@ def _doctor_thorsync_limit(report: _Report, cfg, options: dict) -> None:
         thorsync_limit_message,
     )
     from octacam.twophoton_signals import latest_thorsync_limit
+    from octacam.twophoton_transfer import latest_thorimage_plan
 
     source = Path(resolve_dir_template(cfg.transfer.twophoton.source))
     latest = latest_thorsync_limit(source)
@@ -1623,13 +1624,17 @@ def _doctor_thorsync_limit(report: _Report, cfg, options: dict) -> None:
         longest = float(options.get("max_duration_s", DEFAULT_MAX_DURATION_S))
     except (TypeError, ValueError):
         longest = DEFAULT_MAX_DURATION_S
+    take_source = None
     if match in (False, "false", "False", 0) and cfg.record is not None:
         # Fixed-duration takes: the configured duration is the longest.
         longest = duration_to_seconds(
             cfg.record.duration, cfg.record.duration_unit, cfg.record.fps
         )
+    elif (plan := latest_thorimage_plan(source)) is not None:
+        # Synced takes last as long as ThorImage records.
+        longest, take_source = plan[1], f"{plan[0].parent.name}/{plan[0].name}"
     if limit < longest:
-        report.add("warn", thorsync_limit_message(label, limit, longest))
+        report.add("warn", thorsync_limit_message(label, limit, longest, take_source))
     else:
         report.add("ok", f"ThorSync duration {limit:g} s (from {label}) covers the longest take")
 
@@ -2747,6 +2752,7 @@ def record(
     last_used = session_cache.load_last_used()
     if fps is None and last_used.get("fps") is not None:
         fps = last_used["fps"]
+    duration_typed = duration is not None  # vs. remembered / from config
     if duration is None and last_used.get("duration_s") is not None:
         duration = last_used["duration_s"]
     user_from_cache = user is None and bool(last_used.get("user"))
@@ -2867,6 +2873,21 @@ def record(
         # arms its trigger board — without this the external-trigger cameras wait
         # forever for a trigger that never fires). Empty -> None (no-op dispatch).
         plugin_params = plugins.default_start_params(settings.fps, settings.duration_s)
+        twophoton_slice = (plugin_params or {}).get("twophoton")
+        if twophoton_slice and twophoton_slice.get("match_thorimage"):
+            if duration_typed:
+                # An explicit --duration means exactly that long, not "until
+                # ThorImage stops" (the GUI's untick of "Synced with ThorImage").
+                twophoton_slice["match_thorimage"] = False
+                log.info(
+                    "2-photon: --duration %.0f s given — recording for exactly that "
+                    "long, not until ThorImage stops", settings.duration_s,
+                )
+            else:
+                log.info(
+                    "2-photon: recording until ThorImage stops (pass --duration for "
+                    "a fixed length)"
+                )
         result = controller.start_recording(
             confirm_overwrite=True, plugin_params=plugin_params or None
         )
@@ -4725,13 +4746,13 @@ def _sweep_unclaimed_twophoton(
     already_present = _already_present_2p_identities(dest_root)
 
     candidates = discover_twophoton_folders(source_root)
-    todo = [
+    unclaimed = [
         c
         for c in candidates
-        if is_settled(c, twophoton_cfg.settle_s)
-        and c.path.resolve() not in already_matched
+        if c.path.resolve() not in already_matched
         and twophoton_identity(c.path) not in already_present
     ]
+    todo = [c for c in unclaimed if is_settled(c, twophoton_cfg.settle_s)]
     fly_basenames = (
         _gather_fly_image_basenames(dest_root)
         if getattr(twophoton_cfg, "attribute_unclaimed_to_fly", True)
@@ -4741,7 +4762,10 @@ def _sweep_unclaimed_twophoton(
     n_copied = n_failed = 0
 
     pending = _pending_twophoton_takes(source_root)
-    if pending and todo:
+    # Folders a pending take matched but that are not all settled yet: neither
+    # paired now nor filed as 2P-only — the take gets them on a later run.
+    held: set[Path] = set()
+    if pending and unclaimed:
         pending_groups: dict[tuple, list] = {}
         for local_folder, take, record in pending:
             key = (
@@ -4753,17 +4777,24 @@ def _sweep_unclaimed_twophoton(
         for (match_window_s, verify_window_s, verify_with_signals), items in (
             pending_groups.items()
         ):
-            if not todo:
-                break
             takes = [take for _, take, _ in items]
             by_folder = {take.folder: (local_folder, record) for local_folder, take, record in items}
             batch = match_takes_to_twophoton_batch(
-                takes, todo, match_window_s, verify_window_s, verify_with_signals
+                takes, unclaimed, match_window_s, verify_window_s, verify_with_signals
             )
             for take_folder, matches in batch.items():
                 if not matches:
                     continue
                 local_folder, record = by_folder[take_folder]
+                writing = [m for m in matches if not is_settled(m.folder, twophoton_cfg.settle_s)]
+                if writing:
+                    held.update(m.folder.path.resolve() for m in matches)
+                    log.info(
+                        "2P sweep: %s still being written — pending take %s waits for it",
+                        ", ".join(m.folder.path.name for m in writing),
+                        local_folder,
+                    )
+                    continue
                 # The renamed-take lookup compares the exact recorded start.
                 dest = _current_take_dest(Path(record["dest"]), _take_start_s(local_folder))
                 _matched, ok_paths, n_failed_here = _finalize_twophoton_matches(
@@ -4796,6 +4827,8 @@ def _sweep_unclaimed_twophoton(
                         _report_denied_2p_deletes(denied)
                 claimed = {m.folder.path.resolve() for m in matches}
                 todo = [c for c in todo if c.path.resolve() not in claimed]
+                unclaimed = [c for c in unclaimed if c.path.resolve() not in claimed]
+    todo = [c for c in todo if c.path.resolve() not in held]
 
     if not todo:
         log.info("2P sweep: nothing new and settled under %s", source_root)
@@ -6624,13 +6657,20 @@ def _grid_and_transfer(
                         )
                 settled = [m for m in matches if is_settled(m.folder, settle_s)]
                 if len(settled) < len(matches):
+                    # Defer the whole take: pairing only the settled half (the
+                    # ThorSync folder, while ThorImage still writes its TIFFs)
+                    # lost the other half for good — it was later swept as
+                    # 2P-only. The pending sidecar lets the sweep finish it.
                     log.info(
-                        "2P transfer: %d matched folder(s) for %s not yet settled "
-                        "(still writing) — will retry on a later `octacam process` "
-                        "run, or the 2P-only sweep once it settles",
-                        len(matches) - len(settled),
+                        "2P transfer: %s still being written for %s — the take "
+                        "waits; a later `octacam process` run (or its sweep) pairs it",
+                        ", ".join(m.folder.path.name for m in matches if m not in settled),
                         folder,
                     )
+                    # Keep this run's sweep off them too (it would file the
+                    # settled half as 2P-only).
+                    matched_this_run.update(m.folder.path.resolve() for m in matches)
+                    settled = []
                 if not settled:
                     if not dry_run:
                         _write_twophoton_pending(

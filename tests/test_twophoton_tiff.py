@@ -402,3 +402,30 @@ def test_assemble_channel_stack_corrupt_source_file_fails_cleanly(tmp_path):
     assert not result.ok
     assert not dest.exists()
     assert not list(folder.glob("*.octacam-assemble-part*"))
+
+
+def test_plan_assembly_fastz_stopped_early_keeps_whole_volumes(tmp_path):
+    # Audit 2026-10-15: a FastZ capture stopped early was never assembled (its
+    # timepoint count had to equal the declared one). Now: whole volumes go in
+    # the per-plane stacks; a stop mid-volume leaves the first planes one
+    # frame longer — that frame stays out (copied loose), like a partial frame.
+    _write_experiment_xml(
+        tmp_path, timepoints=50, zsteps=4, zenable="0", streaming_enable="1", zfast="1",
+    )
+    _write_fastz_channel(tmp_path, "ChanA", zsteps=4, timepoints=30)
+    for z in (1, 2):  # stopped while scanning volume 31
+        _write_frame(tmp_path, "ChanA", (1, 1, z, 31), value=0)
+    plan = plan_assembly(tmp_path)
+    assert len(plan.ready) == 4
+    assert {(ch.frame_count, ch.declared_count) for ch in plan.ready} == {(30, 50)}
+    planned = {p for ch in plan.ready for p in ch.source_files}
+    assert tmp_path / "ChanA_001_001_001_031.tif" not in planned
+
+
+def test_plan_assembly_streaming_stopped_at_exactly_zsteps_frames_is_a_time_series(tmp_path):
+    # A streaming capture also carries an enabled ZStage (real Fly1_Streaming:
+    # steps="201"); stopped at exactly 201 frames it is still a time series.
+    _write_experiment_xml(tmp_path, timepoints=3000, zsteps=201, zenable="1", streaming_enable="1")
+    _write_streaming_channel(tmp_path, "ChanA", 201)
+    (ch,) = plan_assembly(tmp_path).channels
+    assert (ch.status, ch.axis, ch.frame_count, ch.declared_count) == ("ready", "T", 201, 3000)

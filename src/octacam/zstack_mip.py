@@ -113,12 +113,19 @@ def _write_png(path: Path, rgb) -> None:
     from octacam.writer import find_ffmpeg
 
     h, w, _ = rgb.shape
-    subprocess.run(
-        [find_ffmpeg(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
-         "-s", f"{w}x{h}", "-i", "-", "-frames:v", "1", str(path)],
-        input=rgb.tobytes(),
-        check=True,
-    )
+    # Temp then rename: a killed run must not leave a truncated PNG that the
+    # next run's "all outputs exist" check would accept as done.
+    tmp = path.with_name(f".{path.stem}.partial.png")
+    try:
+        subprocess.run(
+            [find_ffmpeg(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+             "-s", f"{w}x{h}", "-i", "-", "-frames:v", "1", "-f", "image2", str(tmp)],
+            input=rgb.tobytes(),
+            check=True,
+        )
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def render_zstack_mips(

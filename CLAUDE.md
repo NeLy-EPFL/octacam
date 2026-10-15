@@ -554,26 +554,22 @@ against a real 2P rig; the durable findings:
   seconds of the take's start, so the tight start window excludes it without
   reasoning about duration at all. This check only governs the *timestamp*
   tier — the verified tier's confidence never depends on timing shape at all.
-- **End time and duration are not synced today, and that's expected — not a
-  matching signal.** There is currently no signal that stops octacam when the
-  2P acquisition finishes (octacam and ThorImage/ThorSync each end
-  independently), so a genuine pair's end/duration routinely differs by tens
-  of seconds even when the start matched almost exactly — confirmed on real
-  data (`_end_gap_seconds`, `TwoPhotonMatch.end_gap_s`, `20–80s` on real
-  genuine pairs). This is carried in `twophoton_match.json`/the
-  reconciliation manifest purely for context (e.g. to validate a future fix),
-  **never** used to accept or reject a match. Fixing this — a signal that
-  stops octacam when ThorImage finishes — is a real, not-yet-implemented
-  follow-up (tracked in agent memory, not queued work). Separately: ThorImage
-  itself writes files in a burst after acquisition, not in real time —
-  confirmed by comparing a verified pairing's actual `FrameOut` edge timing
-  (from `Episode001.h5`, ground truth) against its own files' raw mtimes: the
-  real acquisition had already ended (per the DAQ) before the first `.tif`
-  appeared on disk, with the full write-out taking a further ~25–30s.
-  Irrelevant to a `SyncData`-verified match (edge count doesn't care about
-  file timestamps) and, now that `match_window_s` only looks at start, no
-  longer affects a timestamp-only `image`-kind match either — it just shows
-  up as a large, harmless `end_gap_s`.
+- **End time is never a matching signal.** A fixed-duration take ends
+  independently of ThorImage (end/duration routinely 20–80 s apart on real
+  pairs); a take synced with ThorImage (2026-10-14) ends ~2 s after it, but
+  either way `_end_gap_seconds`/`TwoPhotonMatch.end_gap_s` are informational
+  only. ThorImage also writes its TIFFs in a burst ~25–30 s *after* the
+  capture, so a ThorImage folder holds only `Experiment.xml` while acquiring
+  — `is_settled` therefore treats an image folder with no image file as
+  unsettled for 2 h (`_EMPTY_IMAGE_FOLDER_SETTLE_S`), and a take with any
+  unsettled match is deferred whole (pending sidecar), never paired half-way.
+- **Synced takes' camera pulses outlive the capture (found 2026-10-15).** The
+  board keeps triggering the cameras for `stop_idle_ms` after ThorImage's
+  `CaptureOn` falls (real SyncData166: 19618 pulses inside + 199 in the
+  1.98 s after = the take's 19817 frames), so a segment's camera count runs
+  to the next capture's rise, at most `_CAMERA_TAIL_S` (10 s) past the fall
+  (`CaptureSegment.cameras_end_sample`). Counting only inside the window
+  made every synced take miss the verified tier.
 - **Verified matching (`twophoton_signals.py`)**: whenever a `SyncData*`
   folder exists, its `Episode001.h5` records the Arduino's camera-trigger
   pulse on ThorSync's own DAQ clock (`DI/Cameras`) — confirmed on real data
@@ -826,6 +822,22 @@ against a real 2P rig; the durable findings:
   ThorSync's NI6363 `duration="320"` cap cut every ~394 s take's episode at
   32 M samples — `CaptureOn` never falls, no segment, so those fall back to
   start-time pairing and get no synced render.
+  **2P audit fixes (2026-10-15).** One ThorSync sample rate everywhere
+  (`thorsync_sample_rate`: active board first); a `CaptureOn` high at sample 0
+  rises at 0; the synced render only uses a segment within 2 camera pulses
+  of the take (`_SEGMENT_TOLERANCE`) — never merely the closest — and cleans
+  up its partial file on any failure; stopped-early FastZ stacks whole
+  volumes (`_plan_fastz_channel`; the cut volume's frames copy loose) and its
+  expected FrameOut edges are recorded volumes x (planes + flyback) x
+  averaging, tolerance one volume; a NAS-copied SyncData's start is its
+  settings file's mtime (the folder's is the copy time); pulse-count ties are
+  flagged ambiguous; episode segments are cached per process by size+mtime.
+  Plugin: the 'D' stop runs on its own thread (never the serial reader), a
+  STOP report only counts while triggered, `stop_idle_ms` >= 200 ms, an
+  UNIDENTIFIED board is not armed (a v1 board would misread the 9-byte
+  packet), the ThorSync check compares synced takes with the newest
+  streaming ThorImage plan (`latest_thorimage_plan`) and runs one reader at
+  a time, and headless `record --duration` means a fixed length.
   **ThorSync duration safeguards (2026-10-15, Matthias: "explicit is always
   better than implicit").** ThorSync stops at its active `<AcquireBoard
   duration>`. `twophoton_signals.episode_cut_off` = `CaptureOn` still high at

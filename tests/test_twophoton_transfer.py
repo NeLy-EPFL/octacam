@@ -864,3 +864,116 @@ def test_render_twophoton_manifest_lists_thorsync_cut_offs_as_warnings(tmp_path)
     # No cut-off: no warnings section at all.
     clean = render_twophoton_manifest("day", [_take("Fly1/001", 1000.0, 10.0)], [], source_reachable=True)
     assert "Warnings" not in clean
+
+
+def test_image_folder_without_images_is_not_settled_mid_acquisition(tmp_path):
+    # ThorImage writes no TIFF until the capture ends: a folder holding only
+    # its Experiment.xml is quiet for the whole take, not finished.
+    from octacam.twophoton_transfer import TwoPhotonFolder, is_settled
+
+    folder = tmp_path / "Fly1_Streaming"
+    folder.mkdir()
+    (folder / "Experiment.xml").write_text("<ThorImageExperiment/>")
+    (folder / "ChanA_Preview.tif").write_bytes(b"")  # previews don't count
+    entry = TwoPhotonFolder(path=folder, kind="image", start_time=0.0, last_mtime=1000.0)
+    assert not is_settled(entry, 300, now=1000.0 + 600)  # 10 min quiet, still capturing
+    assert is_settled(entry, 300, now=1000.0 + 3 * 3600)  # an aborted empty capture, later
+    (folder / "ChanA_001_001_001_001.tif").write_bytes(b"")
+    assert is_settled(entry, 300, now=1000.0 + 600)
+    sync = TwoPhotonFolder(path=tmp_path, kind="sync", start_time=0.0, last_mtime=1000.0)
+    assert is_settled(sync, 300, now=1000.0 + 600)
+
+
+def test_expected_frameout_edges_for_a_stopped_early_averaged_fastz(tmp_path):
+    # FrameOut pulses per scan: recorded volumes x (planes + flyback) x averaging.
+    from octacam.twophoton_transfer import (
+        thorimage_declared_frameout_edges,
+        thorimage_expected_frameout_edges,
+        thorimage_frameout_tolerance,
+        thorimage_planned_duration_s,
+    )
+
+    xml = tmp_path / "Experiment.xml"
+
+    def write(average_mode):
+        xml.write_text(
+            '<?xml version="1.0"?><ThorImageExperiment><Wavelengths>'
+            '<Wavelength name="ChanA" /></Wavelengths>'
+            f'<LSM frameRate="10" averageMode="{average_mode}" averageNum="2" />'
+            '<ZStage steps="5" enable="0" />'
+            '<Streaming enable="1" zFastEnable="1" flybackFrames="1" />'
+            '<Timelapse timepoints="500" /></ThorImageExperiment>'
+        )
+
+    write(0)
+    assert thorimage_expected_frameout_edges(xml) == 3000  # nothing on disk: declared
+    for z in range(1, 6):
+        for t in range(1, 301):
+            (tmp_path / f"ChanA_001_001_{z:03d}_{t:03d}.tif").write_bytes(b"")
+    assert thorimage_expected_frameout_edges(xml) == 300 * 6  # stopped at 300 volumes
+    assert thorimage_declared_frameout_edges(xml) == 3000
+    assert thorimage_frameout_tolerance(xml) == 6  # a stop can cut a volume short
+    write(1)
+    assert thorimage_expected_frameout_edges(xml) == 300 * 6 * 2
+    assert thorimage_frameout_tolerance(xml) == 12
+    assert thorimage_planned_duration_s(xml) == pytest.approx(500 * 6 * 2 / 10)
+
+
+def test_latest_thorimage_plan_reads_the_newest_streaming_acquisition(tmp_path):
+    import os
+
+    from octacam.twophoton_transfer import latest_thorimage_plan
+
+    def acquisition(name, timepoints, mtime):
+        folder = tmp_path / "PAM7xCI80" / name
+        folder.mkdir(parents=True)
+        xml = folder / "Experiment.xml"
+        xml.write_text(
+            '<?xml version="1.0"?><ThorImageExperiment><LSM frameRate="7.7" />'
+            f'<Timelapse timepoints="{timepoints}" /></ThorImageExperiment>'
+        )
+        os.utime(xml, (mtime, mtime))
+        return folder
+
+    streaming = acquisition("Fly5_Streaming", 3000, 1_000)
+    acquisition("Fly5_Zstack", 1, 2_000)  # newer, but a Z-stack: no time plan
+    folder, seconds = latest_thorimage_plan(tmp_path)
+    assert folder == streaming
+    assert seconds == pytest.approx(3000 / 7.7)
+
+
+def test_sync_folder_start_survives_a_copy(tmp_path):
+    # On the NAS a folder's own mtime is the copy time; ThorSync's settings
+    # file keeps the acquisition's (copystat), so a 2P-only ThorSync folder
+    # is still ordered by when it was recorded.
+    import os
+
+    from octacam.twophoton_transfer import classify_twophoton_folder
+
+    folder = tmp_path / "SyncData184"
+    folder.mkdir()
+    (folder / "ThorRealTimeDataSettings.xml").write_text("<ThorData/>")
+    (folder / "Episode001.h5").write_bytes(b"")
+    os.utime(folder / "ThorRealTimeDataSettings.xml", (1_000, 1_000))
+    os.utime(folder, (9_000, 9_000))  # the copy
+    assert classify_twophoton_folder(folder).start_time == 1_000
+
+
+def test_batch_flags_two_sync_folders_fitting_equally_well(tmp_path):
+    # Two ThorSync folders with the take's exact camera pulse count: the start
+    # gap decides, and the pick is flagged ambiguous for audit (before, only an
+    # exact float tie of the gap flagged anything — never in practice).
+    take = TakeInfo(folder=tmp_path / "rec", start_time=1000.0, duration_s=10.0,
+                    camera_frame_counts=[500])
+    folders = [
+        _make_verifiable_sync_folder(
+            tmp_path, "exp", name, mtime=1000.0 + gap, capture_ranges=[(100, 4900)],
+            cameras_per_segment=[500], frameout_per_segment=[0],
+        )
+        for name, gap in (("SyncData001", 2.0), ("SyncData002", 40.0))
+    ]
+    (match,) = match_takes_to_twophoton_batch(
+        [take], folders, match_window_s=5.0, verify_window_s=600.0, verify_with_signals=True,
+    )[take.folder]
+    assert match.folder.path.name == "SyncData001"
+    assert match.ambiguous is True

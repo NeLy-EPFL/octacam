@@ -5,8 +5,10 @@ assumption — a sibling ``2p``/``behData`` folder pair at an identical relative
 path — no longer holds: ThorSync/ThorImage write flat, auto-incrementing
 folders (``SyncData102``, ``Fly1_004``, ...) directly under an experiment
 folder on the Windows share, completely decoupled from octacam's own
-``<date>_/<Fly>/<take>`` naming. The only thing that reliably correlates a
-behavior take with its 2P counterpart is wall-clock time overlap.
+``<date>_/<Fly>/<take>`` naming. A take is paired with its 2P counterpart by
+the ThorSync DAQ signals when a ``SyncData`` folder exists (the camera pulse
+count equals the take's frame count — see ``twophoton_signals``), else by
+start time (within ``match_window_s``).
 
 Two folder kinds are recognized, distinguished structurally rather than by a
 fixed naming scheme (ThorImage's own folder name is operator-chosen and
@@ -35,6 +37,7 @@ calling in), and does not perform any file transfer itself — see
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -82,8 +85,8 @@ class TwoPhotonMatch:
     # folder for this session), or found no matching edge count.
     confidence: str = "timestamp"
     # Informational only (see _end_gap_seconds) — never gates a match. Signed;
-    # positive means the 2P folder's last write landed after the take ended,
-    # expected today since nothing stops octacam when the 2P side finishes.
+    # positive means the 2P folder's last write landed after the take ended
+    # (ThorImage writes its TIFFs ~25-30 s after the capture).
     end_gap_s: float = 0.0
 
 
@@ -92,7 +95,9 @@ class TakeInfo:
     """One behavior take, as much as the matcher needs to know about it."""
 
     folder: Path  # the local recording folder (used only as a dict key)
-    start_time: float  # unix seconds (recording_summary.json's start_time_ns)
+    # unix seconds: the take's first frame (cli._take_match_start_s), not the
+    # moment Start was pressed — octacam is armed before ThorImage starts.
+    start_time: float
     duration_s: float
     camera_frame_counts: list[int]  # per-camera recorded frame counts
 
@@ -114,6 +119,55 @@ def _thorimage_start_time(experiment_xml: Path) -> float | None:
         return float(u_time)
     except ValueError:
         return None
+
+
+def thorimage_planned_duration_s(experiment_xml: Path) -> float | None:
+    """How long a streaming ThorImage acquisition is set to run, if not stopped
+    early: declared timepoints x scans per timepoint (FastZ planes + flyback,
+    frame averaging) / ``LSM frameRate`` (real: 3000 x 1 / 7.7 Hz = 390 s for
+    394 s takes). None for a single-timepoint capture (Z-stack) or when a
+    field is missing."""
+    timepoints = thorimage_timepoints(experiment_xml)
+    if not timepoints or timepoints <= 1:
+        return None
+    try:
+        lsm = ET.parse(experiment_xml).getroot().find("LSM")
+        frame_rate = float(lsm.get("frameRate", "0")) if lsm is not None else 0.0
+    except (ET.ParseError, OSError, ValueError):
+        return None
+    if frame_rate <= 0:
+        return None
+    scans = (thorimage_declared_frameout_edges(experiment_xml) or timepoints) * (
+        thorimage_frame_average(experiment_xml)
+    )
+    return scans / frame_rate
+
+
+def thorimage_declared_frameout_edges(experiment_xml: Path) -> int | None:
+    """FrameOut edges the *declared* acquisition would record, before any
+    early stop or frame averaging: timepoints, or for FastZ timepoints x
+    (planes + flyback)."""
+    timepoints = thorimage_timepoints(experiment_xml)
+    if timepoints is None:
+        return None
+    geometry = _fastz_geometry(experiment_xml)
+    return timepoints * (geometry[0] + geometry[1]) if geometry else timepoints
+
+
+def latest_thorimage_plan(source_root: Path) -> tuple[Path, float] | None:
+    """``(newest streaming ThorImage folder, its planned duration)`` under
+    *source_root*'s experiment folders — what ThorImage is set to record next,
+    as far as the share tells. None when there is none."""
+    try:
+        xmls = [x for x in source_root.glob(f"*/*/{EXPERIMENT_XML_FILENAME}") if x.is_file()]
+        ranked = sorted(xmls, key=lambda x: x.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    for xml in ranked[:20]:
+        planned = thorimage_planned_duration_s(xml)
+        if planned:
+            return xml.parent, planned
+    return None
 
 
 def thorimage_timepoints(experiment_xml: Path) -> int | None:
@@ -139,44 +193,48 @@ def thorimage_timepoints(experiment_xml: Path) -> int | None:
 def thorimage_expected_frameout_edges(experiment_xml: Path) -> int | None:
     """How many ``FrameOut`` edges ThorSync should record for this ThorImage
     acquisition — what a verified segment's edge count is compared against.
-    A frame-averaged streaming capture scans N times per saved frame
-    (:func:`thorimage_frame_average`), so that count is multiplied by N.
 
-    ``FrameOut`` pulses once per *scanned frame*, not per timepoint. For a
-    plain streaming capture those are the same (``timepoints``), but a FastZ
-    (simultaneous multi-plane) capture scans every Z plane plus the piezo's
-    flyback frame(s) per timepoint — confirmed on real data (2026-10-07,
-    ``AllPPL1xCI80``): ``timepoints=500, ZStage steps=5, flybackFrames=1``
-    recorded exactly 3000 edges (500 x 6), and 300 x 6 = 1800 likewise.
-    Comparing against bare ``timepoints`` made every FastZ capture fail
-    verification. None if missing/unparseable."""
+    ``FrameOut`` pulses once per *scan*: per timepoint that is 1 for a plain
+    stream, every Z plane plus the piezo's flyback frame(s) for FastZ
+    (confirmed 2026-10-07, ``AllPPL1xCI80``: 500 timepoints x (5 + 1) = 3000
+    edges), times ``averageNum`` with frame averaging (2026-10-14 Fly4/003:
+    476 frames x 4 ≈ 1906 edges). Counted over the timepoints actually
+    recorded — fewer than declared when the capture was stopped early (since
+    octacam stops with ThorImage, a real take). Z-stacks (one timepoint) are
+    matched by :func:`thorimage_zstack_signature` instead. None if
+    missing/unparseable."""
     timepoints = thorimage_timepoints(experiment_xml)
     if timepoints is None:
         return None
+    if timepoints <= 1:
+        return timepoints  # Z-stacks: see thorimage_zstack_signature
+    geometry = _fastz_geometry(experiment_xml)
+    planes, scans_per_timepoint = (
+        (geometry[0], geometry[0] + geometry[1]) if geometry else (1, 1)
+    )
+    recorded = _timepoints_recorded(experiment_xml.parent, timepoints, planes)
+    return recorded * scans_per_timepoint * thorimage_frame_average(experiment_xml)
+
+
+def _fastz_geometry(experiment_xml: Path) -> tuple[int, int] | None:
+    """``(planes, flyback frames)`` for a FastZ (``Streaming zFastEnable``)
+    capture, else None."""
     try:
         root = ET.parse(experiment_xml).getroot()
     except (ET.ParseError, OSError):
-        return timepoints
-    streaming_el = root.find("Streaming")
-    zstage_el = root.find("ZStage")
-    fastz = (
-        streaming_el is not None
-        and streaming_el.get("enable") == "1"
-        and streaming_el.get("zFastEnable") == "1"
-        and zstage_el is not None
-    )
-    if not fastz or streaming_el is None or zstage_el is None:
-        if timepoints <= 1:
-            return timepoints  # Z-stacks: see thorimage_zstack_signature
-        return _frames_recorded(experiment_xml.parent, timepoints) * thorimage_frame_average(
-            experiment_xml
-        )
+        return None
+    streaming_el, zstage_el = root.find("Streaming"), root.find("ZStage")
+    if (
+        streaming_el is None
+        or zstage_el is None
+        or streaming_el.get("enable") != "1"
+        or streaming_el.get("zFastEnable") != "1"
+    ):
+        return None
     try:
-        steps = int(zstage_el.get("steps", "1"))
-        flyback = int(streaming_el.get("flybackFrames", "0"))
+        return int(zstage_el.get("steps", "1")), int(streaming_el.get("flybackFrames", "0"))
     except ValueError:
-        return timepoints
-    return timepoints * (steps + flyback)
+        return None
 
 
 def thorimage_frame_average(experiment_xml: Path) -> int:
@@ -200,17 +258,20 @@ def thorimage_frame_average(experiment_xml: Path) -> int:
 def thorimage_frameout_tolerance(experiment_xml: Path) -> int:
     """Allowed ``|FrameOut edges - expected|`` for this capture: an averaged
     capture stopped early can end mid-group, leaving up to N-1 scans that
-    never became a saved frame, plus the one being scanned at the stop."""
-    return max(_VERIFY_TOLERANCE, thorimage_frame_average(experiment_xml))
+    never became a saved frame, plus the one being scanned at the stop — for
+    FastZ, a whole volume's scans."""
+    geometry = _fastz_geometry(experiment_xml)
+    scans_per_timepoint = geometry[0] + geometry[1] if geometry else 1
+    return max(_VERIFY_TOLERANCE, scans_per_timepoint * thorimage_frame_average(experiment_xml))
 
 
-def _frames_recorded(folder: Path, declared: int) -> int:
-    """Frames a streaming capture actually wrote — fewer than the *declared*
-    timepoints when the acquisition was stopped early (a real, usable take
-    since octacam stops with ThorImage, 2026-10-14), and ``FrameOut`` only
-    pulses for frames actually scanned. Counted from the first channel's
-    per-frame files; *declared* when there are none (already assembled, or
-    an unreadable folder)."""
+def _timepoints_recorded(folder: Path, declared: int, planes: int = 1) -> int:
+    """Timepoints a streaming capture actually wrote — fewer than the
+    *declared* ones when it was stopped early (a real, usable take since
+    octacam stops with ThorImage, 2026-10-14). Counted from the first
+    channel's per-frame files (one per plane per timepoint, whole volumes
+    only); *declared* when there are none (already assembled, or an
+    unreadable folder)."""
     from octacam.twophoton_tiff import _matching_frame_files, _thorimage_channel_names
 
     if declared <= 1:
@@ -219,7 +280,7 @@ def _frames_recorded(folder: Path, declared: int) -> int:
     if not channels:
         return declared
     try:
-        n = len(_matching_frame_files(folder, channels[0]))
+        n = len(_matching_frame_files(folder, channels[0])) // max(planes, 1)
     except OSError:
         return declared
     return n if 0 < n < declared else declared
@@ -318,7 +379,15 @@ def classify_twophoton_folder(candidate: Path) -> TwoPhotonFolder | None:
             start = candidate.stat().st_mtime
         return TwoPhotonFolder(candidate, "image", start, _folder_last_mtime(candidate))
     if candidate.name.startswith(SYNC_FOLDER_PREFIX):
-        start = candidate.stat().st_mtime
+        # ThorSync writes its settings file once, at the start: on the share
+        # its mtime equals the folder's (real data: to the 0.1 s), and unlike
+        # the folder's, a copy keeps it — on the NAS the folder's own mtime is
+        # the copy time, which misordered a 2P-only Z-stack's RecordingN.
+        settings = candidate / "ThorRealTimeDataSettings.xml"
+        try:
+            start = settings.stat().st_mtime
+        except OSError:
+            start = candidate.stat().st_mtime
         return TwoPhotonFolder(candidate, "sync", start, _folder_last_mtime(candidate))
     return None
 
@@ -344,14 +413,41 @@ def discover_twophoton_folders(source_root: Path) -> list[TwoPhotonFolder]:
     return found
 
 
+# How long an image folder with no image file at all must stay quiet before it
+# counts as settled: longer than any acquisition (twophoton max_duration_s
+# defaults to 1 h), since ThorImage writes no TIFF until the capture ends.
+_EMPTY_IMAGE_FOLDER_SETTLE_S = 2 * 3600.0
+
+
+def _has_image_data(folder: Path) -> bool:
+    """Whether a ThorImage folder holds any image file besides its previews."""
+    try:
+        with os.scandir(folder) as entries:
+            return any(
+                e.name.lower().endswith((".tif", ".tiff")) and "_Preview" not in e.name
+                for e in entries
+            )
+    except OSError:
+        return False
+
+
 def is_settled(folder: TwoPhotonFolder, settle_s: float, now: float | None = None) -> bool:
     """Whether *folder* has been mtime-quiescent for at least *settle_s*.
 
     Neither ThorSync nor ThorImage leaves a definitive "done" marker (see
     module docstring) — this is the best available signal, same idea as the
-    legacy script's delay-based check."""
+    legacy script's delay-based check. One exception: ThorImage writes no
+    TIFF until the capture ends, so mid-acquisition its folder holds only an
+    ``Experiment.xml`` written at the start — quiet for the whole capture.
+    Such a folder only counts as settled after
+    ``_EMPTY_IMAGE_FOLDER_SETTLE_S`` (an aborted, empty capture still gets
+    transferred, later), so a sweep running during a long take never copies
+    it half-written and then skips the complete one as "already present"."""
     now = time.time() if now is None else now
-    return (now - folder.last_mtime) >= settle_s
+    quiet_s = now - folder.last_mtime
+    if folder.kind == "image" and not _has_image_data(folder.path):
+        return quiet_s >= max(settle_s, _EMPTY_IMAGE_FOLDER_SETTLE_S)
+    return quiet_s >= settle_s
 
 
 def _start_gap_seconds(take_start: float, candidate: TwoPhotonFolder) -> float:
@@ -364,20 +460,19 @@ def _start_gap_seconds(take_start: float, candidate: TwoPhotonFolder) -> float:
     a couple of seconds of each other, not tens of seconds. Confirmed on
     real data: real matched pairs across two independent experiments showed
     start diffs of 0.5-9.6s (one 36s outlier on a session's very first
-    pairing), regardless of `end`/duration, which routinely differ by tens of
-    seconds today — there is no signal that stops octacam when the 2P
-    acquisition finishes, so the two ends drift independently (a separate,
-    not-yet-implemented fix). See :func:`_end_gap_seconds` for that
-    (informational-only) side."""
+    pairing), regardless of `end`/duration. Since 2026-10-14 a synced take
+    also stops with ThorImage, but a fixed-duration one still ends
+    independently, so the end never decides. See :func:`_end_gap_seconds`
+    for that (informational-only) side."""
     return abs(candidate.start_time - take_start)
 
 
 def _end_gap_seconds(take_end: float, candidate: TwoPhotonFolder) -> float:
     """How far *candidate*'s last write landed from the take's own computed
     end — signed (positive: the 2P folder finished writing after the take
-    ended, the expected direction today). Purely informational: octacam and
-    the 2P acquisition currently stop independently (no stop signal yet), so
-    this is expected to differ and must never gate a match — see
+    ended — ThorImage writes its TIFFs after the capture). Purely
+    informational: a fixed-duration take stops independently of ThorImage,
+    so this can differ by a lot and must never gate a match — see
     :func:`_start_gap_seconds` for the one criterion that does."""
     return candidate.last_mtime - take_end
 
@@ -417,9 +512,8 @@ def match_take_to_twophoton(
     snapshot's own start essentially never coincidentally lands within a few
     seconds of the take's start, so the tight start window excludes it
     without needing to compare duration at all. End time and duration are
-    **not** part of this decision — octacam and the 2P acquisition currently
-    stop independently (no stop signal yet, a separate not-yet-implemented
-    fix), so they're expected to differ and are only carried informationally
+    **not** part of this decision — a fixed-duration take stops independently
+    of ThorImage, so they can differ and are only carried informationally
     (:func:`_end_gap_seconds`, ``TwoPhotonMatch.end_gap_s``).
 
     Returns 0-2 matches — at most one per kind (``sync``/``image``); never
@@ -535,9 +629,10 @@ def match_takes_to_twophoton_batch(
             if ranked:
                 ranked.sort(key=lambda r: (r[0], r[1]))
                 best_diff, best_gap, best_folder, best_idx = ranked[0]
-                tied = sum(
-                    1 for d, g, *_ in ranked if d == best_diff and g == best_gap
-                )
+                # Ambiguous when another folder fits the pulse count equally
+                # well — the start gap then decided (worth auditing). Exact
+                # float gap ties never happen, so they flagged nothing.
+                tied = len({id(f) for d, _g, f, *_ in ranked if d == best_diff})
                 matches.append(
                     TwoPhotonMatch(
                         folder=best_folder,
@@ -580,7 +675,7 @@ def match_takes_to_twophoton_batch(
             if image_ranked:
                 image_ranked.sort(key=lambda r: (r[0], r[1]))
                 best_diff, best_gap, best_folder = image_ranked[0]
-                tied = sum(1 for d, g, _ in image_ranked if d == best_diff and g == best_gap)
+                tied = len({id(f) for d, _g, f in image_ranked if d == best_diff})
                 matches.append(
                     TwoPhotonMatch(
                         folder=best_folder,

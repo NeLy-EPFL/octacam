@@ -116,6 +116,29 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **2P audit fixes (data-loss risks first).**
+  - A take synced with ThorImage now pairs with its ThorSync recording by
+    trigger signal again: the board keeps triggering the cameras ~2 s after
+    the capture ends, and those pulses were not counted (every synced take
+    fell back to start-time pairing).
+  - A take whose ThorImage folder is still being written waits as a whole
+    instead of pairing only its ThorSync folder (the image folder was then
+    filed as 2P-only for good); an image folder with no image file yet is
+    not "settled" for 2 h, so a sweep during a long take never copies it
+    half-written.
+  - FastZ captures stopped early are stacked (whole volumes) and verified;
+    frame-averaged FastZ counts match between pairing and rendering.
+  - The synced video uses the take's own ThorSync segment only (never a
+    nearby capture's), the active board's sample rate, and leaves no partial
+    file behind on failure; Z-stack PNGs are written atomically.
+  - 2-Photon plugin: the stop no longer runs on the serial reader thread; a
+    late end-of-run report can't land in the next take; `stop_idle_ms` has a
+    200 ms floor; a board that didn't identify itself is not armed; synced
+    takes are checked against ThorImage's own acquisition length; `octacam
+    record --duration N` records exactly N s.
+  - ThorSync folders keep their recording time on the NAS; equally good
+    matches are flagged ambiguous; each ThorSync episode is read once per run.
+
 - **2P takes armed before ThorImage started now pair with their imaging
   data.** A take's `start_time_ns` is when Start was pressed; with octacam
   armed first, the first frame comes only when ThorImage starts — 23 s later

@@ -4941,3 +4941,71 @@ def test_doctor_checks_thorsync_duration_against_the_longest_take(tmp_path, dura
     else:
         assert "ThorSync is set to stop" not in out
         assert "covers the longest take" in out
+
+
+def test_take_waits_whole_while_one_2p_folder_is_still_written(tmp_path, monkeypatch):
+    # Audit 2026-10-15: with the ThorSync folder settled but ThorImage still
+    # writing its TIFFs, only the sync folder was paired; the image folder was
+    # later swept as 2P-only — the pair lost for good. Now the take waits.
+    pytest.importorskip("tifffile")
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=take_start + 1)
+    image = _make_image_folder_2p(source_root, "MB247_CI63", "Fly1", u_time=take_start + 1, n_frames=4)
+    now = time.time()
+    for p in image.iterdir():  # ThorImage is still writing
+        os.utime(p, (now, now))
+    folder = tmp_path / "rec"
+    _armed_recording(folder, source_root=source_root, dest_root=dest_root, take_start=take_start)
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / folder.name / "2P").exists()  # nothing paired half-way
+    assert (folder / "twophoton_pending.json").is_file()
+    assert not (dest_root / "2p_only").exists()  # nor the sync folder swept as 2P-only
+    assert "still being written" in " ".join(result.output.split())
+
+    for p in image.iterdir():  # ThorImage finished long ago
+        os.utime(p, (take_start + 30, take_start + 30))
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert (dest_root / folder.name / "2P" / "SyncData102" / "Episode001.h5").exists()
+    assert (dest_root / folder.name / "2P" / "Fly1" / "ChanA.tif").exists()
+    assert not (folder / "twophoton_pending.json").exists()
+
+
+@pytest.mark.parametrize(("args", "match"), [((), True), (("--duration", "60"), False)])
+def test_record_explicit_duration_is_not_overridden_by_thorimage(tmp_path, monkeypatch, args, match):
+    # Audit 2026-10-15: with the twophoton plugin, `record --duration 60`
+    # silently ran until ThorImage stopped (synced is the default). A typed
+    # duration now means exactly that long; without one, ThorImage decides.
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    _record_harness(monkeypatch, tmp_path)
+
+    class Plugins:
+        plugins: list = []
+
+        def setup_all(self):
+            pass
+
+        def teardown_all(self):
+            pass
+
+        def default_start_params(self, fps, duration_s):
+            return {"twophoton": {"fps": fps, "duration_ms": 1000, "match_thorimage": True}}
+
+    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: Plugins())
+    started = {}
+
+    def start_recording(self, *a, **k):
+        started.update(k)
+        return SimpleNamespace(ok=True, message="")
+
+    monkeypatch.setattr("octacam.controller.RecordingController.start_recording", start_recording)
+    result = runner.invoke(app, ["record", str(tmp_path), *args])
+    assert result.exit_code == 0, result.output
+    assert started["plugin_params"]["twophoton"]["match_thorimage"] is match

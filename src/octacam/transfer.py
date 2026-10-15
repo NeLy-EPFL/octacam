@@ -179,6 +179,9 @@ def _stream_copy(
     return h.hexdigest() if h is not None else None
 
 
+_SWEPT_DIRS: set[Path] = set()
+
+
 def _sweep_stale_temps(final: Path) -> None:
     """Remove *final*'s own ORPHANED temps left by a hard kill / power loss.
 
@@ -188,8 +191,16 @@ def _sweep_stale_temps(final: Path) -> None:
     cleaned on a later run.  The leading ``.`` in the pattern means a promoted
     final file can never match.
     """
+    # Once per destination folder per process, for all of its files at once:
+    # globbing the folder before every file was O(n^2) over a 12k-frame
+    # per-file 2P copy on network storage. A temp that becomes stale later in
+    # the same run is a genuine orphan of *this* run's crash, reaped next run.
+    directory = final.parent
+    if directory in _SWEPT_DIRS:
+        return
+    _SWEPT_DIRS.add(directory)
     cutoff = time.time() - _STALE_TEMP_AGE_S
-    for stale in final.parent.glob(f".{final.name}{_TEMP_INFIX}.*"):
+    for stale in directory.glob(f".*{_TEMP_INFIX}.*"):
         try:
             if stale.stat().st_mtime < cutoff:
                 stale.unlink()

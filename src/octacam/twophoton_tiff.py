@@ -216,36 +216,47 @@ def _plan_fastz_channel(
     if timepoints is None or zsteps is None or timepoints == zsteps:
         return None
     counts = {i: len({g[i] for _, g in found}) for i in varying}
-    if counts[varying[0]] == zsteps and counts[varying[1]] == timepoints:
-        z_pos, t_pos = varying[0], varying[1]
-    elif counts[varying[1]] == zsteps and counts[varying[0]] == timepoints:
-        z_pos, t_pos = varying[1], varying[0]
-    else:
-        return None
+    # Z: exactly the declared planes. T: the declared timepoints, or fewer for
+    # a capture stopped early (a real take since octacam stops with ThorImage).
+    options = [
+        (z, t)
+        for z, t in ((varying[0], varying[1]), (varying[1], varying[0]))
+        if counts[z] == zsteps and 1 <= counts[t] <= timepoints
+    ]
+    if len(options) != 1:
+        return None  # neither, or both (e.g. stopped at exactly zsteps timepoints)
+    z_pos, t_pos = options[0]
 
     by_z: dict[int, list[tuple[Path, tuple[int, int, int, int]]]] = {}
     for item in found:
         by_z.setdefault(item[1][z_pos], []).append(item)
 
-    plans: list[ChannelPlan] = []
+    ordered: dict[int, list[tuple[Path, tuple[int, int, int, int]]]] = {}
     for z in sorted(by_z):
         z_items = sorted(by_z[z], key=lambda item: item[1][t_pos])
         t_values = [item[1][t_pos] for item in z_items]
-        if len(z_items) != timepoints or t_values != list(
-            range(t_values[0], t_values[0] + len(t_values))
-        ):
+        if t_values != list(range(1, len(t_values) + 1)):
             return None  # one bad Z-plane invalidates the whole channel
-        plans.append(
-            ChannelPlan(
-                channel,
-                "ready",
-                [p for p, _ in z_items],
-                f"{channel}_Z{z:02d}.tif",
-                axis="T",
-                frame_count=timepoints,
-            )
+        ordered[z] = z_items
+    # Whole volumes only: a stop mid-volume leaves the first planes one
+    # timepoint longer — their extra frame is left out of the stacks (and so
+    # copied as a loose file), like a partial frame of a single plane.
+    n_t = min(len(items) for items in ordered.values())
+    if max(len(items) for items in ordered.values()) - n_t > 1:
+        return None
+    declared = timepoints if n_t < timepoints else None
+    return [
+        ChannelPlan(
+            channel,
+            "ready",
+            [p for p, _ in items[:n_t]],
+            f"{channel}_Z{z:02d}.tif",
+            axis="T",
+            frame_count=n_t,
+            declared_count=declared,
         )
-    return plans
+        for z, items in ordered.items()
+    ]
 
 
 @dataclass(frozen=True)
@@ -341,7 +352,10 @@ def plan_assembly(folder: Path) -> AssemblyPlan:
         declared: int | None = None
         if timepoints is not None and n == timepoints:
             axis: Literal["T", "Z"] | None = "T"
-        elif zsteps is not None and n == zsteps:
+        elif zsteps is not None and n == zsteps and not (timepoints and timepoints > 1):
+            # A streaming capture also carries an enabled ZStage (real
+            # Fly1_Streaming: steps="201"): its timepoints decide, so one
+            # stopped at exactly `steps` frames is still a time series.
             axis = "Z"
         elif indices[0] == 1 and (stopped := _stopped_early(n, timepoints, zsteps)):
             # Stopped early (since 2026-10-14 octacam stops with ThorImage,
