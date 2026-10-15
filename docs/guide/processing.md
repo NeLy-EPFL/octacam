@@ -140,6 +140,15 @@ since an edited config is often the same size), so a killed copy simply
 resumes — at most the one in-progress file is redone. Set `checksum = false` for a faster size-only
 verify on trusted, fast links.
 
+**Deleting the local copy.** With `delete_after_transfer = true` (or
+`--delete-after-transfer` for one run; `--no-delete-after-transfer` overrides the
+config), `process` removes each local recording folder once all of it is at the
+destination: every copy is content-verified then, whatever `checksum` says, and
+files already there are compared by content, not size. It runs after the grids,
+which are built from the local videos, and keeps any folder with a file that
+failed to transcode or transfer (or whose plugin step failed). `--dry-run` lists
+what it would remove.
+
 ## Selecting recordings from the cache
 
 Instead of typing paths, let octacam remember where it recorded. Every finished

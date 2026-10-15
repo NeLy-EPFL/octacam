@@ -2870,3 +2870,84 @@ def test_a_plugin_that_moves_a_take_steers_its_grids_and_a_rerun(tmp_path, monke
     assert result.exit_code == 0, result.output
     assert sorted(p.name for p in dest_root.iterdir()) == ["Recording1"]
     assert (renamed / "camera_LF.mp4").read_bytes() == b"re-encoded"
+
+
+def _deleting_recording(tmp_path, monkeypatch, delete_toml=True):
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    toml = _transfer_toml(dest_root)
+    if delete_toml:
+        toml += "delete_after_transfer = true\n"
+    _make_recording(folder, with_outputs=True, extra_toml=toml)
+    (folder / "grid.mp4").unlink()  # built by the run, from the local videos
+
+    def build_grid(source, *args, output, **kwargs):
+        assert (source / "camera_LF.mp4").is_file()  # still local
+        output.write_bytes(b"grid")
+        return output
+
+    monkeypatch.setattr("octacam.process.build_grid_video", build_grid)
+    _forbid(monkeypatch, "octacam.process.transcode_file")
+    return folder, dest_root / folder.name
+
+
+def test_delete_after_transfer_removes_the_local_copy_once_verified(
+    tmp_path, monkeypatch
+):
+    folder, dest = _deleting_recording(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert not folder.exists()
+    assert (dest / "camera_LF.mp4").read_bytes() == b"finished-transcode"
+    assert (dest / "grid.mp4").read_bytes() == b"grid"
+
+
+def test_delete_after_transfer_keeps_a_folder_with_a_failed_copy(tmp_path, monkeypatch):
+    folder, _dest = _deleting_recording(tmp_path, monkeypatch)
+    from octacam import process as process_mod
+
+    real = process_mod.transfer_folder
+
+    def failing(src, dest, files_only, **kwargs):
+        result = real(src, dest, files_only, **kwargs)
+        result.failed.append("camera_LF.mp4")
+        return result
+
+    monkeypatch.setattr("octacam.process.transfer_folder", failing)
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code != 0
+    assert (folder / "camera_LF.mp4").is_file()
+
+
+def test_delete_after_transfer_flag_overrides_the_config_and_dry_run_only_lists(
+    tmp_path, monkeypatch
+):
+    folder, _dest = _deleting_recording(tmp_path, monkeypatch, delete_toml=False)
+    result = runner.invoke(
+        app,
+        [
+            "process",
+            "--no-transcode",
+            "--delete-after-transfer",
+            "--dry-run",
+            str(folder),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (folder / "camera_LF.mp4").is_file()
+    result = runner.invoke(
+        app, ["process", "--no-transcode", "--delete-after-transfer", str(folder)]
+    )
+    assert result.exit_code == 0, result.output
+    assert not folder.exists()
+
+
+def test_no_delete_after_transfer_keeps_what_the_config_would_remove(
+    tmp_path, monkeypatch
+):
+    folder, _dest = _deleting_recording(tmp_path, monkeypatch)
+    result = runner.invoke(
+        app, ["process", "--no-transcode", "--no-delete-after-transfer", str(folder)]
+    )
+    assert result.exit_code == 0, result.output
+    assert (folder / "camera_LF.mp4").is_file()
