@@ -3,6 +3,20 @@
 Arduino Mega 2560 firmware for the 2-photon microscope rig.  
 Receives fps and duration from octacam over USB serial, arms itself, then waits
 for a ThorSync rising-edge signal to start a precise camera trigger square wave.
+The wave runs for the requested duration — or, in **match ThorImage** mode
+(octacam's default for this rig), until ThorImage stops: the ThorSync input has
+stayed LOW for `idle_ms`. The duration is then only a safety ceiling.
+
+Real ThorSync episodes show the camera trigger starting within ~0.1–11 ms of
+both `CaptureOn`'s rise and the first `FrameOut` pulse, and both stay busy for
+the whole acquisition (`CaptureOn` HIGH throughout; `FrameOut` HIGH ~99% of
+every frame period, with no gap longer than one frame in streaming/FastZ
+captures; anatomical Z-stacks pause up to ~1.35 s between slices). So "input
+LOW for `idle_ms`" (octacam default 2000 ms) means the acquisition is over,
+whichever of the two drives D4. Each run ends with a `STOP` report of what the
+input looked like (rising edges, HIGH time), so the first real take shows
+which one it is: about one edge per 2P frame = `FrameOut`, a single edge HIGH
+for the whole run = `CaptureOn`.
 
 ## Hardware wiring
 
@@ -28,7 +42,7 @@ Baud rate: **115 200**.
 
 | Packet   | Bytes | Layout                                                            |
 |----------|-------|-------------------------------------------------------------------|
-| Arm      | 7     | `0xA5` · fps `uint16_t` LE · duration_ms `uint32_t` LE            |
+| Arm      | 9     | `0xA5` · fps `uint16_t` LE · duration_ms `uint32_t` LE · idle_ms `uint16_t` LE (0 = fixed duration) |
 | Cancel   | 1     | `0xCA`                                                            |
 | Identify | 1     | `0x3F` (`?`) — request the identity banner                       |
 
@@ -41,15 +55,19 @@ A cancel packet returns it to IDLE.
 |---------------------|------------------------------------------------------------------|
 | `A`                 | Armed — waiting for ThorSync rising edge                         |
 | `T`                 | Triggered — capture running                                      |
+| `STOP <r> <edges> <high_ms> <run_ms>` | End-of-run report, newline-terminated, sent right before `D`: `r` = `I` (ThorImage stopped — input idle) or `C` (duration ceiling); rising edges seen and total HIGH time on the ThorSync input; run time |
 | `D`                 | Done — capture complete, back to IDLE                            |
-| `2PHOTON 1 <build>` | Reply to an identify request (newline-terminated; `<build>` = source hash) |
+| `2PHOTON 2 <build>` | Reply to an identify request (newline-terminated; `<build>` = source hash) |
+
+Protocol v2 (the `idle_ms` field + `STOP` report) is not compatible with v1
+firmware; octacam refuses to arm a v1 board and offers to reflash it.
 
 ## State machine
 
 ```
-IDLE ──(arm packet)──▶ ARMED ──(ThorSync ↑)──▶ RUNNING ──(timeout)──▶ IDLE
-                         │                                                │
-               (cancel / new arm)                                   sends 'D'
+IDLE ──(arm packet)──▶ ARMED ──(ThorSync ↑)──▶ RUNNING ──(duration elapsed, or ──▶ IDLE
+                         │                                  input LOW idle_ms)     │
+               (cancel / new arm)                                       sends "STOP …" + 'D'
                          │
                         IDLE
 ```
@@ -109,7 +127,10 @@ name = "twophoton"
 device = "/dev/arduinoCams"     # default; override for ttyACM1, COM3, etc.
 # baud = 115200                 # optional; matches firmware default
 # default_fps = 100             # fallback FPS when GUI params are absent
-# default_duration_ms = 10000   # fallback duration in ms
+# default_duration_ms = 10000   # fallback duration in ms (fixed-duration mode)
+# match_thorimage = true        # stop when ThorImage stops (default); false = fixed duration
+# stop_idle_ms = 2000           # ThorSync input LOW this long = ThorImage stopped
+# max_duration_s = 3600         # safety ceiling while matching ThorImage
 ```
 
 Or enable at launch time without touching the config:
