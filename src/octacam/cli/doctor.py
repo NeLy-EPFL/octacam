@@ -608,7 +608,7 @@ def _doctor_storage(report: _Report, cfg) -> None:
     )
 
 
-def _doctor_plugins(report: _Report, cfg) -> None:
+def _doctor_plugins(report: _Report, cfg, config_dir: Path | None = None) -> None:
     from octacam import plugins as plugins_mod
 
     report.section("Plugins")
@@ -635,6 +635,14 @@ def _doctor_plugins(report: _Report, cfg) -> None:
             )
         else:
             report.add("ok", f"config enables {name!r} (available)")
+            try:
+                checks = plugins_mod.plugin_class(name).doctor(
+                    dict(pc.options), cfg, config_dir
+                )
+            except Exception as e:  # a plugin's check must not stop doctor
+                checks = [("warn", f"{name}: its checks failed ({e})")]
+            for status, text in checks:
+                report.add(status, text)
 
 
 def _configured_device(pc) -> tuple[str | None, bool]:
@@ -977,7 +985,7 @@ def doctor(
     if cfg is not None:
         _doctor_cameras_vs_config(report, cfg, backend, scan)
         _doctor_storage(report, cfg)
-    _doctor_plugins(report, cfg)
+    _doctor_plugins(report, cfg, config_dir)
     _doctor_serial(report, cfg, probe=probe_serial)
     _doctor_runtime(report, config_dir)
 

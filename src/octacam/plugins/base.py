@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
     from fastapi import APIRouter
 
+    from octacam.config import OctacamConfig
     from octacam.controller import RecordingController
     from octacam.process import ProcessSteps
 
@@ -38,6 +39,16 @@ class Plugin:
 
     def broadcast(self, topic: str, payload: dict, /) -> None:
         """Push `payload` to every GUI client as `topic`; a no-op until attached."""
+
+    @classmethod
+    def doctor(
+        cls, options: dict, config: OctacamConfig, config_dir: Path | None
+    ) -> list[tuple[str, str]]:
+        """`octacam doctor`'s checks of this plugin's configuration, as
+        `(status, text)` with status "ok", "info", "warn" or "error". Never
+        touches the hardware (a running session may own it).
+        """
+        return []
 
     @classmethod
     def from_options(cls, options: dict) -> Plugin:
