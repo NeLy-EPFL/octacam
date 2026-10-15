@@ -330,7 +330,9 @@ class FlywheelPlugin(SerialPlugin[FlywheelLink]):
             return None
         return {"command": asdict(command)}
 
-    def default_start_params(self, fps: float, duration_s: float) -> dict | None:
+    def default_start_params(
+        self, fps: float, duration_s: float, *, fixed_duration: bool = False
+    ) -> dict | None:
         """The configured loop for headless `octacam record` (and a relaunch
         from a recording's snapshot); None without one, so the CLI never spins an
         unconfigured motor.
