@@ -504,3 +504,62 @@ def test_attach_exit_code_reflects_the_job_outcome():
     assert pj._attach_exit_code(_job(state=pj.CANCELLED)) == 1
     # Still running: the viewer detached (Ctrl-C), which says nothing about the job.
     assert pj._attach_exit_code(_job(state=pj.RUNNING)) == 0
+
+
+# ---------------------------------------------- GUI background-processing notice
+
+
+def test_reporter_tracks_item_progress_for_an_eta(cache_dir):
+    import datetime
+    from types import SimpleNamespace
+
+    jd = pj.job_dir("j-eta")
+    status = _job("j-eta", state="running")
+    reporter = pj.JobReporter(jd, status)
+    reporter.begin_phase("grid", 4)
+    reporter.item_started(2, 4, "/data/Fly1/002")
+    assert status.item_started and status.item_percent is None
+    assert pj.item_eta_s(status) is None  # no progress reported yet
+
+    reporter.transcode_progress(2, 4)(SimpleNamespace(frame=250, total_frames=1000))
+    assert status.item_percent == 25.0
+    started = datetime.datetime.fromisoformat(status.item_started).timestamp()
+    # 25 % in 10 min -> 30 min left.
+    assert pj.item_eta_s(status, now=started + 600) == pytest.approx(1800)
+
+    notice = pj.notice_dict(status)
+    assert (notice["phase"], notice["current_file"]) == ("grid", "Fly1/002")
+    assert (notice["files_done"], notice["files_total"]) == (0, 4)
+    reporter.item_done()
+    reporter.item_started(3, 4, "/data/Fly1/003")  # a new item: no ETA yet
+    assert status.item_percent is None and pj.item_eta_s(status) is None
+
+
+def test_item_eta_needs_some_progress():
+    status = _job("j", item_started="2026-10-15T10:00:00+02:00", item_percent=1.0)
+    assert pj.item_eta_s(status) is None
+    status.item_percent = 100.0
+    assert pj.item_eta_s(status) is None
+
+
+def test_worker_records_every_warning_the_run_logs(cache_dir, caplog):
+    # Explicit over implicit: anything sketchy a detached run logs is counted
+    # in status.json (for `jobs list` and the GUI), not just left in log.txt.
+    import logging
+
+    caplog.set_level(logging.INFO, logger="octacam")
+    jd = pj.job_dir("j-warn")
+    pj.write_status(jd, _job("j-warn"))
+    octacam_log = logging.getLogger("octacam")
+    with pj.worker(jd):
+        octacam_log.info("all fine")
+        octacam_log.warning("ThorSync recording SyncData167 stopped at its limit")
+        octacam_log.error("transfer: failed copying X")
+    status = pj.read_status(jd)
+    assert status.state == pj.DONE
+    assert status.warning_count == 2
+    assert status.warnings[0].startswith("WARNING: ThorSync recording SyncData167")
+    assert "Finished with 2 warning(s)/error(s)" in caplog.text
+    octacam_log.warning("after the run: not captured")
+    assert pj.read_status(jd).warning_count == 2
+    assert pj.notice_dict(pj.read_status(jd))["warning_count"] == 2

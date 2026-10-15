@@ -90,6 +90,7 @@ def create_app(
         tasks = [
             asyncio.create_task(preview_loop(hub, controller, interval)),
             asyncio.create_task(ws.telemetry_loop(hub, controller)),
+            asyncio.create_task(ws.jobs_loop(state)),
         ]
         yield
         for task in tasks:

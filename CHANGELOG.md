@@ -11,6 +11,16 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **The GUI shows background processing.** While a detached `octacam
+  process` job runs, a strip along the bottom of the camera view says what it
+  is doing and how long the current step has left; once that step is done the
+  job pauses until the GUI closes, as before, and the strip says so. The event
+  log (and, with **Notify me**, a desktop notification) records when it pauses
+  and ends, and Start recording asks first while a step is still running.
+- **Jobs count their warnings**: every warning or error a detached job logs is
+  kept in its status (`octacam jobs list` has a Warnings column, the GUI says
+  "finished with N warnings"), and the log ends with a summary of them. Jobs
+  also report grid progress and name items as `Fly1/003`.
 - **`octacam process` transfers the data before building grids**, so a day's
   videos are on the destination hours earlier; grids are built and transferred
   after. **Plugins can add processing steps** (`Plugin.process_steps`, a

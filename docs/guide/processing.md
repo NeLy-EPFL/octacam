@@ -234,3 +234,11 @@ watch from a terminal with `octacam jobs attach`.
     GUI that failed to open them never parks a processing run. The pause has no
     timeout, so to process *now* while a GUI sits on the preview, pass
     `--ignore-capture` — processing then competes with capture for CPU/GPU/disk.
+
+    The GUI shows this as a strip along the bottom of the camera view: what the
+    job is doing right now (e.g. *building a grid video (Fly2/001, 7 of 16,
+    ~15 min left)*), then *paused — it resumes when you close octacam* once
+    that step is done. The event log notes when it pauses and when it ends
+    (with how many warnings it logged; **Notify me** makes those desktop
+    notifications), and Start recording asks first while a step is still
+    running. `octacam jobs list` shows each job's warning count.
