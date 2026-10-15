@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 import octacam
+from octacam import plugins
 from octacam.cli import (
     admin,
     benchmark,
@@ -124,6 +125,9 @@ cache_app.command("path")(admin.cache_path)
 cache_app.command("info")(admin.cache_info)
 cache_app.command("clear")(admin.cache_clear)
 app.add_typer(cache_app, name="cache")
+
+for _name, _group in plugins.command_groups():
+    app.add_typer(_group, name=_name)
 
 
 def main() -> None:

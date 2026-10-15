@@ -187,10 +187,14 @@ class TransferConfig(BaseModel):
     A recording goes to `directory`/<its summary's `relative_directory`>;
     `directory` takes strftime `%`-codes like `record.directory`.
     `checksum` verifies each copy's content (false: its size only).
+    `delete_after_transfer` removes the local recording once every file of it
+    is on the destination, content-verified (whatever `checksum` says), after
+    the grids are built from it.
     """
 
     directory: ScalarStr = ""
     checksum: bool = True
+    delete_after_transfer: bool = False
 
 
 class GuiConfig(BaseModel):

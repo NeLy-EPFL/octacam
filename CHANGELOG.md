@@ -26,6 +26,15 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   after. **Plugins can add processing steps** (`Plugin.process_steps`, a
   `process.ProcessSteps`): data steps right after the transfer, renders at the
   very end. `process` never instantiates a plugin or touches its hardware.
+  A step that moves a transferred recording steers later copies
+  (`ProcessSteps.transfer_dest`, `ctx.dests`). A plugin can also add a command
+  group (`octacam <name> ...`, from `plugins._COMMANDS`) and its own `octacam
+  doctor` checks (`Plugin.doctor`).
+- **`[transfer].delete_after_transfer`** (and `process
+  --delete-after-transfer/--no-delete-after-transfer`) removes each local
+  recording once all of it is content-verified at the destination, after its
+  grids. `transfer.transfer_tree` copies a whole folder the same way, for a
+  plugin's acquisition data.
 - **A plugin can end the take itself**: `Plugin.take_ceiling_s` returns a
   safety ceiling that replaces the set duration (deadline and pulse count),
   and `controller.finish_recording(name)` ends the take as *completed* (not an
@@ -39,7 +48,6 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   plugin overriding the hook must accept the new keyword). Its tab can offer a
   checkbox in place of the Record tab's Duration (`setDurationSync` in a
   plugin tab's context).
-
 - **`--set KEY=VALUE` on `gui` and `record`** overrides any config key for one
   launch by its dotted path (`--set record.save_method=raw`), the same flag
   deeperfly and spintrack take. The value is read as TOML, a list may drop its
