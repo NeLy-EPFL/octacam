@@ -553,3 +553,29 @@ def test_an_unclassified_board_says_why(monkeypatch, tmp_path, sketch, probed, d
     info = plugin.firmware_provisioning()
     assert (info["state"], info["needs_flash"]) == (None, False)
     assert info["detail"].startswith(detail)
+
+
+def test_take_ceiling_comes_from_the_first_plugin_that_ends_the_take():
+    seen = []
+
+    class Plain(Plugin):
+        name = "plain"
+
+    class Ender(Plugin):
+        name = "ender"
+
+        def take_ceiling_s(self, params):
+            seen.append(params)
+            return 3600
+
+    class Broken(Plugin):
+        name = "broken"
+
+        def take_ceiling_s(self, params):
+            raise RuntimeError("boom")
+
+    manager = PluginManager([Plain(), Broken(), Ender()])
+    # A raising hook is logged and skipped; each plugin gets its own slice.
+    assert manager.take_ceiling({"ender": {"x": 1}}) == ("ender", 3600.0)
+    assert seen == [{"x": 1}]
+    assert PluginManager([Plain()]).take_ceiling({}) is None

@@ -1576,3 +1576,20 @@ def test_grid_title_drag_moves_only_past_the_threshold(page):
     assert (
         page.evaluate("() => window.__grid.selected") == -1
     )  # the drag's click is swallowed
+
+
+def test_plugin_ended_take_shows_elapsed_time_not_a_countdown(page):
+    # A take a plugin ends itself (snap.elapsed_ms, no remaining_ms): the
+    # status counts up and names who ends it.
+    make_tab(page)
+    text = page.evaluate(
+        """() => {
+            window.__tab.applyState({
+                state: "recording", remaining_ms: null, elapsed_ms: 65000,
+                ended_by_plugin: "twophoton", recording_id: 1, cameras: [],
+            });
+            return document.getElementById('record-status').textContent;
+        }"""
+    )
+    assert text.startswith("Recording (twophoton ends it)")
+    assert "1:05" in text and "elapsed" in text

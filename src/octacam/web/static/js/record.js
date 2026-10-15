@@ -343,6 +343,20 @@ export class RecordTab {
   }
 
   _syncCountdown(snap) {
+    // A take a plugin ends itself (snap.ended_by_plugin) has no countdown, only
+    // elapsed time: anchor its start locally so the re-render ticks smoothly.
+    if (snap.state === "recording" && snap.elapsed_ms != null) {
+      if (snap.recording_id !== this.recordingId || this.elapsedStart == null) {
+        this.recordingId = snap.recording_id;
+        this.elapsedStart = performance.now() - snap.elapsed_ms;
+      }
+      this.endedBy = snap.ended_by_plugin || null;
+      this.deadline = null;
+      this.totalMs = null;
+      return;
+    }
+    this.elapsedStart = null;
+    this.endedBy = null;
     if (snap.state !== "recording" || snap.remaining_ms == null) {
       this.deadline = null;
       this.totalMs = null;
@@ -381,10 +395,15 @@ export class RecordTab {
     if (this.state === "waiting") {
       text = "Waiting for first trigger...";
     } else if (this.state === "recording") {
-      text =
-        remaining != null
-          ? `Remaining time: ${formatHMS(remaining)}`
-          : "Recording...";
+      if (this.elapsedStart != null) {
+        const elapsed = Math.max(0, performance.now() - this.elapsedStart);
+        text = `Recording (${this.endedBy} ends it) \u2014 ${formatHMS(elapsed)} elapsed`;
+      } else {
+        text =
+          remaining != null
+            ? `Remaining time: ${formatHMS(remaining)}`
+            : "Recording...";
+      }
     } else if (this.state === "finishing") {
       text = "Finishing…";
     } else if (this.lastEvent) {

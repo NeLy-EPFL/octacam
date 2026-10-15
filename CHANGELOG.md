@@ -11,6 +11,15 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **A plugin can end the take itself**: `Plugin.take_ceiling_s` returns a
+  safety ceiling that replaces the set duration (deadline and pulse count),
+  and `controller.finish_recording(name)` ends the take as *completed* (not an
+  early stop). The GUI and `octacam record` show elapsed time for such a take;
+  its summary records `ended_by`, `duration_limit_s` and its real length as
+  `duration_s`. Every summary now also has `first_frame_time_ns`, when the
+  first frames were in (for an external trigger, possibly long after Start),
+  and plugins tell the operator through `controller.event(level, message)`.
+
 - **`--set KEY=VALUE` on `gui` and `record`** overrides any config key for one
   launch by its dotted path (`--set record.save_method=raw`), the same flag
   deeperfly and spintrack take. The value is read as TOML, a list may drop its

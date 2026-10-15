@@ -67,6 +67,13 @@ class Plugin:
         """
         return None
 
+    def take_ceiling_s(self, params: dict | None) -> float | None:
+        """For a take this plugin ends itself (`controller.finish_recording`),
+        the longest it may run: it replaces the set duration as the deadline.
+        None: the duration applies. Pure: called under the controller lock.
+        """
+        return None
+
     def snapshot_options(self, params: dict | None) -> dict | None:
         """The `[[plugins]]` options reproducing this plugin's live state in the
         config snapshot, None when the configured ones do. No I/O: under the lock.
@@ -192,6 +199,18 @@ class PluginManager:
             return False
         slice_ = self._slice(plugin, params)
         return bool(self._call(plugin, plugin.prime_trigger, slice_, pulses))
+
+    def take_ceiling(self, params: dict | None) -> tuple[str, float] | None:
+        """The first plugin that ends this take itself, with its ceiling in
+        seconds (see `Plugin.take_ceiling_s`); None when the duration applies.
+        """
+        for plugin in self.plugins:
+            ceiling = self._call(
+                plugin, plugin.take_ceiling_s, self._slice(plugin, params)
+            )
+            if ceiling:
+                return plugin.name, float(ceiling)
+        return None
 
     def default_start_params(self, fps: float, duration_s: float) -> dict:
         """Each plugin's non-None headless start slice, keyed by name as the GUI
