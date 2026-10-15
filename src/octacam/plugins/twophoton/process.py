@@ -154,7 +154,6 @@ class TwoPhotonSteps(ProcessSteps):
                 settings,
                 mode,
                 claimed_this_run=frozenset(claimed),
-                delete_sources=any(deleting.values()),
             )
             failed += swept.failed
             self._renders += [_Render(d, s, settings) for d, s in swept.renders]

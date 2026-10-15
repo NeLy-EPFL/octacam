@@ -186,7 +186,6 @@ def sweep(
     mode: CopyMode,
     *,
     claimed_this_run: frozenset[Path] = frozenset(),
-    delete_sources: bool = False,
 ) -> SweepResult:
     """Pair pending takes with share folders that have settled since, then copy
     every settled folder nobody claims: not paired with a take (this run's,
@@ -205,7 +204,7 @@ def sweep(
         for f in folders
         if f.path.resolve() not in claimed and not _on_destination(f, index)
     ]
-    held = _pair_pending(source_root, unclaimed, settings, mode, delete_sources, result)
+    held = _pair_pending(source_root, unclaimed, settings, mode, result)
     unclaimed = [f for f in unclaimed if f.path.resolve() not in held]
     todo = [f for f in unclaimed if is_settled(f, settings.settle_s)]
     if not todo:
@@ -267,7 +266,6 @@ def _pair_pending(
     unclaimed: list[TwoPhotonFolder],
     settings: TwoPhotonSettings,
     mode: CopyMode,
-    delete_sources: bool,
     result: SweepResult,
 ) -> set[Path]:
     """Pair each pending take with the unclaimed folders that match it now,
@@ -318,6 +316,7 @@ def _pair_pending(
         )
         if paired.complete:
             result.renders.append((dest, start_s(summary_of(item.folder))))
-            if delete_sources and not mode.dry_run:
+            # The take's own choice, made when it was transferred.
+            if item.record.get("by_content") and not mode.dry_run:
                 remove_sources(paired.copied_ok)
     return taken
