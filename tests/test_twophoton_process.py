@@ -279,3 +279,45 @@ def test_a_legacy_transfer_twophoton_table_is_still_read(tmp_path):
     result = runner.invoke(app, ["process", "--no-transcode", "--no-grid", str(folder)])
     assert result.exit_code == 0, result.output
     assert (dest_root / "rec" / "2P" / "SyncData102").is_dir()
+
+
+def test_a_verified_copy_is_trusted_by_a_rerun_until_something_changes(
+    tmp_path, monkeypatch
+):
+    from octacam.plugins.twophoton import copying
+    from octacam.plugins.twophoton.matching import classify_twophoton_folder
+
+    source = _make_sync_folder(tmp_path / "share", "Exp", "SyncData1", mtime=1000.0)
+    folder = classify_twophoton_folder(source)
+    assert folder is not None
+    dest = tmp_path / "nas" / "SyncData1"
+    verified = copying.CopyMode(verify=True, by_content=False, dry_run=False)
+    deleting = copying.CopyMode(verify=True, by_content=True, dry_run=False)
+    assert not copying.copy_twophoton_folder(folder, dest, verified).failed
+
+    def no_rehash(*args, **kwargs):
+        raise AssertionError("re-hashed a verified copy")
+
+    # A delete needs the content check the first copy did not make...
+    monkeypatch.setattr(copying, "transfer_tree", no_rehash)
+    with pytest.raises(AssertionError):
+        copying.copy_twophoton_folder(folder, dest, deleting)
+    monkeypatch.undo()
+    assert not copying.copy_twophoton_folder(folder, dest, deleting).failed
+    # ...and once made, a re-run trusts it.
+    monkeypatch.setattr(copying, "transfer_tree", no_rehash)
+    copying.write_source_marker(dest, "Exp")  # the sweep's own note
+    result = copying.copy_twophoton_folder(folder, dest, deleting)
+    assert sorted(result.skipped) == ["Episode001.h5", "ThorRealTimeDataSettings.xml"]
+
+    # A damaged copy (another size) or a changed source is copied again.
+    (dest / "Episode001.h5").write_bytes(b"truncated!")
+    with pytest.raises(AssertionError):
+        copying.copy_twophoton_folder(folder, dest, deleting)
+    monkeypatch.undo()
+    assert not copying.copy_twophoton_folder(folder, dest, deleting).failed
+    assert (dest / "Episode001.h5").read_bytes() == b"x"
+    os.utime(source / "Episode001.h5", (2000.0, 2000.0))
+    monkeypatch.setattr(copying, "transfer_tree", no_rehash)
+    with pytest.raises(AssertionError):
+        copying.copy_twophoton_folder(folder, dest, deleting)

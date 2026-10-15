@@ -314,3 +314,32 @@ def test_latest_thorsync_limit_reads_the_newest_sync_folder(tmp_path):
     os.utime(new, (2_000, 2_000))
     assert latest_thorsync_limit(tmp_path) == (new, 7200.0)
     assert latest_thorsync_limit(tmp_path / "missing") is None
+
+
+def test_an_episode_is_read_once_across_runs(tmp_path, monkeypatch):
+    # 23 s per 0.6 GB episode over the share, asked by every run: the segments
+    # are cached on disk, keyed by the file's path, size and mtime.
+    import octacam.plugins.twophoton.signals as sig
+
+    folder = _make_sync_folder(
+        tmp_path,
+        capture_on_ranges=[(100, 900)],
+        cameras_pulse_starts=[110 + i * 10 for i in range(10)],
+        frameout_pulse_starts=[150],
+    )
+    first = read_capture_segments(folder)
+    monkeypatch.setattr(sig, "_SEGMENT_CACHE", {})  # a new process
+
+    def unread(*args):
+        raise AssertionError("the episode was read again")
+
+    monkeypatch.setattr(sig, "_read_capture_segments", unread)
+    assert read_capture_segments(folder) == first
+
+    # A changed episode (still being written) is read afresh.
+    episode = folder / "Episode001.h5"
+    with h5py.File(episode, "a") as f:
+        f.attrs["touched"] = 1
+    monkeypatch.setattr(sig, "_SEGMENT_CACHE", {})
+    with pytest.raises(AssertionError, match="read again"):
+        read_capture_segments(folder)

@@ -110,6 +110,26 @@ class NasIndex:
             if marker and marker.get("experiment"):
                 self.source_markers[leaf] = str(marker["experiment"])
 
+    # ------------------------------------------------------------ updates
+
+    def note_copy(self, leaf: Path, experiment: str | None = None) -> None:
+        """Add a 2P folder this run copied (with its source marker)."""
+        if leaf not in self.twophoton_dirs:
+            self.twophoton_dirs.append(leaf)
+        if experiment:
+            self.source_markers[leaf] = experiment
+
+    def refresh_take(self, path: Path) -> None:
+        """Re-read a take this run paired, as the walk would now see it."""
+        for take in self.takes:
+            if take.path == path:
+                take.match = match_record(path)
+                for entry in take.match.get("matched", []):
+                    if entry.get("path"):
+                        self.note_copy(
+                            path / TWOPHOTON_DIRNAME / Path(entry["path"]).name
+                        )
+
     # ------------------------------------------------------------ queries
 
     def matched_sources(self, source_root: Path) -> set[Path]:

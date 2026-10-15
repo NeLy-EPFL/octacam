@@ -181,13 +181,64 @@ def read_capture_segments(sync_folder: Path) -> list[CaptureSegment] | None:
         cache_key = None
     if cache_key is not None and cache_key in _SEGMENT_CACHE:
         return list(_SEGMENT_CACHE[cache_key])
-    segments = _read_capture_segments(sync_folder, episode_path)
+    segments = _load_segments(cache_key) if cache_key is not None else None
+    if segments is None:
+        segments = _read_capture_segments(sync_folder, episode_path)
+        if cache_key is not None and segments is not None:
+            _save_segments(cache_key, segments)
     if cache_key is not None and segments is not None:
         _SEGMENT_CACHE[cache_key] = tuple(segments)
     return segments
 
 
 _SEGMENT_CACHE: dict[tuple[str, int, float], tuple[CaptureSegment, ...]] = {}
+
+
+# Also on disk, in octacam's cache: an episode is read once, not once per run
+# (23 s for a 0.6 GB episode over the share, and every run asks again: pairing,
+# renumbering, renders). The same key (path, size, mtime) as in memory.
+def _segments_file(cache_key: tuple[str, int, float]) -> Path:
+    import hashlib
+
+    from octacam.session_cache import cache_dir
+
+    digest = hashlib.sha256(repr(cache_key).encode()).hexdigest()[:32]
+    return cache_dir() / "twophoton-segments" / f"{digest}.json"
+
+
+def _load_segments(cache_key: tuple[str, int, float]) -> list[CaptureSegment] | None:
+    import json
+
+    try:
+        data = json.loads(_segments_file(cache_key).read_text())
+        if data.get("key") != list(cache_key):
+            return None
+        return [CaptureSegment(**seg) for seg in data["segments"]]
+    except OSError, ValueError, TypeError, KeyError:
+        return None
+
+
+def _save_segments(
+    cache_key: tuple[str, int, float], segments: list[CaptureSegment]
+) -> None:
+    import dataclasses
+    import json
+
+    path = _segments_file(cache_key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(
+                {
+                    "key": list(cache_key),
+                    "segments": [dataclasses.asdict(seg) for seg in segments],
+                }
+            )
+        )
+        tmp.replace(path)
+    except OSError as e:
+        log.debug("twophoton: could not cache %s: %s", path, e)
 
 
 def _read_capture_segments(

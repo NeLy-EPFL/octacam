@@ -204,7 +204,7 @@ def sweep(
         for f in folders
         if f.path.resolve() not in claimed and not _on_destination(f, index)
     ]
-    held = _pair_pending(source_root, unclaimed, settings, mode, result)
+    held = _pair_pending(source_root, unclaimed, settings, mode, result, index)
     unclaimed = [f for f in unclaimed if f.path.resolve() not in held]
     todo = [f for f in unclaimed if is_settled(f, settings.settle_s)]
     if not todo:
@@ -239,6 +239,7 @@ def sweep(
             log.info("2P sweep: %s -> %s", folder.path, dest)
             if fly_dir is not None:
                 write_source_marker(dest, experiment)
+            index.note_copy(dest, experiment if fly_dir is not None else None)
     log.info(
         "%s2P sweep: %d folder(s), %d file(s) copied, %d failed",
         "[dry-run] " if mode.dry_run else "",
@@ -267,6 +268,7 @@ def _pair_pending(
     settings: TwoPhotonSettings,
     mode: CopyMode,
     result: SweepResult,
+    index: NasIndex,
 ) -> set[Path]:
     """Pair each pending take with the unclaimed folders that match it now,
     copying them into its destination. Returns the folders taken out of the
@@ -314,6 +316,7 @@ def _pair_pending(
             ", ".join(str(m.folder.path) for m in matches),
             take_folder,
         )
+        index.refresh_take(dest)
         if paired.complete:
             result.renders.append((dest, start_s(summary_of(item.folder))))
             # The take's own choice, made when it was transferred.

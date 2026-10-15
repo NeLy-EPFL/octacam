@@ -112,7 +112,11 @@ and metadata are transferred:
 5. After the grids: render the synced behavior + 2P videos and the Z-stack
    projections.
 
-The share is scanned and the destination walked once per run. With
+The share is scanned and the destination walked once per run. Each ThorSync
+episode is read once (its capture windows are kept in octacam's cache), and a
+2P folder whose copy was verified is not compared again by a later run unless
+its files changed (`.octacam_verified.json` in the copy; `octacam twophoton
+verify` always compares afresh). With
 `[transfer].delete_after_transfer`, a share folder is deleted once its copy is
 verified; on a share whose account may not delete, octacam says so once and
 `octacam twophoton verify` tells which folders are safe to delete by hand.

@@ -143,6 +143,9 @@ def copy_twophoton_folder(
         if folder.kind == "image" and mode.assemble:
             log_assembly_preview(src)
         return TransferResult(dest=dest)
+    source_files = _listing(src)
+    if _already_verified(dest, source_files, mode):
+        return TransferResult(dest=dest, skipped=sorted(source_files))
     ready = (
         plan_assembly(src).ready
         if folder.kind == "image" and mode.assemble and tifffile_available()
@@ -199,7 +202,59 @@ def copy_twophoton_folder(
             result.failed.extend(fallback.failed)
     if result.failed:
         log.error("2P transfer: %d file(s) of %s failed", len(result.failed), src)
+    elif mode.verify:
+        _mark_verified(dest, source_files, mode)
     return result
+
+
+# Left in a 2P folder's copy once all of it was copied and verified: a re-run
+# finding the same source files (names, sizes, mtimes) and the same copy
+# (names, sizes) trusts that check instead of re-hashing gigabytes over the
+# share and the NAS. `octacam twophoton verify` never uses it: it always
+# compares afresh.
+VERIFIED_MARKER = ".octacam_verified.json"
+
+
+def _listing(folder: Path) -> dict[str, list[int]]:
+    """{relative path: [size, mtime_ns]} of every file under *folder*."""
+    listing: dict[str, list[int]] = {}
+    for path in folder.rglob("*"):
+        if path.name.startswith(".octacam_"):  # octacam's own notes, not data
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        if path.is_file():
+            listing[path.relative_to(folder).as_posix()] = [st.st_size, st.st_mtime_ns]
+    return listing
+
+
+def _copy_sizes(dest: Path) -> dict[str, int]:
+    return {rel: size for rel, (size, _mtime) in _listing(dest).items()}
+
+
+def _already_verified(dest: Path, source: dict[str, list[int]], mode: CopyMode) -> bool:
+    from octacam.plugins.twophoton.takes import read_json
+
+    marker = read_json(dest / VERIFIED_MARKER)
+    if not marker or marker.get("source") != source:
+        return False
+    if mode.by_content and not marker.get("by_content"):
+        return False  # a delete needs the stronger check it never had
+    return marker.get("copy") == _copy_sizes(dest)
+
+
+def _mark_verified(dest: Path, source: dict[str, list[int]], mode: CopyMode) -> None:
+    write_json(
+        dest / VERIFIED_MARKER,
+        {
+            "source": source,
+            "copy": _copy_sizes(dest),
+            # Every file already there was compared by content too.
+            "by_content": mode.by_content,
+        },
+    )
 
 
 def copy_sidecar(take: Path, path: Path, dest: Path, mode: CopyMode) -> int:

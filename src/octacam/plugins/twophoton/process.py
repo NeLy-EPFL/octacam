@@ -157,8 +157,6 @@ class TwoPhotonSteps(ProcessSteps):
             )
             failed += swept.failed
             self._renders += [_Render(d, s, settings) for d, s in swept.renders]
-            if swept.copied and not options.dry_run:
-                index = NasIndex.build(target.dest_root)  # it filed new folders
 
         days = {
             target.dest_root / dest.relative_to(target.dest_root).parts[0]
