@@ -1805,3 +1805,98 @@ def test_a_plugin_can_replace_the_duration_with_a_checkbox(page):
     assert state["withdrawn"]["sync"] is False
     assert state["withdrawn"]["duration"] is True
     assert state["withdrawn"]["warning"] is None
+
+
+TWOPHOTON_JS = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "octacam"
+    / "plugins"
+    / "twophoton"
+    / "web"
+    / "twophoton.js"
+)
+
+
+def test_twophoton_offers_synced_with_thorimage_and_warns_about_thorsync(
+    static_server, browser
+):
+    """An armed 2-Photon tab replaces the Record tab's Duration with "Synced with
+    ThorImage" (the config's default), warns when ThorSync would stop before
+    ThorImage's planned acquisition ends, gives Duration back when unticked, and
+    withdraws the offer when "Arm with recording" is unticked.
+    """
+    page = browser.new_page()
+    plugins = {
+        "twophoton": {
+            "ready": True,
+            "device": "/dev/arduinoCams",
+            "arduino_state": "idle",
+            "match_thorimage": True,
+            "max_duration_s": 3600,
+            "stop_idle_ms": 2000,
+            "thorsync": {
+                "folder": "PAM7xCI80/SyncData184",
+                "limit_s": 320,
+                "planned_folder": "PAM7xCI80/Fly5_Streaming",
+                "planned_s": 390,
+            },
+            "web": {"module": "/plugins/twophoton/twophoton.js"},
+        }
+    }
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(builder())
+        )
+
+    page.route("**/api/**", json_route(dict))
+    page.route(
+        "**/api/system",
+        json_route(lambda: _system_payload(ready=True, plugins=plugins)),
+    )
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=True)))
+    page.route(
+        "**/plugins/twophoton/twophoton.js",
+        lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=TWOPHOTON_JS.read_text()
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => !document.getElementById('duration-sync-row').hidden", timeout=5000
+        )
+        assert page.evaluate(
+            "() => document.getElementById('duration-sync-label').textContent"
+        ) == ("Synced with ThorImage:")
+        assert page.evaluate("() => document.getElementById('duration-row').hidden")
+        warning = page.evaluate(
+            "() => document.getElementById('duration-sync-warning').textContent"
+        )
+        assert "ThorSync is set to stop after 320 s" in warning
+        assert "acquire 390 s (read from PAM7xCI80/Fly5_Streaming)" in warning
+
+        page.evaluate(
+            """() => {
+                const box = document.getElementById('duration-sync');
+                box.checked = false;
+                box.dispatchEvent(new Event('change'));
+            }"""
+        )
+        assert not page.evaluate("() => document.getElementById('duration-row').hidden")
+        page.evaluate(
+            """() => {
+                const arm = document.getElementById('twophoton-arm-with-recording');
+                arm.disabled = false;
+                arm.checked = false;
+                arm.dispatchEvent(new Event('change'));
+            }"""
+        )
+        assert page.evaluate(
+            "() => document.getElementById('duration-sync-row').hidden"
+        )
+        assert not page.evaluate("() => document.getElementById('duration-row').hidden")
+    finally:
+        page.close()

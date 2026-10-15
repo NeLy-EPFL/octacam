@@ -780,7 +780,8 @@ class _ControllerSpy:
     thread) and event, plus the settings it reads the take folder from.
     """
 
-    def __init__(self, save_dir="."):
+    # No take folder by default: the take info is then not written anywhere.
+    def __init__(self, save_dir="/nonexistent/take"):
         self.finished: list[str] = []
         self.threads: list[str] = []
         self.events: list[tuple[str, str]] = []
@@ -803,7 +804,7 @@ class _ControllerSpy:
         self.called.wait(0.5)
 
 
-def _attach(plugin, save_dir="."):
+def _attach(plugin, save_dir="/nonexistent/take"):
     spy = _ControllerSpy(save_dir)
     plugin.controller = cast(Any, spy)
     return spy
