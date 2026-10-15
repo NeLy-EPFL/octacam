@@ -99,6 +99,18 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **2P takes armed before ThorImage started now pair with their imaging
+  data.** A take's `start_time_ns` is when Start was pressed; with octacam
+  armed first, the first frame comes only when ThorImage starts — 23 s later
+  for one real take, past the 5 s pairing window, so its 2P data went
+  unpaired. Summaries now record `first_frame_time_ns`, and pairing uses it
+  (for older takes that stopped with ThorImage: the summary's write time
+  minus the board's run length).
+- **Re-running `process` keeps 2P stacks already on the NAS** instead of
+  rebuilding them (hours for a day's data); with delete-after-transfer on,
+  their pixels are re-checked first. A cancelled job no longer leaves a
+  partial `*.octacam-assemble-part-*` stack behind.
+
 - **Frame-averaged 2P captures** (ThorImage `averageMode="1"`, e.g. rolling
   average left on) now verify against ThorSync and render in sync: FrameOut
   pulses once per scan, so a capture averaging N scans per saved frame

@@ -813,6 +813,19 @@ against a real 2P rig; the durable findings:
   `thorimage_expected_frameout_edges` likewise counts the frames on disk for
   a short streaming capture (`_frames_recorded`) — FrameOut only pulses for
   scanned frames (real: 418 files ↔ 419 edges).
+  **Take start for 2P pairing ≠ `start_time_ns` (2026-10-15).** `start_time_ns`
+  is when Start was pressed; in the match-ThorImage workflow octacam is armed
+  first and the first frame only comes when ThorImage starts (real: up to
+  23 s later, past `match_window_s` = 5 s — Fly1/002's 2P went unpaired).
+  Summaries now carry `first_frame_time_ns` (controller, at the countdown
+  t0); `cli._take_match_start_s` uses it, else (older synced-stop takes)
+  summary mtime − `stop.run_ms` (real: 1.4–3.9 s after ThorImage's start),
+  else the arm time. `_current_take_dest` keeps comparing the exact
+  `start_time_ns`. Re-runs keep complete stacks (`_existing_stack_is_complete`;
+  pixel re-check when a delete depends on them). Also seen on real data:
+  ThorSync's NI6363 `duration="320"` cap cut every ~394 s take's episode at
+  32 M samples — `CaptureOn` never falls, no segment, so those fall back to
+  start-time pairing and get no synced render.
   **Frame averaging** (`LSM averageMode="1" averageNum=N`, e.g. rolling
   average left on; real 2026-10-14 Fly4/003: 476 frames ↔ 1906 edges):
   FrameOut pulses per *scan*, so `thorimage_frame_average` multiplies the

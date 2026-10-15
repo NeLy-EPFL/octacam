@@ -52,6 +52,9 @@ def test_fake_full_recording_cycle(fake_system, tmp_path):
     assert len(summary["cameras"]) == 2
     # frames flowed via the software trigger (be lenient on the exact count)
     assert all(c["frames"] >= 20 for c in summary["cameras"])
+    # The first frame's wall time, for pairing an externally triggered take
+    # (it can start long after Start was pressed): never before the start.
+    assert summary["first_frame_time_ns"] >= summary["start_time_ns"] > 0
 
     assert controller.get_settings().save_dir.endswith("002-trial")
     snapshot = controller.snapshot()

@@ -491,6 +491,11 @@ def assemble_channel_stack(
     except Exception as e:  # noqa: BLE001 - any tifffile write / source-read failure
         temp_path.unlink(missing_ok=True)
         return AssembleResult(ok=False, error=f"failed writing {temp_path}: {e}")
+    except BaseException:
+        # A cancelled job (KeyboardInterrupt/SystemExit) must not leave a
+        # multi-GB partial stack behind on the NAS (real 2026-10-15 cancel).
+        temp_path.unlink(missing_ok=True)
+        raise
 
     try:
         with tifffile.TiffFile(temp_path) as tf:
@@ -516,6 +521,9 @@ def assemble_channel_stack(
     except Exception as e:  # noqa: BLE001 - any tifffile verify failure
         temp_path.unlink(missing_ok=True)
         return AssembleResult(ok=False, error=f"failed verifying {temp_path}: {e}")
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
 
     try:
         fd = os.open(temp_path, os.O_RDONLY)

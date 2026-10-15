@@ -4750,3 +4750,82 @@ def test_doctor_update_line_skipped_for_dev_install(monkeypatch):
         UpdateNotice("0.3.1.dev0", None, False, "editable", "", "development install"),
     )
     assert status == "info" and "development install" in text
+
+
+def test_twophoton_pairs_on_first_frame_not_arm_time(tmp_path, monkeypatch):
+    # Real 2026-10-14 Fly1/002: octacam armed 23 s before ThorImage started
+    # (the take only starts on ThorImage's trigger), so pairing on the arm
+    # time missed the 5 s window and the 2P data went unpaired.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    arm = 1_000_000.0
+    _make_sync_folder_2p(source_root, "PAM7xCI80", "SyncData167", mtime=arm + 23)
+    folder = tmp_path / "rec"
+    _armed_recording(folder, source_root=source_root, dest_root=dest_root, take_start=arm)
+    toml = folder / "octacam_config.toml"
+    toml.write_text(toml.read_text().replace("match_window_s = 60", "match_window_s = 5"))
+    summary_path = folder / "recording_summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["first_frame_time_ns"] = int((arm + 23.5) * 1e9)
+    summary_path.write_text(json.dumps(summary))
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert (dest_root / folder.name / "2P" / "SyncData167" / "Episode001.h5").exists()
+
+
+def test_take_match_start_estimates_first_frame_for_older_synced_takes(tmp_path):
+    # Takes from before first_frame_time_ns existed: one that stopped with
+    # ThorImage has its summary written right after the stop, so its write
+    # time minus the board's run length is the first frame (real data: within
+    # 1.4-3.9 s of ThorImage's own start).
+    from octacam.cli import _take_match_start_s
+
+    folder = tmp_path / "take"
+    folder.mkdir()
+    path = folder / "recording_summary.json"
+    summary = {
+        "start_time_ns": int(1000e9),
+        "plugins": {"twophoton": {"stop": {"reason": "thorimage", "run_ms": 394_000}}},
+    }
+    path.write_text(json.dumps(summary))
+    os.utime(path, (1000 + 23 + 394 + 3, 1000 + 23 + 394 + 3))
+    assert _take_match_start_s(folder, summary) == pytest.approx(1026.0)
+    # Exact value wins when recorded.
+    assert _take_match_start_s(folder, {**summary, "first_frame_time_ns": int(1023.4e9)}) == pytest.approx(1023.4)
+    # No synced stop: the arm time, as before.
+    assert _take_match_start_s(folder, {"start_time_ns": int(1000e9)}) == pytest.approx(1000.0)
+    # Never earlier than the arm time (e.g. a summary written before the take).
+    os.utime(path, (1000, 1000))
+    assert _take_match_start_s(folder, summary) == pytest.approx(1000.0)
+
+
+def test_rerun_keeps_complete_stacks_and_rebuilds_a_bad_one(tmp_path):
+    pytest.importorskip("tifffile")
+    import numpy as np
+    import tifffile
+
+    from octacam.cli import _existing_stack_is_complete
+    from octacam.twophoton_tiff import plan_assembly
+
+    src = _make_image_folder_2p(tmp_path / "share", "exp", "Fly1_Streaming", u_time=1_000_000, n_frames=4)
+    (ch,) = plan_assembly(src).ready
+    stack = tmp_path / "ChanA.tif"
+    assert not _existing_stack_is_complete(stack, ch.source_files, recheck=False)
+    frames = [np.full((16, 16), i, dtype=np.uint16) for i in range(1, 5)]
+
+    def write(pages):
+        with tifffile.TiffWriter(stack) as tw:
+            for page in pages:
+                tw.write(page, contiguous=False)
+
+    write(frames)
+    assert _existing_stack_is_complete(stack, ch.source_files, recheck=False)
+    assert _existing_stack_is_complete(stack, ch.source_files, recheck=True)
+    frames[2] = frames[2] + 1
+    write(frames)
+    assert _existing_stack_is_complete(stack, ch.source_files, recheck=False)  # count only
+    assert not _existing_stack_is_complete(stack, ch.source_files, recheck=True)
+    write(frames[:3])
+    assert not _existing_stack_is_complete(stack, ch.source_files, recheck=False)

@@ -4207,6 +4207,35 @@ def _take_start_s(folder: Path) -> float | None:
     return start_ns / 1e9 if isinstance(start_ns, (int, float)) else None
 
 
+def _take_match_start_s(folder: Path, summary: dict) -> float | None:
+    """When the take's first triggered frame arrived (epoch s) — what pairing
+    it with a 2P acquisition compares, since a 2P take starts on ThorImage's
+    trigger. ``start_time_ns`` is when Start was pressed: with octacam armed
+    first and ThorImage started after, that is earlier by however long that
+    took (real 2026-10-14: up to 22 s, past the 5 s match window). Exact from
+    ``first_frame_time_ns`` (recorded since 2026-10-15); for an older take
+    that stopped with ThorImage, the summary's write time minus the board's
+    run length (it is written right after the stop — real data: 1.4-3.9 s
+    after ThorImage's own start); else ``start_time_ns``."""
+    from octacam.transform import RECORDING_SUMMARY_FILENAME
+
+    first_ns = summary.get("first_frame_time_ns")
+    if isinstance(first_ns, (int, float)) and first_ns > 0:
+        return first_ns / 1e9
+    start_ns = summary.get("start_time_ns")
+    arm_s = start_ns / 1e9 if isinstance(start_ns, (int, float)) else None
+    run_ms = ((summary.get("plugins") or {}).get("twophoton") or {}).get("stop", {}).get("run_ms")
+    if isinstance(run_ms, (int, float)) and run_ms > 0:
+        try:
+            written = (folder / RECORDING_SUMMARY_FILENAME).stat().st_mtime
+        except OSError:
+            return arm_s
+        estimate = written - run_ms / 1000
+        # Never before the take was even started (a summary rewritten later).
+        return estimate if arm_s is None or estimate >= arm_s else arm_s
+    return arm_s
+
+
 def _already_matched_twophoton_paths(source_root: Path) -> set[Path]:
     """2P folders already claimed by some behavior take's Phase-3 transfer.
 
@@ -4310,7 +4339,7 @@ def _pending_twophoton_takes(source_root: Path):
     ``--delete-after-transfer`` before its true pair ever settled can no
     longer be found this way."""
     from octacam import session_cache
-    from octacam.transform import TWOPHOTON_PENDING_FILENAME
+    from octacam.transform import RECORDING_SUMMARY_FILENAME, TWOPHOTON_PENDING_FILENAME
     from octacam.twophoton_transfer import TakeInfo
 
     resolved_source = source_root.resolve()
@@ -4327,9 +4356,10 @@ def _pending_twophoton_takes(source_root: Path):
                 continue
         except (KeyError, OSError):
             continue
+        summary = _read_summary(folder / RECORDING_SUMMARY_FILENAME) or {}
         take = TakeInfo(
             folder=folder,
-            start_time=record["start_time"],
+            start_time=_take_match_start_s(folder, summary) or record["start_time"],
             duration_s=record["duration_s"],
             camera_frame_counts=record.get("camera_frame_counts", []),
         )
@@ -4358,6 +4388,26 @@ def _log_twophoton_assembly_preview(folder: Path, assemble: bool) -> None:
             "[dry-run] 2P tiff-assemble: %s %s: %s — would copy %d frame file(s) individually",
             folder, ch.channel, ch.reason, len(ch.source_files),
         )
+
+
+def _existing_stack_is_complete(stack: Path, source_files: list[Path], *, recheck: bool) -> bool:
+    """Whether an already-assembled *stack* holds every source frame: its page
+    count matches, and with *recheck* every page equals its source frame
+    (see :func:`_verify_assembled_stack`). False when absent or unreadable."""
+    if not stack.is_file():
+        return False
+    if recheck:
+        problem = _verify_assembled_stack(stack, source_files)
+        if problem:
+            log.warning("2P tiff-assemble: rebuilding %s — %s", stack, problem)
+        return problem is None
+    try:
+        import tifffile
+
+        with tifffile.TiffFile(stack) as tf:
+            return len(tf.pages) == len(source_files)
+    except Exception:  # noqa: BLE001 — unreadable means rebuild
+        return False
 
 
 def _transfer_image_folder_with_assembly(src: Path, dest: Path, *, verify: bool, checksum: bool, assemble: bool):
@@ -4396,6 +4446,14 @@ def _transfer_image_folder_with_assembly(src: Path, dest: Path, *, verify: bool,
     experiment_xml = src / EXPERIMENT_XML_FILENAME
     for ch in ready:
         dest_path = dest / ch.dest_name
+        if _existing_stack_is_complete(dest_path, ch.source_files, recheck=checksum):
+            # A re-run (e.g. after a cancel): a stack is only ever promoted to
+            # its final name after its own verification, so a complete one is
+            # kept — rebuilding a day's stacks took hours. With *checksum*
+            # (a delete depends on it) its pixels are re-checked instead.
+            result.skipped.append(dest_path.name)
+            log.info("2P tiff-assemble: %s %s: %s already complete — kept", src, ch.channel, dest_path)
+            continue
         assembled = assemble_channel_stack(
             ch.source_files, dest_path,
             axis=ch.axis or "T",
@@ -4621,7 +4679,8 @@ def _sweep_unclaimed_twophoton(
                 if not matches:
                     continue
                 local_folder, record = by_folder[take_folder]
-                dest = _current_take_dest(Path(record["dest"]), record.get("start_time"))
+                # The renamed-take lookup compares the exact recorded start.
+                dest = _current_take_dest(Path(record["dest"]), _take_start_s(local_folder))
                 _matched, ok_paths, n_failed_here = _finalize_twophoton_matches(
                     local_folder,
                     dest,
@@ -6419,7 +6478,7 @@ def _grid_and_transfer(
             groups.setdefault(key, []).append(
                 TakeInfo(
                     folder=folder,
-                    start_time=take_start_ns / 1e9,
+                    start_time=_take_match_start_s(folder, summary) or take_start_ns / 1e9,
                     duration_s=duration_s,
                     camera_frame_counts=camera_frame_counts,
                 )

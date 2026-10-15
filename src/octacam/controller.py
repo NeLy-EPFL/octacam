@@ -273,6 +273,7 @@ def build_recording_summary(
     aborted: bool,
     plugin_metadata: dict | None = None,
     ended_by: tuple[str, float] | None = None,
+    first_frame_wall_ns: int = 0,
 ) -> dict:
     """Assemble the recording_summary.json payload from finalized camera stats.
 
@@ -290,7 +291,12 @@ def build_recording_summary(
     e.g. twophoton stopping with ThorImage). The configured duration then never
     applied, so ``duration_s`` is the take's real length (frames / target fps —
     exact for a hardware-triggered take), which the 2P matcher and manifest use
-    as its end; the ceiling is kept as ``duration_limit_s``."""
+    as its end; the ceiling is kept as ``duration_limit_s``.
+
+    ``start_time_ns`` is when the recording was started (armed);
+    ``first_frame_time_ns`` is when every camera had delivered its first frame
+    — for an externally triggered take (2P: octacam armed first, ThorImage
+    started after) the real start, possibly many seconds later."""
     extension = settings.video_format().extension
     start_iso = (
         datetime.datetime.fromtimestamp(
@@ -330,6 +336,7 @@ def build_recording_summary(
         "schema_version": 4,
         "start_time": start_iso,
         "start_time_ns": start_wall_ns or None,
+        "first_frame_time_ns": first_frame_wall_ns or None,
         "aborted": aborted,
         "fps_target": settings.fps,
         "duration_s": _summary_duration_s(settings, cams, ended_by),
@@ -521,6 +528,7 @@ class RecordingController:
         # Host wall-clock (ns) captured when the current/last recording started,
         # written into recording_summary.json as the real-world start time.
         self._recording_start_wall_ns = 0
+        self._first_frame_wall_ns = 0
         # Bumped each time a countdown starts so clients can tell one recording
         # from the next even if they miss the intervening non-recording states.
         self._recording_seq = 0
@@ -1210,6 +1218,7 @@ class RecordingController:
                 self.camera_system.set_trigger_source(use_software_trigger)
                 self.camera_system.set_software_trigger_frequency(settings.fps)
                 self._recording_start_wall_ns = time.time_ns()
+                self._first_frame_wall_ns = 0
                 # Resolve one encode format per camera, honouring the GPU NVENC
                 # session limit: for save_method="nvenc" the first
                 # max_nvenc_sessions cameras encode on the GPU and any overflow
@@ -1564,6 +1573,7 @@ class RecordingController:
             self.plugins.dispatch("on_first_frame", plugin_params)
             with self._lock:
                 self._countdown_t0 = time.monotonic()
+                self._first_frame_wall_ns = time.time_ns()
                 deadline = self._countdown_t0 + duration_s + STOP_GRACE_S
                 self._deadline = deadline
                 self._recording_seq += 1
@@ -1737,6 +1747,7 @@ class RecordingController:
                 aborted,
                 plugin_metadata=self.plugins.collect_recording_metadata(),
                 ended_by=self._ended_by,
+                first_frame_wall_ns=self._first_frame_wall_ns,
             )
             path.write_text(json.dumps(summary, indent=2) + "\n")
             log.info("Wrote recording summary: %s", path)
