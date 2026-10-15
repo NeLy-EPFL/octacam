@@ -27,6 +27,7 @@ $ octacam [OPTIONS] COMMAND [ARGS]...
 * `process`: Post-recording pipeline: transcode, build...
 * `jobs`: Manage detached `octacam process` jobs...
 * `cache`: Inspect and clear the octacam cache...
+* `users`: The rig's users: who records and where...
 
 ## `octacam gui`
 
@@ -50,6 +51,7 @@ $ octacam gui [OPTIONS] [config_dir]
 * `--plugin <str>`: Enable a plugin (repeatable); adds to the config's `plugins` (e.g. --plugin flywheel). See `octacam doctor`.
 * `--no-plugins`: Disable all plugins for this launch, ignoring the config.
 * `--set KEY=VALUE`: Override one config key for this launch by its dotted path, `table.key=value`; repeatable. The value is read as TOML (a list may drop its brackets), and `none` restores the default.
+* `-u, --user <str>`: Who records: initials from the rig config's [users] (their transfer destination and plugin folders). Default: the last user on this machine. See `octacam users list`.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.
 
@@ -132,6 +134,7 @@ $ octacam record [OPTIONS] [config_dir]
 * `--plugin <str>`: Enable a plugin (repeatable); adds to the config's `plugins` (e.g. --plugin flywheel). See `octacam doctor`.
 * `--no-plugins`: Disable all plugins for this launch, ignoring the config.
 * `--set KEY=VALUE`: Override one config key for this launch by its dotted path, `table.key=value`; repeatable. The value is read as TOML (a list may drop its brackets), and `none` restores the default.
+* `-u, --user <str>`: Who records: initials from the rig config's [users] (their transfer destination and plugin folders). Default: the last user on this machine. See `octacam users list`.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.
 
@@ -435,5 +438,66 @@ $ octacam cache clear [OPTIONS]
 
 * `--all`: Also remove finished detached-job logs (kept by default).
 * `-y, --yes`: Clear without the confirmation prompt.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+## `octacam users`
+
+The rig's users: who records and where their data goes.
+
+**Usage**:
+
+```console
+$ octacam users [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `list`: List the rig's users and where each one's...
+* `add`: Add a user to the rig config (appended;...
+
+### `octacam users list`
+
+List the rig's users and where each one's data goes.
+
+**Usage**:
+
+```console
+$ octacam users list [OPTIONS] {config_dir}
+```
+
+**Arguments**:
+
+* `config_dir`: The rig's config directory.  [required]
+
+**Options**:
+
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam users add`
+
+Add a user to the rig config (appended; the rest is left as is).
+
+**Usage**:
+
+```console
+$ octacam users add [OPTIONS] {config_dir} {initials}
+```
+
+**Arguments**:
+
+* `config_dir`: The rig's config directory.  [required]
+* `initials`: 2 to 4 capital letters, like MD.  [required]
+
+**Options**:
+
+* `--name <str>`: Full name.
+* `--transfer-directory <str>`: Where `octacam process` copies their recordings. Default: guessed from the other users' (their own initials folder).
+* `--option PLUGIN.OPTION=VALUE`: A plugin's per-user option, e.g. twophoton.source=/mnt/share/MA; repeatable. Default: guessed like the transfer directory.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.

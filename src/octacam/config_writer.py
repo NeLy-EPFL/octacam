@@ -142,6 +142,12 @@ def _dumps(data: dict) -> str:
     transfer = data.get("transfer")
     if isinstance(transfer, dict) and transfer:
         block("transfer", transfer)
+    # Every other table ([users], or one a newer octacam reads): a rewrite
+    # must never drop what it does not know.
+    known = {"record", "transcode", "gui", "cameras", "plugins", "visualization"}
+    for header, table in data.items():
+        if header not in known | {"transfer"} and isinstance(table, dict) and table:
+            block(header, table)
 
     return "\n\n".join(blocks) + "\n" if blocks else ""
 

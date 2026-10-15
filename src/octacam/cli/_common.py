@@ -43,6 +43,28 @@ Verbose = Annotated[
     typer.Option("--verbose", "-v", help="Debug messages, and a traceback on errors."),
 ]
 
+#: `--user`, for the commands that record: whose data it is (the rig config's
+#: `[users]`), else the last user on this machine.
+User = Annotated[
+    str | None,
+    typer.Option(
+        "--user",
+        "-u",
+        help="Who records: initials from the rig config's [users] (their "
+        "transfer destination and plugin folders). Default: the last user on "
+        "this machine. See `octacam users list`.",
+        show_default=False,
+    ),
+]
+
+
+def check_user(config, user: str | None) -> None:
+    """Exit naming the rig's users when *user* is not one of them."""
+    if user and user not in config.users:
+        known = ", ".join(sorted(config.users)) or "none yet: `octacam users add`"
+        raise typer.BadParameter(f"unknown user {user!r} (users: {known})")
+
+
 #: `--set KEY=VALUE`, repeatable, for the commands that read a rig config.
 Sets = Annotated[
     list[str] | None,

@@ -7,6 +7,30 @@ const BUSY_STATES = new Set(["waiting", "recording", "finishing"]);
 // The Advanced-options switch is remembered per browser; off by default.
 const ADV_KEY = "octacam.record.advanced";
 
+// A recording folder `<experiment...>/<fly>/<take>` as its three parts, or
+// null when it has fewer than three (then the raw field is shown).
+export function splitRecording(relative) {
+  const parts = (relative || "").split("/").filter(Boolean);
+  if (parts.length < 3) return null;
+  return {
+    experiment: parts.slice(0, -2).join("/"),
+    fly: parts[parts.length - 2],
+    take: parts[parts.length - 1],
+  };
+}
+
+// The next fly: its number +1 (Fly2 -> Fly3, else "<fly>2"), the take's number
+// back to 1 at the same width (005 -> 001).
+export function nextFly({ experiment, fly, take }) {
+  const bump = (text, to) =>
+    text.replace(/(\d+)(?!.*\d)/, (digits) =>
+      String(to(Number(digits))).padStart(digits.length, "0")
+    );
+  const nextFlyName = /\d/.test(fly) ? bump(fly, (n) => n + 1) : `${fly}2`;
+  const firstTake = /\d/.test(take) ? bump(take, () => 1) : take;
+  return { experiment, fly: nextFlyName, take: firstTake };
+}
+
 function trimNum(v) {
   return String(Math.round(v * 1000) / 1000);
 }
@@ -99,6 +123,23 @@ export class RecordTab {
     // The server composes save_dir from these two halves.
     this.recordDir = document.getElementById("record-dir");
     this.relativeDir = document.getElementById("relative-dir");
+    this.relativeRow = document.getElementById("relative-row");
+    this.takeName = document.getElementById("take-name");
+    this.takeParts = {
+      experiment: document.getElementById("take-experiment"),
+      fly: document.getElementById("take-fly"),
+      take: document.getElementById("take-take"),
+    };
+    for (const input of Object.values(this.takeParts)) {
+      input.addEventListener("change", () => this._commitTakeName());
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") input.blur();
+      });
+    }
+    document.getElementById("next-fly-btn").addEventListener("click", () => {
+      const parts = splitRecording(this.settings?.relative_directory);
+      if (parts) this._commitTakeName(nextFly(parts));
+    });
     this.diskFree = document.getElementById("disk-free");
     this.advancedToggle = document.getElementById("record-advanced-toggle");
     this.advancedSection = document.getElementById("record-advanced");
@@ -227,6 +268,7 @@ export class RecordTab {
     ]) {
       if (KINDS.path.accepts(s[key]) && canSet(input)) input.value = s[key];
     }
+    this._showTakeName(s.relative_directory, canSet);
     // max_nvenc_sessions is null when auto-detecting the GPU cap, else an int cap.
     if (
       "max_nvenc_sessions" in s &&
@@ -474,6 +516,34 @@ export class RecordTab {
     if (this.settings && path === this.settings.record_directory) return;
     const ok = await this._put({ record_directory: path }, [this.recordDir]);
     if (ok) this._validateRecordDir();
+  }
+
+  // Experiment / fly / take fields when the folder has those three levels,
+  // else the raw relative-directory field.
+  _showTakeName(relative, canSet = () => true) {
+    const parts = splitRecording(relative);
+    this.takeName.hidden = !parts;
+    this.relativeRow.hidden = Boolean(parts);
+    if (!parts) return;
+    for (const [key, input] of Object.entries(this.takeParts)) {
+      if (canSet(input)) input.value = parts[key];
+    }
+  }
+
+  _commitTakeName(parts) {
+    const p = parts || {
+      experiment: this.takeParts.experiment.value.trim(),
+      fly: this.takeParts.fly.value.trim(),
+      take: this.takeParts.take.value.trim(),
+    };
+    if (!p.experiment || !p.fly || !p.take) {
+      this.notify("warning", "Experiment, fly and take all need a name");
+      this._showTakeName(this.settings?.relative_directory);
+      return;
+    }
+    const rel = `${p.experiment}/${p.fly}/${p.take}`;
+    if (this.settings && rel === this.settings.relative_directory) return;
+    this._put({ relative_directory: rel }, Object.values(this.takeParts));
   }
 
   _commitRelativeDir() {
