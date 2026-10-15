@@ -548,6 +548,14 @@ body {
   color: var(--text-dim);
   line-height: 1.5;
 }
+.hint.warning {
+  display: block;
+  color: var(--text);
+  padding: 4px 6px;
+  border-left: 3px solid var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
+.row[hidden], .hint[hidden] { display: none; }
 
 fieldset {
   margin: 0;

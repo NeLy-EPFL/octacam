@@ -146,6 +146,7 @@ async function main() {
     send: (m) => conn.send(m),
     notify,
     getRecordSettings: () => record.settings,
+    setDurationSync: (spec) => record.setDurationSync(spec),
   });
 
   const benchmark = new BenchmarkTab({ notify });
