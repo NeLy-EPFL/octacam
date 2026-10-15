@@ -215,6 +215,22 @@ class PluginConfig(BaseModel):
 _BACKENDS = ("auto", "basler", "flir", "spinnaker", "pycameleon", "fake")
 
 
+# A user's key: their initials, as the lab's NAS folders are named (MD, MA).
+USER_INITIALS_RE = re.compile(r"^[A-Z]{2,4}$")
+
+
+class UserConfig(BaseModel):
+    """One `[users.<initials>]` entry: who records on this rig and where their
+    data goes. `transfer_directory` replaces `[transfer].directory` for their
+    recordings; a sub-table named after a plugin (`[users.MD.twophoton]`) holds
+    that plugin's per-user options (its `Plugin.user_options`).
+    """
+
+    name: ScalarStr = ""
+    transfer_directory: ScalarStr = ""
+    plugins: dict[str, dict] = Field(default_factory=dict)
+
+
 class OctacamConfig(BaseModel):
     # "auto": each camera is claimed by the best installed tier that sees it
     # (registry.CASCADE); a backend name pins the rig to that one.
@@ -226,6 +242,8 @@ class OctacamConfig(BaseModel):
     visualization: list[VisualizationConfig] = Field(default_factory=list)
     transfer: TransferConfig | None = None
     gui: GuiConfig = Field(default_factory=GuiConfig)
+    # The rig's users by initials (see UserConfig); empty: one anonymous user.
+    users: dict[str, UserConfig] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +350,8 @@ class RecordingSettings:
     transcode_ffmpeg_params: FfmpegArgs = DEFAULT_TRANSCODE_FFMPEG_PARAMS
     transfer_directory: str = ""
     transfer_checksum: bool = True
+    # Who records (a `[users]` key; "" for none), noted in each summary.
+    user: str = ""
 
     @classmethod
     def from_config(
@@ -633,6 +653,34 @@ def _parse_plugins(plugins_src: object) -> list[PluginConfig]:
     return result
 
 
+def _parse_users(users_src: object) -> dict[str, UserConfig]:
+    """Parse the optional `[users.<initials>]` tables. An entry whose key is
+    not initials (2-4 capital letters) or whose values are malformed is warned
+    about and skipped; a sub-table is a plugin's per-user options.
+    """
+    if users_src is None:
+        return {}
+    if not isinstance(users_src, dict):
+        log.warning('Ignoring "users" in octacam config as it is not a table')
+        return {}
+    users: dict[str, UserConfig] = {}
+    for initials, entry in users_src.items():
+        if not USER_INITIALS_RE.match(initials) or not isinstance(entry, dict):
+            log.warning(
+                'Ignoring user "%s": a user is [users.<initials>] (2-4 capital '
+                "letters) with name and transfer_directory",
+                initials,
+            )
+            continue
+        plugins = {k: dict(v) for k, v in entry.items() if isinstance(v, dict)}
+        fields = {k: v for k, v in entry.items() if not isinstance(v, dict)}
+        try:
+            users[initials] = UserConfig(**fields, plugins=plugins)
+        except ValidationError as e:
+            log.warning("Ignoring user %s: %s", initials, e.errors()[0]["msg"])
+    return users
+
+
 def is_safe_segment(name: str) -> bool:
     """Whether `name` is one path segment, usable as a filename stem or folder
     name: non-empty, no separator, no `.`/`..`.
@@ -874,6 +922,7 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
 
     # Parsed before the cameras block, which has several early returns.
     config.plugins = _parse_plugins(data.get("plugins"))
+    config.users = _parse_users(data.get("users"))
 
     cameras_src = data.get("cameras")
     if cameras_src is None:

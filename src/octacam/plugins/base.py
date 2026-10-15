@@ -40,6 +40,16 @@ class Plugin:
     def broadcast(self, topic: str, payload: dict, /) -> None:
         """Push `payload` to every GUI client as `topic`; a no-op until attached."""
 
+    # Options a user can set for themselves (`[users.MD.<name>]`), as
+    # {option: "label shown when adding a user"}: paths like their own data
+    # folder. The rest of the options stay the rig's.
+    user_options: ClassVar[dict[str, str]] = {}
+
+    def on_user(self, options: dict) -> None:
+        """The chosen user's own options (a `user_options` subset, {} when they
+        set none or no user is chosen): what this plugin uses from now on.
+        """
+
     @classmethod
     def doctor(
         cls, options: dict, config: OctacamConfig, config_dir: Path | None
@@ -187,6 +197,12 @@ class PluginManager:
                 plugin, plugin.on_ws_message, message, client_id, default=True
             ):
                 return
+
+    def on_user(self, options_by_plugin: dict[str, dict]) -> None:
+        """Hand each plugin the chosen user's options for it."""
+        for plugin in self.plugins:
+            options = options_by_plugin.get(plugin.name, {})
+            self._call(plugin, plugin.on_user, dict(options))
 
     def on_ws_disconnect(self, client_id: int) -> None:
         for plugin in self.plugins:
