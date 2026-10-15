@@ -1435,3 +1435,93 @@ def test_record_start_does_not_ask_when_no_job_is_busy(page):
         }"""
     )
     assert page.evaluate("window.__asked") is False
+
+
+def test_record_tab_warns_when_thorsync_would_stop_before_the_take(static_server, browser):
+    # ThorSync's duration (newest SyncData folder's settings) shorter than the
+    # longest the take can run: an explicit alert under the duration rows and
+    # one event-log entry. It follows the choice: a manual 20 s take fits; a
+    # fixed ThorSync setting clears it.
+    page = browser.new_page()
+    status = {
+        "device": "/dev/arduinoCams", "arduino_state": "idle", "ready": True,
+        "firmware": "2PHOTON 2 abc", "firmware_ok": True, "firmware_state": "current",
+        "needs_flash": False, "error": None, "match_thorimage": True,
+        "max_duration_s": 3600.0, "stop_idle_ms": 2000,
+        "thorsync": {"folder": "PAM7xCI80/SyncData184", "limit_s": 320.0},
+        "web": {"module": "/plugins/twophoton/twophoton.js"},
+    }
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(builder())
+        )
+
+    page.route("**/api/**", json_route(dict))
+    page.route(
+        "**/api/system",
+        json_route(lambda: _system_payload(ready=True, plugins={"twophoton": status})),
+    )
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=True)))
+    page.route(
+        "**/plugins/twophoton/twophoton.js",
+        lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=TWOPHOTON_JS.read_text()
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+
+    def warning():
+        return page.evaluate(
+            """() => { const el = document.getElementById('duration-sync-warning');
+                       return el.hidden ? null : el.textContent; }"""
+        )
+
+    def set_box(box_id, checked):
+        page.evaluate(
+            """([id, on]) => { const el = document.getElementById(id);
+                el.checked = on; el.dispatchEvent(new Event('change')); }""",
+            [box_id, checked],
+        )
+
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => !document.getElementById('duration-sync-warning').hidden", timeout=5000
+        )
+        text = warning()
+        assert "ThorSync is set to stop after 320 s" in text
+        assert "PAM7xCI80/SyncData184" in text and "60 min" in text
+        events = page.eval_on_selector_all("#events .event", "els => els.map(e => e.textContent)")
+        assert sum("ThorSync is set to stop" in e for e in events) == 1
+
+        set_box("duration-sync", False)  # manual duration (20 s default) fits
+        assert warning() is None
+        set_box("duration-sync", True)
+        assert "320 s" in warning()
+
+        page.evaluate(
+            "(msg) => window.__pushWs(msg)",
+            {**status, "type": "twophoton_state", "state": "idle",
+             "thorsync": {"folder": "PAM7xCI80/SyncData185", "limit_s": 7200.0}},
+        )
+        page.wait_for_function(
+            "() => document.getElementById('duration-sync-warning').hidden", timeout=5000
+        )
+    finally:
+        page.close()
+
+
+def test_jobs_notice_counts_warnings_and_reports_them_at_the_end(page):
+    _jobs_notice(page)
+    _apply_jobs(page, [{**RUNNING_JOB, "warning_count": 2}])
+    assert "⚠ 2 warnings so far" in prop(page, "#jobs-banner", "e => e.textContent")
+    _apply_jobs(
+        page, [],
+        [{"job_id": "j1", "state": "done", "error": None, "warning_count": 2,
+          "warnings": ["WARNING: ThorSync recording SyncData167 stopped at its 320 s limit"]}],
+    )
+    level, message = page.evaluate("window.__notes")[-1]
+    assert level == "warning"
+    assert message.startswith("Background processing finished with 2 warnings — first: WARNING: ThorSync")
+    assert "octacam jobs attach j1" in message

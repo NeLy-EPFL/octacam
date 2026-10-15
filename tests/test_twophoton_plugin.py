@@ -1126,3 +1126,58 @@ def test_status_reports_match_config():
     assert status["match_thorimage"] is True
     assert status["max_duration_s"] == plugin._max_duration_s
     assert status["stop_idle_ms"] == plugin._stop_idle_ms
+
+
+# --- ThorSync duration safeguard -------------------------------------------
+
+
+def _thorsync_share(tmp_path, duration):
+    folder = tmp_path / "share" / "PAM7xCI80" / "SyncData184"
+    folder.mkdir(parents=True)
+    (folder / "ThorRealTimeDataSettings.xml").write_text(
+        f'<?xml version="1.0"?><ThorData><AcquireBoard active="1" duration="{duration}">'
+        '<SampleRate enable="1" rate="100000" /></AcquireBoard></ThorData>'
+    )
+    return tmp_path / "share"
+
+
+class _Ctrl:
+    def __init__(self, source):
+        self.events: list = []
+        self._settings = type("S", (), {"transfer_twophoton_source": str(source)})()
+
+    def get_settings(self):
+        return self._settings
+
+    def _event(self, level, message):
+        self.events.append((level, message))
+
+
+def test_thorsync_limit_is_read_off_thread_and_reported(tmp_path):
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    plugin._controller = _Ctrl(_thorsync_share(tmp_path, 320))
+    plugin.refresh_thorsync_limit(wait=True)
+    assert plugin.status()["thorsync"] == {"folder": "PAM7xCI80/SyncData184", "limit_s": 320.0}
+    warning = plugin.thorsync_warning(3600)
+    assert warning and "stop after 320 s" in warning and "60 min" in warning
+    assert plugin.thorsync_warning(300) is None  # a short take fits
+
+
+def test_arming_a_take_longer_than_thorsync_warns_in_the_gui(tmp_path):
+    plugin, link = _plugin_with_fake(match_thorimage=True)
+    ctrl = _Ctrl(_thorsync_share(tmp_path, 320))
+    plugin._controller = ctrl
+    plugin.refresh_thorsync_limit(wait=True)
+    plugin.on_recording_start({"twophoton": {"fps": 100, "match_thorimage": True}})
+    assert link.written  # still armed — the warning never blocks a take
+    ((level, message),) = ctrl.events
+    assert level == "warning" and "ThorSync is set to stop after 320 s" in message
+
+
+def test_no_thorsync_warning_when_the_limit_covers_the_take(tmp_path):
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    ctrl = _Ctrl(_thorsync_share(tmp_path, 7200))
+    plugin._controller = ctrl
+    plugin.refresh_thorsync_limit(wait=True)
+    plugin.on_recording_start({"twophoton": {"fps": 100, "match_thorimage": True}})
+    assert ctrl.events == []

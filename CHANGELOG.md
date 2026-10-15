@@ -11,6 +11,23 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **ThorSync duration safeguards.** ThorSync stops recording after its own
+  acquisition duration, and a take longer than that silently lost the rest
+  of its ThorSync data (timing, AirFlow — real data: a 320 s limit against
+  394 s takes). Now, before recording, the Record tab shows an alert (and the
+  event log an entry) when the newest `SyncData` folder's duration is shorter
+  than the take can run, `octacam doctor` reports the same, and arming such a
+  take logs it; after recording, `octacam process` flags every ThorSync
+  recording cut off mid-capture — a warning in the run, `thorsync_cut_off` in
+  the take's `twophoton_match.json`, and a **Warnings** section at the top of
+  the day's `2p_reconciliation.md`.
+- **Background jobs count their warnings.** Every warning/error a detached
+  `octacam process` run logs is recorded in its status: `octacam jobs list`
+  has a Warnings column, the GUI shows "N warnings so far" and announces
+  "finished with N warnings" (quoting the first), and the log ends with a
+  summary. The expected "no permission to delete the 2P source" errors on a
+  share without delete rights are now one explicit line per run.
+
 - **The GUI shows background processing.** While a detached `octacam
   process` job is running, a strip along the bottom of the camera view says
   what it is doing and how long the current step has left (*building a grid

@@ -283,3 +283,112 @@ def read_segment_edge_times(
         return [(e - start) / rate for e in _rising_edge_indices(col) if start <= e < end]
 
     return _times(cameras_col), _times(frameout_col)
+
+
+def _active_board(settings_xml: Path):
+    """ThorSync's active ``<AcquireBoard active="1">`` element, or None."""
+    try:
+        root = ET.parse(settings_xml).getroot()
+    except (ET.ParseError, OSError):
+        return None
+    return next((b for b in root.iter("AcquireBoard") if b.get("active") == "1"), None)
+
+
+def _active_board_rate(settings_xml: Path) -> float | None:
+    """Sample rate (Hz) of the active board — unlike :func:`channel_sample_rate`,
+    never an inactive preset's."""
+    board = _active_board(settings_xml)
+    if board is None:
+        return None
+    for rate_el in board.findall("SampleRate"):
+        if rate_el.get("enable") == "1":
+            try:
+                return float(rate_el.get("rate", ""))
+            except ValueError:
+                return None
+    return None
+
+
+def thorsync_duration_limit(settings_xml: Path) -> float | None:
+    """ThorSync's acquisition length (s) — the active ``<AcquireBoard
+    active="1">``'s ``duration``. ThorSync stops recording after it whatever
+    the capture is doing: real 2026-10-14 ``duration="320"`` cut every ~394 s
+    take's episode at exactly 32 M samples (100 kHz). None when missing,
+    unreadable or 0."""
+    board = _active_board(settings_xml)
+    if board is None:
+        return None
+    try:
+        duration = float(board.get("duration", "0"))
+    except ValueError:
+        return None
+    return duration if duration > 0 else None
+
+
+@dataclass(frozen=True)
+class EpisodeCutOff:
+    """A ThorSync episode that ended while ``CaptureOn`` was still high: the
+    acquisition went on, but ThorSync stopped recording (its duration limit)
+    — every channel (timing, AirFlow, ...) is missing for the rest of it."""
+
+    recorded_s: float | None  # length of what was recorded
+    limit_s: float | None  # ThorSync's duration setting, when readable
+
+
+def episode_cut_off(sync_folder: Path) -> EpisodeCutOff | None:
+    """An :class:`EpisodeCutOff` when *sync_folder*'s episode stops mid-capture
+    (``CaptureOn`` high at its last sample), else None — also None when it
+    can't be read (no h5py, no episode, no CaptureOn). Reads only the last
+    sample, so it is cheap even on a multi-GB episode over the network. Only
+    meaningful for a settled folder (a still-recording one is "cut" too)."""
+    if not h5py_available():
+        return None
+    episodes = sorted(sync_folder.glob(EPISODE_GLOB))
+    if not episodes:
+        return None
+    import h5py
+
+    try:
+        with h5py.File(episodes[0], "r") as f:
+            node = f.get(f"DI/{_CAPTUREON_CHANNEL}")
+            if not isinstance(node, h5py.Dataset) or node.shape[0] == 0:
+                return None
+            n = int(node.shape[0])
+            still_on = bool(node[n - 1, 0])
+    except (OSError, KeyError, ValueError):
+        return None
+    if not still_on:
+        return None
+    settings = sync_folder / SETTINGS_XML_FILENAME
+    rate = _active_board_rate(settings) or channel_sample_rate(settings, _CAPTUREON_CHANNEL)
+    return EpisodeCutOff(
+        recorded_s=n / rate if rate else None,
+        limit_s=thorsync_duration_limit(settings),
+    )
+
+
+def describe_cut_off(name: str, cut: EpisodeCutOff) -> str:
+    """One explicit sentence for logs, manifests and the GUI."""
+    limit = f" at its {cut.limit_s:g} s duration limit" if cut.limit_s else ""
+    recorded = f" after {cut.recorded_s:.0f} s" if cut.recorded_s and not cut.limit_s else ""
+    return (
+        f"ThorSync recording {name} stopped{limit}{recorded} while the 2P "
+        "capture was still running — its timing, AirFlow and every other "
+        "ThorSync channel are missing for the rest of the take. Raise the "
+        "acquisition duration in ThorSync."
+    )
+
+
+def latest_thorsync_limit(source_root: Path) -> tuple[Path, float | None] | None:
+    """``(newest SyncData folder, its ThorSync duration limit)`` under
+    *source_root*'s experiment folders — the settings ThorSync used last,
+    hence (until the next acquisition) the ones the next take will get. None
+    when the share holds no SyncData folder or can't be listed."""
+    try:
+        folders = [d for d in source_root.glob("*/SyncData*") if d.is_dir()]
+        newest = max(folders, key=lambda d: d.stat().st_mtime, default=None)
+    except OSError:
+        return None
+    if newest is None:
+        return None
+    return newest, thorsync_duration_limit(newest / SETTINGS_XML_FILENAME)

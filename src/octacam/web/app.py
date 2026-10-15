@@ -638,7 +638,13 @@ class _AppState:
         payload = {
             "live": [process_jobs.notice_dict(j) for j in live],
             "ended": [
-                {"job_id": j.job_id, "state": j.state, "error": j.error}
+                {
+                    "job_id": j.job_id,
+                    "state": j.state,
+                    "error": j.error,
+                    "warning_count": j.warning_count,
+                    "warnings": j.warnings[:5],
+                }
                 for j in jobs
                 if j.job_id in self._jobs_seen and process_jobs.is_finished(j)
             ],

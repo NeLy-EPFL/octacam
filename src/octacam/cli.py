@@ -1550,10 +1550,12 @@ def _doctor_plugins(report: _Report, cfg) -> None:
     if cfg is None:
         return
     twophoton_enabled = False
+    twophoton_options: dict = {}
     for pc in cfg.plugins:
         name = plugins_mod._ALIASES.get(pc.name, pc.name)
         if name == "twophoton":
             twophoton_enabled = True
+            twophoton_options = pc.options or {}
         info = by_name.get(name)
         if info is None:
             report.add("error", f"config enables unknown plugin {pc.name!r}")
@@ -1589,6 +1591,47 @@ def _doctor_plugins(report: _Report, cfg) -> None:
             "isn't enabled — recordings won't be armed by the ThorSync trigger "
             "at all; add a [[plugins]] entry with name = \"twophoton\" to arm it.",
         )
+    if twophoton_enabled and twophoton_transfer_configured:
+        _doctor_thorsync_limit(report, cfg, twophoton_options)
+
+
+def _doctor_thorsync_limit(report: _Report, cfg, options: dict) -> None:
+    """ThorSync stops recording at its own acquisition duration: shorter than
+    a take, it silently loses the rest of it (timing, AirFlow) — real
+    2026-10-14, a 320 s limit against 394 s takes. Checked against the
+    newest SyncData folder's settings (what ThorSync used last)."""
+    from octacam.config import duration_to_seconds, resolve_dir_template
+    from octacam.plugins.twophoton import (
+        DEFAULT_MATCH_THORIMAGE,
+        DEFAULT_MAX_DURATION_S,
+        thorsync_limit_message,
+    )
+    from octacam.twophoton_signals import latest_thorsync_limit
+
+    source = Path(resolve_dir_template(cfg.transfer.twophoton.source))
+    latest = latest_thorsync_limit(source)
+    if latest is None:
+        report.add("info", f"ThorSync duration: no SyncData folder found under {source}")
+        return
+    folder, limit = latest
+    label = f"{folder.parent.name}/{folder.name}"
+    if not limit:
+        report.add("info", f"ThorSync duration: not readable from {label}")
+        return
+    match = options.get("match_thorimage", DEFAULT_MATCH_THORIMAGE)
+    try:
+        longest = float(options.get("max_duration_s", DEFAULT_MAX_DURATION_S))
+    except (TypeError, ValueError):
+        longest = DEFAULT_MAX_DURATION_S
+    if match in (False, "false", "False", 0) and cfg.record is not None:
+        # Fixed-duration takes: the configured duration is the longest.
+        longest = duration_to_seconds(
+            cfg.record.duration, cfg.record.duration_unit, cfg.record.fps
+        )
+    if limit < longest:
+        report.add("warn", thorsync_limit_message(label, limit, longest))
+    else:
+        report.add("ok", f"ThorSync duration {limit:g} s (from {label}) covers the longest take")
 
 
 def _plugin_default_device(name: str) -> str | None:
@@ -4236,6 +4279,35 @@ def _take_match_start_s(folder: Path, summary: dict) -> float | None:
     return arm_s
 
 
+def _remove_2p_source(src_2p: Path, denied: list[Path]) -> None:
+    """delete-after-transfer for one verified 2P source folder. A permission
+    refusal (the share's account has no delete right — the normal case on a
+    `noperm` CIFS mount) is collected into *denied* for one summary line
+    (:func:`_report_denied_2p_deletes`) instead of an error per folder, which
+    buried every real warning in a run's log."""
+    try:
+        shutil.rmtree(src_2p)
+        log.info("delete-after-transfer: removed 2P source %s (verified on NAS)", src_2p)
+    except PermissionError:
+        denied.append(src_2p)
+    except OSError as e:
+        log.error("delete-after-transfer: failed to remove %s: %s", src_2p, e)
+
+
+def _report_denied_2p_deletes(denied: list[Path]) -> None:
+    if not denied:
+        return
+    experiments = sorted({p.parent for p in denied})
+    log.warning(
+        "delete-after-transfer: no permission to delete %d verified 2P source "
+        "folder(s) on the share (%s) — they are safe on the NAS; check with "
+        "`octacam process --twophoton-verify %s --config <rig>` and delete them by hand",
+        len(denied),
+        ", ".join(p.name for p in denied),
+        " ".join(str(e) for e in experiments),
+    )
+
+
 def _already_matched_twophoton_paths(source_root: Path) -> set[Path]:
     """2P folders already claimed by some behavior take's Phase-3 transfer.
 
@@ -4511,6 +4583,7 @@ def _finalize_twophoton_matches(
     every data transfer is done, instead of rendering here."""
     from octacam.transfer import transfer_folder, transfer_tree
     from octacam.transform import TWOPHOTON_MATCH_FILENAME
+    from octacam.twophoton_signals import describe_cut_off, episode_cut_off
     from octacam.twophoton_transfer import EXPERIMENT_XML_FILENAME, build_match_record
 
     matched_paths: list[Path] = []
@@ -4545,8 +4618,20 @@ def _finalize_twophoton_matches(
                 transfer_folder(
                     m.folder.path, dest, files_only=[xml_src], verify=verify, checksum=checksum
                 )
+    record = build_match_record(settled, source_root)
+    for entry, m in zip(record["matched"], settled, strict=True):
+        if m.folder.kind != "sync":
+            continue
+        cut = episode_cut_off(m.folder.path)
+        if cut is not None:
+            message = describe_cut_off(m.folder.path.name, cut)
+            log.warning("2P transfer: %s (take %s)", message, folder)
+            entry["thorsync_cut_off"] = {
+                "recorded_s": cut.recorded_s,
+                "limit_s": cut.limit_s,
+                "message": message,
+            }
     if not dry_run:
-        record = build_match_record(settled, source_root)
         match_path = folder / TWOPHOTON_MATCH_FILENAME
         match_path.write_text(json.dumps(record, indent=2) + "\n")
         transfer_folder(folder, dest, files_only=[match_path], verify=verify, checksum=checksum)
@@ -4705,20 +4790,10 @@ def _sweep_unclaimed_twophoton(
                 if not dry_run:
                     _clear_twophoton_pending(local_folder)
                     if record.get("checksum"):  # delete_wanted at write time
+                        denied: list[Path] = []
                         for src_2p in ok_paths:
-                            try:
-                                shutil.rmtree(src_2p)
-                                log.info(
-                                    "delete-after-transfer: removed 2P source %s "
-                                    "(verified on NAS)",
-                                    src_2p,
-                                )
-                            except OSError as e:
-                                log.error(
-                                    "delete-after-transfer: failed to remove %s: %s",
-                                    src_2p,
-                                    e,
-                                )
+                            _remove_2p_source(src_2p, denied)
+                        _report_denied_2p_deletes(denied)
                 claimed = {m.folder.path.resolve() for m in matches}
                 todo = [c for c in todo if c.path.resolve() not in claimed]
 
@@ -4743,6 +4818,12 @@ def _sweep_unclaimed_twophoton(
         else:
             date_str = time.strftime("%y%m%d", time.localtime(folder.start_time))
             dest = sweep_root / experiment / date_str / folder.path.name
+        if folder.kind == "sync":
+            from octacam.twophoton_signals import describe_cut_off, episode_cut_off
+
+            cut = episode_cut_off(folder.path)
+            if cut is not None:
+                log.warning("2P sweep: %s", describe_cut_off(folder.path.name, cut))
         if dry_run:
             log.info("[dry-run] 2P sweep: %s -> %s", folder.path, dest)
             if folder.kind == "image":
@@ -5729,8 +5810,15 @@ def _rebuild_twophoton_manifests(
             for f in unclaimed
             if f.path in attribution_all
         }
+        from octacam.twophoton_signals import describe_cut_off, episode_cut_off
+
+        cut_offs = {
+            f.path.name: describe_cut_off(f.path.name, cut)
+            for f in unclaimed
+            if f.kind == "sync" and (cut := episode_cut_off(f.path)) is not None
+        }
         manifest = render_twophoton_manifest(
-            day_dir.name, takes, unclaimed, source_reachable, attributed
+            day_dir.name, takes, unclaimed, source_reachable, attributed, cut_offs
         )
         manifest_path = day_dir / TWOPHOTON_MANIFEST_FILENAME
         if dry_run:
@@ -6727,6 +6815,7 @@ def _grid_and_transfer(
         # whether it's safe to reclaim local disk space needs to see exactly
         # what this would remove before it actually removes anything;
         # `shutil.rmtree` itself stays gated on `not dry_run`.
+        denied_2p: list[Path] = []
         for folder in folder_dest:
             if not folder_delete_after.get(folder, False):
                 continue
@@ -6768,17 +6857,8 @@ def _grid_and_transfer(
                         src_2p,
                     )
                     continue
-                try:
-                    shutil.rmtree(src_2p)
-                    log.info(
-                        "delete-after-transfer: removed 2P source %s "
-                        "(verified on NAS)",
-                        src_2p,
-                    )
-                except OSError as e:
-                    log.error(
-                        "delete-after-transfer: failed to remove %s: %s", src_2p, e
-                    )
+                _remove_2p_source(src_2p, denied_2p)
+        _report_denied_2p_deletes(denied_2p)
 
         # --- Phase 6: renderings — synced behavior+2P videos, Z-stack MIPs ---
         # Last: quick-look output only, rendered from the NAS copy (the take's

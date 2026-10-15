@@ -826,6 +826,23 @@ against a real 2P rig; the durable findings:
   ThorSync's NI6363 `duration="320"` cap cut every ~394 s take's episode at
   32 M samples — `CaptureOn` never falls, no segment, so those fall back to
   start-time pairing and get no synced render.
+  **ThorSync duration safeguards (2026-10-15, Matthias: "explicit is always
+  better than implicit").** ThorSync stops at its active `<AcquireBoard
+  duration>`. `twophoton_signals.episode_cut_off` = `CaptureOn` still high at
+  the episode's last sample (reads one sample; use the *active* board's rate —
+  `channel_sample_rate` can pick an inactive preset's). `process` logs it,
+  stores `thorsync_cut_off` in the match entry, and the manifest lists it under
+  **Warnings** (also for unclaimed sync folders). Before recording, the
+  twophoton plugin reads `latest_thorsync_limit` (newest `SyncData*` under the
+  session's live `transfer_twophoton_source`) **off-thread** — `status()`/state
+  pushes also run on the serial reader thread, which must never block on the
+  share — and the Record tab shows `spec.warning` under the sync row (longest
+  take = `max_duration_s` when synced, else the manual duration); arming logs
+  it plus a controller event; `doctor` checks it too. Detached jobs capture
+  every WARNING+ into `JobStatus.warnings`/`warning_count` (`_WarningCapture`
+  on the `octacam` logger, which has `propagate=False` — tests must attach a
+  handler to it, `caplog` sees nothing). Denied 2P-source deletes collapse
+  into one warning (`_report_denied_2p_deletes`).
   **Frame averaging** (`LSM averageMode="1" averageNum=N`, e.g. rolling
   average left on; real 2026-10-14 Fly4/003: 476 frames ↔ 1906 edges):
   FrameOut pulses per *scan*, so `thorimage_frame_average` multiplies the

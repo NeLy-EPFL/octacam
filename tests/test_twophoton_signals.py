@@ -253,3 +253,58 @@ def test_verify_frameout_match_exact_and_tolerance():
     assert verify_frameout_match(seg, 1500) is True
     assert verify_frameout_match(seg, 1501, tolerance=1) is True
     assert verify_frameout_match(seg, 1600) is False
+
+
+# --- ThorSync duration limit / cut-off episodes ----------------------------
+
+
+def _thorsync_folder(root, name, *, capture, duration=320, rate=1000):
+    """A SyncData folder whose CaptureOn column is *capture* (0/1 per sample)."""
+    folder = root / name
+    folder.mkdir(parents=True)
+    with h5py.File(folder / "Episode001.h5", "w") as f:
+        f.create_group("DI").create_dataset(
+            "CaptureOn", data=np.asarray(capture, np.uint32).reshape(-1, 1)
+        )
+    (folder / "ThorRealTimeDataSettings.xml").write_text(
+        '<?xml version="1.0"?><ThorData>'
+        '<AcquireBoard type="NI6363" active="0" duration="0">'
+        '<DataChannel alias="CaptureOn" enable="1" /><SampleRate enable="1" rate="5" />'
+        "</AcquireBoard>"
+        f'<AcquireBoard type="NI6363" active="1" duration="{duration}">'
+        '<DataChannel alias="CaptureOn" enable="1" />'
+        f'<SampleRate enable="1" rate="{rate}" /></AcquireBoard></ThorData>'
+    )
+    return folder
+
+
+def test_episode_cut_off_when_capture_still_on_at_the_end(tmp_path):
+    # Real 2026-10-14 SyncData167: ThorSync's 320 s limit hit mid-capture.
+    from octacam.twophoton_signals import (
+        describe_cut_off,
+        episode_cut_off,
+        thorsync_duration_limit,
+    )
+
+    cut = _thorsync_folder(tmp_path, "SyncData167", capture=[0] * 10 + [1] * 1990)
+    done = _thorsync_folder(tmp_path, "SyncData166", capture=[0] * 10 + [1] * 1980 + [0] * 10)
+    assert thorsync_duration_limit(cut / "ThorRealTimeDataSettings.xml") == 320.0
+    result = episode_cut_off(cut)
+    assert result is not None
+    assert (result.recorded_s, result.limit_s) == (2.0, 320.0)
+    assert episode_cut_off(done) is None
+    message = describe_cut_off("SyncData167", result)
+    assert "320 s duration limit" in message and "AirFlow" in message
+
+
+def test_latest_thorsync_limit_reads_the_newest_sync_folder(tmp_path):
+    import os
+
+    from octacam.twophoton_signals import latest_thorsync_limit
+
+    old = _thorsync_folder(tmp_path / "ExpA", "SyncData001", capture=[0], duration=320)
+    new = _thorsync_folder(tmp_path / "ExpB", "SyncData002", capture=[0], duration=7200)
+    os.utime(old, (1_000, 1_000))
+    os.utime(new, (2_000, 2_000))
+    assert latest_thorsync_limit(tmp_path) == (new, 7200.0)
+    assert latest_thorsync_limit(tmp_path / "missing") is None

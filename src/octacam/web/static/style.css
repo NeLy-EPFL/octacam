@@ -540,6 +540,13 @@ body {
   color: var(--text-dim);
   line-height: 1.5;
 }
+.hint.warning {
+  display: block;
+  color: var(--text);
+  padding: 4px 6px;
+  border-left: 3px solid var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
 
 fieldset {
   margin: 0;
@@ -564,7 +571,7 @@ fieldset:disabled { opacity: 0.55; }
 }
 
 /* .row's display:grid would otherwise override the hidden attribute. */
-.row[hidden] { display: none; }
+.row[hidden], .hint[hidden] { display: none; }
 
 .row > span:first-child {
   text-align: right;

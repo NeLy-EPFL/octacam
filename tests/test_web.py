@@ -1710,4 +1710,6 @@ def test_jobs_notice_reports_live_job_then_its_end(client, tmp_path, monkeypatch
     assert state.refresh_jobs() is True
     jobs = client.get("/api/system").json()["jobs"]
     assert jobs["live"] == []
-    assert jobs["ended"] == [{"job_id": "j1", "state": "done", "error": None}]
+    assert jobs["ended"] == [
+        {"job_id": "j1", "state": "done", "error": None, "warning_count": 0, "warnings": []}
+    ]

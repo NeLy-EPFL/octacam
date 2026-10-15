@@ -4829,3 +4829,115 @@ def test_rerun_keeps_complete_stacks_and_rebuilds_a_bad_one(tmp_path):
     assert not _existing_stack_is_complete(stack, ch.source_files, recheck=True)
     write(frames[:3])
     assert not _existing_stack_is_complete(stack, ch.source_files, recheck=False)
+
+
+def test_process_flags_a_cut_off_thorsync_recording(tmp_path, monkeypatch):
+    # Real 2026-10-14: ThorSync's 320 s limit cut every ~394 s take's episode
+    # (no timing/AirFlow for the rest) — silently. Now it is a WARNING in the
+    # run and recorded in the take's twophoton_match.json.
+    h5py = pytest.importorskip("h5py")
+    import numpy as np
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    sync = source_root / "PAM7xCI80" / "SyncData167"
+    sync.mkdir(parents=True)
+    with h5py.File(sync / "Episode001.h5", "w") as f:
+        capture = np.ones((3200, 1), np.uint32)
+        capture[:10] = 0
+        f.create_group("DI").create_dataset("CaptureOn", data=capture)
+    (sync / "ThorRealTimeDataSettings.xml").write_text(
+        '<?xml version="1.0"?><ThorData><AcquireBoard active="1" duration="320">'
+        '<DataChannel alias="CaptureOn" enable="1" /><SampleRate enable="1" rate="10" />'
+        "</AcquireBoard></ThorData>"
+    )
+    for p in (*sync.iterdir(), sync):
+        os.utime(p, (take_start + 2, take_start + 2))
+    folder = tmp_path / "rec"
+    _armed_recording(folder, source_root=source_root, dest_root=dest_root, take_start=take_start)
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "WARNING" in out and "SyncData167 stopped at its 320 s duration limit" in out
+    record = json.loads((dest_root / folder.name / "twophoton_match.json").read_text())
+    (entry,) = record["matched"]
+    assert entry["thorsync_cut_off"]["limit_s"] == 320.0
+    assert "AirFlow" in entry["thorsync_cut_off"]["message"]
+
+
+def test_denied_2p_source_deletes_become_one_explicit_warning(tmp_path, monkeypatch):
+    # The rig's share has no delete right: one error per folder buried every
+    # real warning in the log. Now: one line saying what to do instead.
+    import shutil as shutil_mod
+
+    from octacam import cli as cli_mod
+
+    def deny(path, *a, **kw):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(shutil_mod, "rmtree", deny)
+    denied: list = []
+    srcs = [tmp_path / "PAM7xCI80" / n for n in ("SyncData167", "Fly1_Streaming_001")]
+    import logging
+
+    records: list = []
+    handler = logging.Handler()
+    handler.emit = records.append  # type: ignore[method-assign]
+    octacam_log = logging.getLogger("octacam")  # propagate=False: caplog can't see it
+    octacam_log.addHandler(handler)
+    try:
+        for src in srcs:
+            cli_mod._remove_2p_source(src, denied)
+        cli_mod._report_denied_2p_deletes(denied)
+    finally:
+        octacam_log.removeHandler(handler)
+    errors = [r for r in records if r.levelname == "ERROR"]
+    warnings = [r.getMessage() for r in records if r.levelname == "WARNING"]
+    assert errors == []
+    assert len(warnings) == 1
+    assert "no permission to delete 2 verified 2P source folder(s)" in warnings[0]
+    assert "SyncData167, Fly1_Streaming_001" in warnings[0]
+    assert "--twophoton-verify" in warnings[0]
+
+
+def _thorsync_settings_folder(root, name, duration):
+    folder = root / name
+    folder.mkdir(parents=True)
+    (folder / "ThorRealTimeDataSettings.xml").write_text(
+        f'<?xml version="1.0"?><ThorData><AcquireBoard active="1" duration="{duration}">'
+        '<SampleRate enable="1" rate="100000" /></AcquireBoard></ThorData>'
+    )
+    return folder
+
+
+@pytest.mark.parametrize(
+    ("duration", "options", "warns"),
+    [
+        (320, "", True),  # synced takes can run up to the 3600 s safety limit
+        (7200, "", False),
+        (320, "[plugins.options]\nmatch_thorimage = false\n", False),  # fixed 5 s takes
+    ],
+)
+def test_doctor_checks_thorsync_duration_against_the_longest_take(tmp_path, duration, options, warns):
+    source = tmp_path / "share"
+    _thorsync_settings_folder(source / "PAM7xCI80", "SyncData184", duration)
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        '[[plugins]]\nname = "twophoton"\n' + options
+        + f'[transfer]\ndirectory = "{(tmp_path / "nas").as_posix()}"\n'
+        "[transfer.twophoton]\n"
+        f'source = "{source.as_posix()}"\n'
+    )
+    result = runner.invoke(app, ["doctor", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    if warns:
+        assert "ThorSync is set to stop after 320 s" in out
+        assert "PAM7xCI80/SyncData184" in out and "60 min" in out
+    else:
+        assert "ThorSync is set to stop" not in out
+        assert "covers the longest take" in out

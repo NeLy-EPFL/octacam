@@ -19,6 +19,19 @@ actually do" companion to that reference.
 If all three are true, everything past this point is automatic. You never
 manually copy a ThorSync/ThorImage folder anywhere.
 
+!!! warning "ThorSync's acquisition duration must outlast your longest take"
+    ThorSync stops recording after its own *duration* setting (on the active
+    acquisition board), whatever the capture is doing. Shorter than a take,
+    it silently loses the rest of it — the timing signals, AirFlow and every
+    other ThorSync channel (seen on real data: a 320 s limit against 394 s
+    takes). Set it above octacam's safety limit for synced takes
+    (`max_duration_s`, 60 min by default). octacam checks this for you: the
+    Record tab warns when the newest `SyncData` folder's setting is too short
+    for the take, `octacam doctor` reports it, and `octacam process` flags any
+    ThorSync recording that was cut off mid-capture (in its log, the take's
+    `twophoton_match.json`, and a **Warnings** section at the top of the day's
+    `2p_reconciliation.md`).
+
 ## Recording a paired take
 
 1. Start the octacam recording first. With "Arm with recording" checked in

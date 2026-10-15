@@ -614,6 +614,7 @@ def render_twophoton_manifest(
     unclaimed: list[TwoPhotonFolder],
     source_reachable: bool,
     attributed: dict[Path, str] | None = None,
+    cut_offs: dict[str, str] | None = None,
 ) -> str:
     """Render a human-readable ``2p_reconciliation.md`` for one day/session
     destination folder: every behavior take transferred that day against its
@@ -636,7 +637,10 @@ def render_twophoton_manifest(
     caller has decided belong to a specific fly (same decision the sweep
     itself makes, shown here purely as a preview — see
     ``cli._attribute_unclaimed_folder``); absent entries default to the
-    generic bucket.
+    generic bucket. *cut_offs* — ``{folder name: message}`` for unclaimed
+    ThorSync folders whose recording was cut off; a matched one carries its
+    own ``thorsync_cut_off`` in the match entry. Both are listed up front
+    under **Warnings**.
     """
 
     def fmt_time(t: float) -> str:
@@ -649,17 +653,19 @@ def render_twophoton_manifest(
         "fully regenerated on every `octacam process` run; hand edits will "
         "be overwritten.",
         "",
+        "<!-- warnings -->",
         "## Behavior takes",
         "",
         "Start Δ is what decided the match (octacam is triggered directly by "
         "the 2P acquisition's own start, so a real pair's start should agree "
         "to within a couple of seconds). End Δ is informational only, never "
-        "used to accept or reject a match — octacam and the 2P side "
-        "currently stop independently, so it's expected to differ.",
+        "used to accept or reject a match — it differs when octacam and the "
+        "2P side stopped independently (a take not synced with ThorImage).",
         "",
         "| Take | Start | Duration | Armed | 2P match | Kind | Confidence | Start Δ | End Δ (info) |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
+    warnings: list[str] = []
     for take in sorted(takes, key=lambda t: t["start_time"]):
         start = fmt_time(take["start_time"])
         duration = f"{take['duration_s']:.1f}s"
@@ -678,6 +684,10 @@ def render_twophoton_manifest(
                 else " |  |  | "
             )
             flag = " (ambiguous)" if m.get("ambiguous") else ""
+            cut = m.get("thorsync_cut_off")
+            if cut:
+                flag += " ⚠ cut off"
+                warnings.append(f"**{take['name']}**: {cut.get('message', 'ThorSync recording cut off')}")
             end_gap = m.get("end_gap_s", 0.0)
             lines.append(
                 f"| {prefix} | {m['path']}{flag} | {m['kind']} | "
@@ -711,8 +721,16 @@ def render_twophoton_manifest(
         for f in sorted(unclaimed, key=lambda f: f.start_time):
             filed_under = attributed.get(f.path)
             filed = f"{filed_under}/2P_only" if filed_under else "2p_only/ (generic)"
-            lines.append(f"| {f.path.name} | {f.kind} | {fmt_time(f.start_time)} | {filed} |")
+            cut_msg = (cut_offs or {}).get(f.path.name)
+            name = f"{f.path.name} ⚠ cut off" if cut_msg else f.path.name
+            if cut_msg:
+                warnings.append(f"**{f.path.name}** (unclaimed): {cut_msg}")
+            lines.append(f"| {name} | {f.kind} | {fmt_time(f.start_time)} | {filed} |")
 
+    marker = lines.index("<!-- warnings -->")
+    lines[marker : marker + 1] = (
+        ["## ⚠ Warnings", "", *[f"- {w}" for w in warnings], ""] if warnings else []
+    )
     return "\n".join(lines) + "\n"
 
 

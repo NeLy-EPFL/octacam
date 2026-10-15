@@ -42,20 +42,29 @@ function stepText(job) {
   return `${current} of ${job.files_total}`;
 }
 
+function warningsText(job) {
+  const n = job.warning_count || 0;
+  return n ? ` ⚠ ${n} warning${n === 1 ? "" : "s"} so far — see \`octacam jobs attach\`.` : "";
+}
+
 export function describeJob(job) {
   const step = stepText(job);
   if (job.paused) {
     const where = step ? ` (${phaseLabel(job.phase)}, ${step})` : "";
-    return isManual(job)
-      ? `Background processing is paused by hand${where} — resume it with ` +
+    return (
+      (isManual(job)
+        ? `Background processing is paused by hand${where} — resume it with ` +
           "`octacam jobs resume`."
-      : `Background processing is paused${where} — it resumes when you close octacam.`;
+        : `Background processing is paused${where} — it resumes when you close octacam.`) +
+      warningsText(job)
+    );
   }
   const parts = [job.current_file, step, formatEta(job.eta_s)].filter(Boolean);
   const detail = parts.length ? ` (${parts.join(", ")})` : "";
   return (
     `Background processing is ${phaseLabel(job.phase)}${detail}. ` +
-    "It pauses once this step is done, until you close octacam."
+    "It pauses once this step is done, until you close octacam." +
+    warningsText(job)
   );
 }
 
@@ -85,8 +94,17 @@ export class JobsNotice {
       }
       for (const job of ended) {
         if (this._ended.has(job.job_id)) continue;
-        if (job.state === "done") {
+        const n = job.warning_count || 0;
+        if (job.state === "done" && !n) {
           this._announce("info", "Background processing finished.");
+        } else if (job.state === "done") {
+          const first = (job.warnings || [])[0];
+          this._announce(
+            "warning",
+            `Background processing finished with ${n} warning${n === 1 ? "" : "s"}` +
+              (first ? ` — first: ${first}` : "") +
+              ` — review them with \`octacam jobs attach ${job.job_id}\`.`
+          );
         } else {
           this._announce(
             job.state === "failed" ? "error" : "warning",

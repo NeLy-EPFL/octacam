@@ -409,3 +409,32 @@ def test_item_eta_needs_some_progress(cache_dir):
     assert pj.item_eta_s(status) is None
     status.item_percent = 100.0
     assert pj.item_eta_s(status) is None
+
+
+def test_worker_records_every_warning_it_logs(cache_dir):
+    # Explicit over implicit: anything sketchy a detached run logs is counted
+    # in status.json (for `jobs list` and the GUI), not just left in log.txt.
+    import logging
+
+    jd = pj.job_dir("j-warn")
+    pj.write_status(jd, _job("j-warn"))
+    worker = pj.worker_start(jd)
+    octacam_log = logging.getLogger("octacam")
+    octacam_log.info("all fine")
+    octacam_log.warning("ThorSync recording SyncData167 stopped at its 320 s duration limit")
+    octacam_log.error("2P sweep: failed transferring X")
+    status = pj.read_status(jd)
+    assert status.warning_count == 2
+    assert status.warnings[0].startswith("WARNING: ThorSync recording SyncData167")
+    seen: list = []
+    handler = logging.Handler()
+    handler.emit = lambda r: seen.append(r.getMessage())  # type: ignore[method-assign]
+    octacam_log.addHandler(handler)  # propagate=False: caplog can't see it
+    try:
+        worker.finish(pj.DONE, 0)
+    finally:
+        octacam_log.removeHandler(handler)
+    assert any("Finished with 2 warning(s)/error(s)" in m for m in seen)
+    octacam_log.warning("after finish: not captured")
+    assert pj.read_status(jd).warning_count == 2
+    assert pj.notice_dict(pj.read_status(jd))["warning_count"] == 2

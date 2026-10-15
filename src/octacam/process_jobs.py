@@ -97,6 +97,10 @@ class JobStatus:
     percent: float = 0.0  # progress within the current phase, 0..100
     item_started: str | None = None  # when the current item started (ISO)
     item_percent: float | None = None  # progress within the current item, when known
+    # Every WARNING/ERROR the run logged (the first _MAX_KEPT_WARNINGS kept
+    # verbatim), so `jobs list` and the GUI can say "finished with N warnings".
+    warning_count: int = 0
+    warnings: list[str] = field(default_factory=list)
     exit_code: int | None = None
     error: str | None = None
     argv: list[str] = field(default_factory=list)
@@ -381,6 +385,12 @@ class JobReporter:
         self._set_percent(self._status.files_done, max(self._status.files_total, 1))
         self._flush(force=True)
 
+    def add_warning(self, message: str) -> None:
+        self._status.warning_count += 1
+        if len(self._status.warnings) < _MAX_KEPT_WARNINGS:
+            self._status.warnings.append(message)
+        self._flush(force=True)
+
     def set_paused(self, flag: bool, reason: str | None) -> None:
         self._status.paused = flag
         self._status.paused_reason = reason
@@ -421,6 +431,24 @@ class JobReporter:
         return _cb
 
 
+_MAX_KEPT_WARNINGS = 50
+
+
+class _WarningCapture(logging.Handler):
+    """Records every WARNING+ the run logs into the job's status."""
+
+    def __init__(self, reporter: JobReporter) -> None:
+        super().__init__(level=logging.WARNING)
+        self._reporter = reporter
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = " ".join(record.getMessage().split())
+            self._reporter.add_warning(f"{record.levelname}: {message}")
+        except Exception:  # noqa: BLE001 — never break the run over its own bookkeeping
+            pass
+
+
 class Worker:
     """Handle held by the detached child for the life of the run."""
 
@@ -429,8 +457,20 @@ class Worker:
         self.status = status
         self._lock = lock_handle
         self.reporter = JobReporter(jd, status)
+        # Explicit over implicit: anything sketchy the run logs is counted and
+        # surfaced (status.json, `jobs list`, the GUI), not left in log.txt.
+        self._capture = _WarningCapture(self.reporter)
+        logging.getLogger("octacam").addHandler(self._capture)
 
     def finish(self, state: str, exit_code: int | None, error: str | None = None) -> None:
+        logging.getLogger("octacam").removeHandler(self._capture)
+        if self.status.warning_count:
+            log.warning(
+                "Finished with %d warning(s)/error(s) — review them: %s%s",
+                self.status.warning_count,
+                " | ".join(self.status.warnings[:5]),
+                " | ..." if self.status.warning_count > 5 else "",
+            )
         self.status.state = state
         self.status.exit_code = exit_code
         self.status.error = error
@@ -518,6 +558,8 @@ def notice_dict(status: JobStatus) -> dict:
         "files_total": status.files_total,
         "item_percent": status.item_percent,
         "eta_s": None if eta is None else round(eta),
+        "warning_count": status.warning_count,
+        "warnings": status.warnings[:5],
     }
 
 
@@ -735,6 +777,7 @@ def render_table(jobs: list[JobStatus], console: Console | None = None) -> None:
     table.add_column("Progress", justify="right")
     table.add_column("Age", justify="right")
     table.add_column("Folders", justify="right")
+    table.add_column("Warnings", justify="right")
     for s in jobs:
         table.add_row(
             s.job_id,
@@ -743,6 +786,7 @@ def render_table(jobs: list[JobStatus], console: Console | None = None) -> None:
             f"{s.percent:.0f}%",
             _age(s.started),
             str(len(s.folders)),
+            f"[yellow]{s.warning_count}[/yellow]" if s.warning_count else "0",
         )
     console.print(table)
 

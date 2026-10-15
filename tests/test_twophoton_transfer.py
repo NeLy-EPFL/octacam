@@ -825,3 +825,42 @@ def test_expected_frameout_edges_and_tolerance_for_a_frame_averaged_capture(tmp_
     xml.write_text(xml.read_text().replace('averageMode="1"', 'averageMode="0"'))
     assert thorimage_frame_average(xml) == 1
     assert thorimage_expected_frameout_edges(xml) == 476
+
+
+def test_render_twophoton_manifest_lists_thorsync_cut_offs_as_warnings(tmp_path):
+    # Explicit over implicit: a ThorSync recording cut short (its duration
+    # limit) is flagged on the take's row and listed up front, matched or not.
+    from octacam.twophoton_transfer import TwoPhotonFolder
+
+    message = "ThorSync recording SyncData167 stopped at its 320 s duration limit ..."
+    takes = [
+        _take(
+            "Fly1/002",
+            1000.0,
+            394.0,
+            matches=[
+                {
+                    "path": "PAM7xCI80/SyncData167",
+                    "kind": "sync",
+                    "gap_s": 3.0,
+                    "ambiguous": False,
+                    "confidence": "timestamp",
+                    "thorsync_cut_off": {"recorded_s": 320.0, "limit_s": 320.0, "message": message},
+                }
+            ],
+        )
+    ]
+    unclaimed = [TwoPhotonFolder(path=tmp_path / "PAM7xCI80" / "SyncData171", kind="sync", start_time=1500.0, last_mtime=1500.0)]
+    text = render_twophoton_manifest(
+        "261014_PAM7xCI80", takes, unclaimed, source_reachable=True,
+        cut_offs={"SyncData171": "ThorSync recording SyncData171 stopped ..."},
+    )
+    head, _, rest = text.partition("## Behavior takes")
+    assert "## ⚠ Warnings" in head
+    assert f"- **Fly1/002**: {message}" in head
+    assert "- **SyncData171** (unclaimed): ThorSync recording SyncData171" in head
+    assert "PAM7xCI80/SyncData167 ⚠ cut off" in rest
+    assert "SyncData171 ⚠ cut off" in rest
+    # No cut-off: no warnings section at all.
+    clean = render_twophoton_manifest("day", [_take("Fly1/001", 1000.0, 10.0)], [], source_reachable=True)
+    assert "Warnings" not in clean

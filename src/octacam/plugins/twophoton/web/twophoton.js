@@ -29,7 +29,10 @@ export default class TwoPhotonTab {
     // the operator's (state pushes never overwrite it).
     this.matchThorImage =
       typeof status?.match_thorimage === "boolean" ? status.match_thorimage : true;
-    this._syncOffered = null; // last offer state sent to the Record tab
+    this._syncOffered = null; // last offer (incl. its warning) sent to the Record tab
+    // ThorSync's duration limit as last read from the share ({folder, limit_s}).
+    this.thorsync = status?.thorsync || null;
+    this._lastThorsyncWarning = null;
     this.ready = Boolean(status?.ready);
     this.device = status?.device || "";
     this.arduinoState = status?.arduino_state || "idle";
@@ -88,6 +91,10 @@ export default class TwoPhotonTab {
     this.arduinoState = msg.state || "idle";
     if (msg.device) this.device = msg.device;
     if (typeof msg.max_duration_s === "number") this.maxDurationS = msg.max_duration_s;
+    if ("thorsync" in msg) {
+      this.thorsync = msg.thorsync || null;
+      this._syncDurationOffer();
+    }
     // The backend reports link readiness with every state push, so a serial
     // port that dies mid-session disables the arm gate (and shows the reconnect
     // notice) instead of leaving a stale "ready" that would arm a dead link.
@@ -141,11 +148,32 @@ export default class TwoPhotonTab {
   // take will be armed (link open + "Arm with recording"); withdraw it
   // otherwise, so an unarmed take shows the plain Duration field. Only re-sent
   // when the offer changes, so state pushes don't keep re-rendering it.
+  // An explicit warning when ThorSync (per the newest SyncData folder's
+  // settings) would stop before this take can end — it would miss the rest
+  // of it (timing, AirFlow). Synced takes can run up to the safety limit;
+  // otherwise the manual duration applies.
+  thorsyncWarning(synced = this.matchThorImage) {
+    const t = this.thorsync;
+    if (!t || !t.limit_s) return null;
+    const longest = synced ? this.maxDurationS : this._getRecordSettings?.()?.duration_s;
+    if (!longest || t.limit_s >= longest) return null;
+    const fmt = (s) => (s >= 120 && s % 60 === 0 ? `${s / 60} min` : `${Math.round(s)} s`);
+    return (
+      `⚠ ThorSync is set to stop after ${fmt(t.limit_s)} (read from ${t.folder}) ` +
+      `but this take can run up to ${fmt(longest)} — ThorSync would miss the rest ` +
+      "(timing, AirFlow). Raise the acquisition duration in ThorSync."
+    );
+  }
+
   _syncDurationOffer() {
     if (!this._setDurationSync) return;
     const offer = Boolean(this.ready && this.armWithRec?.checked);
-    if (offer === this._syncOffered) return;
-    this._syncOffered = offer;
+    const warning = offer ? this.thorsyncWarning() : null;
+    const key = `${offer}|${warning}`;
+    if (key === this._syncOffered) return;
+    this._syncOffered = key;
+    if (warning && warning !== this._lastThorsyncWarning) this.notify("warning", warning);
+    this._lastThorsyncWarning = warning;
     if (!offer) {
       this._setDurationSync(null);
       return;
@@ -159,7 +187,11 @@ export default class TwoPhotonTab {
         "End the recording when ThorImage stops acquiring" + cap +
         ". Untick to enter a duration manually.",
       checked: this.matchThorImage,
-      onChange: (checked) => { this.matchThorImage = checked; },
+      warning,
+      onChange: (checked) => {
+        this.matchThorImage = checked;
+        this._syncDurationOffer(); // the take's longest length changed
+      },
     });
   }
 

@@ -582,7 +582,9 @@ export class RecordTab {
 
   // A plugin that can end the take itself (twophoton: "Synced with
   // ThorImage") offers a checkbox in place of the Duration field:
-  // spec = {label, title, checked, onChange(checked)}; null withdraws it.
+  // spec = {label, title, checked, onChange(checked), warning?}; null withdraws
+  // it. `warning` (e.g. ThorSync would stop before the take can end) shows as
+  // an alert line under the duration rows.
   // Ticked hides the Duration row entirely; unticked shows it, and the manual
   // duration applies. The plugin owns the state (it builds the start params);
   // this only renders it and reports flips back.
@@ -592,6 +594,11 @@ export class RecordTab {
       this.durationSyncLabel.textContent = spec.label;
       this.durationSyncRow.title = spec.title || "";
       this.durationSync.checked = Boolean(spec.checked);
+    }
+    const warn = document.getElementById("duration-sync-warning");
+    if (warn) {
+      warn.textContent = spec?.warning || "";
+      warn.hidden = !spec?.warning;
     }
     this._syncDurationRows();
   }
