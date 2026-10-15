@@ -2814,3 +2814,59 @@ def test_plugin_process_steps_run_after_the_data_and_render_last(tmp_path, monke
     result = runner.invoke(app, ["process", str(folder)])
     assert events == [("data", True, True), ("grid",), ("render", True)]
     assert result.exit_code != 0  # the failed render is reported
+
+
+def test_a_plugin_that_moves_a_take_steers_its_grids_and_a_rerun(tmp_path, monkeypatch):
+    # A plugin step that renames the transferred take (twophoton's RecordingN)
+    # updates ctx.dests: the grids land in the renamed folder, and a re-run
+    # copies into it (transfer_dest) instead of re-creating the old one.
+    from octacam import plugins as plugins_mod
+    from octacam.plugins.base import Plugin
+    from octacam.process import ProcessSteps
+
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=_transfer_toml(dest_root) + '[[plugins]]\nname = "mover"\n',
+    )
+    (folder / "grid.mp4").unlink()  # built by this run
+    renamed = dest_root / "Recording1"
+
+    class MoverSteps(ProcessSteps):
+        def transfer_dest(self, folder, dest):
+            return renamed if renamed.is_dir() else dest
+
+        def after_transfer(self, ctx):
+            (take,) = ctx.folders
+            dest = ctx.dests[take]
+            if dest != renamed:
+                dest.rename(renamed)
+                ctx.dests[take] = renamed
+            return 0
+
+    class Mover(Plugin):
+        name = "mover"
+        process_steps = MoverSteps
+
+    def build_grid(*args, output, **kwargs):
+        output.write_bytes(b"grid")
+        return output
+
+    monkeypatch.setitem(plugins_mod._PLUGINS, "mover", "tests:unused")
+    monkeypatch.setattr(plugins_mod, "plugin_class", lambda name: Mover)
+    monkeypatch.setattr("octacam.process.build_grid_video", build_grid)
+    _forbid(monkeypatch, "octacam.process.transcode_file")
+
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in dest_root.iterdir()) == ["Recording1"]
+    assert (renamed / "camera_LF.mp4").is_file()
+    assert (renamed / "grid.mp4").is_file()
+
+    (folder / "camera_LF.mp4").write_bytes(b"re-encoded")
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in dest_root.iterdir()) == ["Recording1"]
+    assert (renamed / "camera_LF.mp4").read_bytes() == b"re-encoded"
