@@ -224,7 +224,11 @@ def _ready_checks(state: AppState) -> list[dict]:
         except Exception:
             ok = False
         checks.append(
-            _check("ok" if ok else "error", plugin.name, "ready" if ok else "not ready")
+            _check(
+                "ok" if ok else "error",
+                plugin.name,
+                "connected" if ok else f"not connected: see its tab ({plugin.name})",
+            )
         )
 
     record_dir = Path(settings.record_directory or settings.save_dir)
