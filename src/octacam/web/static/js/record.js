@@ -92,6 +92,16 @@ export class RecordTab {
 
     this.fields = document.getElementById("record-fields");
     this.durationValue = document.getElementById("duration-value");
+    this.durationRow = document.getElementById("duration-row");
+    this.durationSyncRow = document.getElementById("duration-sync-row");
+    this.durationSyncLabel = document.getElementById("duration-sync-label");
+    this.durationSync = document.getElementById("duration-sync");
+    this.durationSyncWarning = document.getElementById("duration-sync-warning");
+    this._durationSyncSpec = null;
+    this.durationSync.addEventListener("change", () => {
+      this._durationSyncSpec?.onChange?.(this.durationSync.checked);
+      this._syncDurationRows();
+    });
     this.durationUnit = document.getElementById("duration-unit");
     // The server composes save_dir from these two halves.
     this.recordDir = document.getElementById("record-dir");
@@ -334,6 +344,29 @@ export class RecordTab {
     }
     btn.disabled =
       !this.connected || this.state === "finishing" || this.requestPending;
+  }
+
+  // A plugin that can end the take itself offers a checkbox in place of the
+  // Duration field: spec = {label, title, checked, onChange(checked),
+  // warning?}, null withdraws it. Ticked hides the Duration row; unticked the
+  // duration applies. The plugin owns the choice (it builds the start params);
+  // this renders it, reports flips back, and shows `warning` under the rows.
+  setDurationSync(spec) {
+    this._durationSyncSpec = spec || null;
+    if (spec) {
+      this.durationSyncLabel.textContent = spec.label;
+      this.durationSyncRow.title = spec.title || "";
+      this.durationSync.checked = Boolean(spec.checked);
+    }
+    this.durationSyncWarning.textContent = spec?.warning || "";
+    this.durationSyncWarning.hidden = !spec?.warning;
+    this._syncDurationRows();
+  }
+
+  _syncDurationRows() {
+    const offered = this._durationSyncSpec != null;
+    this.durationSyncRow.hidden = !offered;
+    this.durationRow.hidden = offered && this.durationSync.checked;
   }
 
   // null when no recording is counting down.

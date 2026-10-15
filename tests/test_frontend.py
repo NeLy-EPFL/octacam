@@ -1593,3 +1593,53 @@ def test_plugin_ended_take_shows_elapsed_time_not_a_countdown(page):
     )
     assert text.startswith("Recording (twophoton ends it)")
     assert "1:05" in text and "elapsed" in text
+
+
+def test_a_plugin_can_replace_the_duration_with_a_checkbox(page):
+    # A plugin that ends the take itself (twophoton: "Synced with ThorImage")
+    # offers a checkbox; ticked hides Duration, unticked brings it back, and the
+    # flip is reported to the plugin. Withdrawn, the plain Duration returns.
+    make_tab(page)
+    state = page.evaluate(
+        """() => {
+            const flips = [];
+            const shown = (id) => !document.getElementById(id).hidden;
+            const read = () => ({
+                sync: shown('duration-sync-row'),
+                duration: shown('duration-row'),
+                warning: shown('duration-sync-warning')
+                    ? document.getElementById('duration-sync-warning').textContent
+                    : null,
+                label: document.getElementById('duration-sync-label').textContent,
+            });
+            const before = read();
+            window.__tab.setDurationSync({
+                label: 'Synced with ThorImage:', checked: true,
+                warning: 'ThorSync stops first', onChange: (c) => flips.push(c),
+            });
+            const offered = read();
+            const box = document.getElementById('duration-sync');
+            box.checked = false;
+            box.dispatchEvent(new Event('change'));
+            const unticked = read();
+            window.__tab.setDurationSync(null);
+            return {before, offered, unticked, withdrawn: read(), flips};
+        }"""
+    )
+    assert state["before"] == {
+        "sync": False,
+        "duration": True,
+        "warning": None,
+        "label": "Synced:",
+    }
+    assert state["offered"] == {
+        "sync": True,
+        "duration": False,
+        "warning": "ThorSync stops first",
+        "label": "Synced with ThorImage:",
+    }
+    assert state["unticked"]["duration"] is True
+    assert state["flips"] == [False]
+    assert state["withdrawn"]["sync"] is False
+    assert state["withdrawn"]["duration"] is True
+    assert state["withdrawn"]["warning"] is None
