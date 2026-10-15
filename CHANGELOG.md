@@ -11,6 +11,16 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **2-photon rigs** (`twophoton` plugin): a take synced with ThorImage ends
+  when ThorImage stops (the Record tab's **Synced with ThorImage**; firmware
+  protocol v2, reflash with `octacam flash`), the GUI warns when ThorSync is set
+  to stop before a take can end, and `octacam process` pairs each take with its
+  ThorSync/ThorImage data (by ThorSync's recorded camera pulses), copies it with
+  ThorImage's frames as stacks, files 2P-only data under its fly, renumbers each
+  fly's sessions and renders synced behavior + 2P videos and Z-stack MIPs.
+  `octacam twophoton verify|sweep|manifest|reconcile|reassemble|render` run
+  these by hand. Settings are the plugin's options (`source`, ...); see the
+  2-photon guide.
 - **The GUI shows background processing.** While a detached `octacam
   process` job runs, a strip along the bottom of the camera view says what it
   is doing and how long the current step has left; once that step is done the
