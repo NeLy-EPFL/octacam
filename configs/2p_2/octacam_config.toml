@@ -104,6 +104,9 @@ layout = [
     ["camera_LM", "camera_F",  "camera_RM"],
     ["camera_LH", "",          "camera_RH"],
 ]
+# A quick look, never analyzed: fast, light, still QuickTime/Keynote-friendly.
+ffmpeg_params = "-c:v libx264 -preset medium -crf 20"
+max_width = 1440
 
 [transfer]
 directory = "/mnt/upramdya_data/MD/BallPushing_Imaging"
