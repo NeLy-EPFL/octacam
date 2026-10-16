@@ -1069,3 +1069,85 @@ def test_batch_flags_two_sync_folders_fitting_equally_well(tmp_path):
     )[take.folder]
     assert match.folder.path.name == "SyncData001"
     assert match.ambiguous is True
+
+
+def _zstack_xml(folder: Path, *, steps: int, timepoints: int = 1, average: int = 1):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment>'
+        '<Date date="x" uTime="1000.0" /><Wavelengths><Wavelength name="ChanA" />'
+        "</Wavelengths>"
+        f'<LSM averageMode="{int(average > 1)}" averageNum="{average}" />'
+        f'<ZStage steps="{steps}" enable="1" /><Streaming enable="0" />'
+        f'<Timelapse timepoints="{timepoints}" /></ThorImageExperiment>'
+    )
+    return folder / "Experiment.xml"
+
+
+def test_zstack_signature_counts_the_slices_of_a_stack_stopped_early(tmp_path):
+    from octacam.plugins.twophoton.matching import thorimage_zstack_signature
+
+    xml = _zstack_xml(tmp_path / "Fly1_Zstack", steps=5, average=4)
+    assert thorimage_zstack_signature(xml) == (5, 4)  # nothing on disk yet
+    for z in range(1, 4):
+        (xml.parent / f"ChanA_001_001_{z:03d}_001.tif").write_bytes(b"")
+    assert thorimage_zstack_signature(xml) == (3, 4)
+
+
+def test_stopped_early_zstack_sync_correlates_with_its_image_folder(tmp_path):
+    sync = _make_verifiable_sync_folder(
+        tmp_path,
+        "exp",
+        "SyncData135",
+        mtime=1001.0,
+        capture_ranges=[(100 + 300 * i, 300 + 300 * i) for i in range(3)],
+        cameras_per_segment=[0] * 3,
+        frameout_per_segment=[1] * 3,
+    )
+    xml = _zstack_xml(tmp_path / "exp" / "Fly1_Zstack", steps=50)
+    for z in range(1, 4):
+        (xml.parent / f"ChanA_001_001_{z:03d}_001.tif").write_bytes(b"")
+    image = TwoPhotonFolder(xml.parent, "image", start_time=1000.0, last_mtime=1000.0)
+    assert correlate_sync_folder_to_image(sync, [image]) is image
+
+
+def test_zstack_signature_of_a_zstack_repeated_over_time(tmp_path):
+    from octacam.plugins.twophoton.matching import thorimage_zstack_signature
+
+    xml = _zstack_xml(tmp_path / "Fly1_ZT", steps=3, timepoints=4)
+    assert thorimage_zstack_signature(xml) == (12, 1)
+
+
+def test_recorded_frames_are_counted_in_an_assembled_stack(tmp_path):
+    # On the destination the frames are stacks: a stopped-early capture must
+    # count as many frames there as on the share.
+    tifffile = pytest.importorskip("tifffile")
+    from octacam.plugins.twophoton.matching import (
+        thorimage_expected_frameout_edges,
+        thorimage_zstack_signature,
+    )
+
+    xml = _zstack_xml(tmp_path / "Fly1_Zstack", steps=50)
+    tifffile.imwrite(
+        xml.parent / "ChanA.tif",
+        np.zeros((7, 16, 16), np.uint16),
+        ome=True,
+        metadata={"axes": "ZYX"},
+    )
+    assert thorimage_zstack_signature(xml) == (7, 1)
+
+    stream = tmp_path / "Fly1_Streaming"
+    stream.mkdir()
+    (stream / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Wavelengths>'
+        '<Wavelength name="ChanA" /></Wavelengths>'
+        '<Streaming enable="1" zFastEnable="0" /><Timelapse timepoints="3000" />'
+        "</ThorImageExperiment>"
+    )
+    tifffile.imwrite(
+        stream / "ChanA.tif",
+        np.zeros((418, 16, 16), np.uint16),
+        ome=True,
+        metadata={"axes": "TYX"},
+    )
+    assert thorimage_expected_frameout_edges(stream / "Experiment.xml") == 418

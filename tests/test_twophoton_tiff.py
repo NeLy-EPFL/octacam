@@ -484,3 +484,25 @@ def test_plan_assembly_streaming_stopped_at_exactly_zsteps_frames_is_a_time_seri
         201,
         3000,
     )
+
+
+def test_plan_assembly_zstack_repeated_over_time_stacks_each_plane(tmp_path):
+    # A Z-stack repeated over time (Z+T, streaming off): one stack per plane,
+    # like FastZ.
+    pytest.importorskip("tifffile")
+    (tmp_path / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Wavelengths>'
+        '<Wavelength name="ChanA" /></Wavelengths>'
+        '<ZStage steps="3" enable="1" /><Streaming enable="0" />'
+        '<Timelapse timepoints="4" /></ThorImageExperiment>'
+    )
+    for z in range(1, 4):
+        for t in range(1, 5):
+            (tmp_path / f"ChanA_001_001_{z:03d}_{t:03d}.tif").write_bytes(b"")
+    plan = plan_assembly(tmp_path)
+    assert [c.dest_name for c in plan.ready] == [
+        "ChanA_Z01.tif",
+        "ChanA_Z02.tif",
+        "ChanA_Z03.tif",
+    ]
+    assert all(c.frame_count == 4 for c in plan.ready)

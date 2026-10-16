@@ -302,28 +302,59 @@ def thorimage_frameout_tolerance(experiment_xml: Path) -> int:
     )
 
 
-def _timepoints_recorded(folder: Path, declared: int, planes: int = 1) -> int:
-    """Timepoints a streaming capture actually wrote -- fewer than the
-    *declared* ones when it was stopped early (a real, usable take since
-    octacam stops with ThorImage, 2026-10-14). Counted from the first
-    channel's per-frame files (one per plane per timepoint, whole volumes
-    only); *declared* when there are none (already assembled, or an
-    unreadable folder).
+def _channel_frames(folder: Path) -> int | None:
+    """Frames the first channel recorded: its per-frame files plus the pages
+    of its assembled stacks (`<chan>.tif`, FastZ's `<chan>_Z01.tif`...), so a
+    copy on the destination counts the same as the share's folder. None when
+    there is nothing to count (no channel, no files, an unreadable folder).
     """
     from octacam.plugins.twophoton.tiff import (
         _matching_frame_files,
         _thorimage_channel_names,
     )
 
-    if declared <= 1:
-        return declared
     channels = _thorimage_channel_names(folder / EXPERIMENT_XML_FILENAME)
     if not channels:
-        return declared
+        return None
+    chan = channels[0]
     try:
-        n = len(_matching_frame_files(folder, channels[0])) // max(planes, 1)
+        n = len(_matching_frame_files(folder, chan))
+        stacks = [folder / f"{chan}.tif", *sorted(folder.glob(f"{chan}_Z*.tif"))]
     except OSError:
+        return None
+    for stack in stacks:
+        if stack.is_file():
+            pages = _stack_pages(stack)
+            if pages is None:
+                return None  # cannot tell: the caller keeps the declared count
+            n += pages
+    return n or None
+
+
+def _stack_pages(stack: Path) -> int | None:
+    """An assembled stack's frame count, from its OME header (no page walk)."""
+    try:
+        import tifffile
+
+        with tifffile.TiffFile(stack) as tif:
+            shape = tif.series[0].shape
+    except Exception:  # no tifffile, or not a readable stack
+        return None
+    return int(shape[0]) if len(shape) == 3 else 1
+
+
+def _timepoints_recorded(folder: Path, declared: int, planes: int = 1) -> int:
+    """Timepoints a streaming capture actually wrote -- fewer than the
+    *declared* ones when it was stopped early (a real, usable take since
+    octacam stops with ThorImage, 2026-10-14). Counted from the first
+    channel's frames (one per plane per timepoint, whole volumes only), on
+    the share or assembled on the destination; *declared* when they cannot
+    be counted.
+    """
+    if declared <= 1:
         return declared
+    frames = _channel_frames(folder)
+    n = (frames or 0) // max(planes, 1)
     return n if 0 < n < declared else declared
 
 
@@ -364,6 +395,11 @@ def thorimage_zstack_signature(experiment_xml: Path) -> tuple[int, int] | None:
     with ``averageMode="0"`` 201 x 1. Comparing a single segment against
     ``timepoints`` (1) -- the streaming rule -- left every averaged Z-stack's
     SyncData unattributable.
+
+    Slices are the ones recorded: a stack stopped early has fewer, as many
+    as its frames. A Z-stack repeated over time (Z+T, streaming off) is
+    taken as one segment per slice of every volume (not yet seen on real
+    data).
     """
     try:
         root = ET.parse(experiment_xml).getroot()
@@ -371,7 +407,7 @@ def thorimage_zstack_signature(experiment_xml: Path) -> tuple[int, int] | None:
         return None
     z, stream = root.find("ZStage"), root.find("Streaming")
     timepoints = thorimage_timepoints(experiment_xml) or 1
-    if z is None or z.get("enable") != "1" or timepoints > 1:
+    if z is None or z.get("enable") != "1":
         return None
     if stream is not None and stream.get("enable") == "1":
         return None
@@ -379,8 +415,12 @@ def thorimage_zstack_signature(experiment_xml: Path) -> tuple[int, int] | None:
         steps = int(z.get("steps", "0"))
     except ValueError:
         return None
-    per_slice = thorimage_frame_average(experiment_xml)
-    return (steps, per_slice) if steps > 1 else None
+    if steps <= 1:
+        return None
+    declared = steps * timepoints
+    frames = _channel_frames(experiment_xml.parent)
+    slices = frames if frames is not None and 0 < frames < declared else declared
+    return slices, thorimage_frame_average(experiment_xml)
 
 
 def _folder_last_mtime(folder: Path) -> float:
