@@ -229,15 +229,20 @@ def _should_skip(src: Path, final: Path, *, by_content: bool) -> bool:
 
 
 def _metadata_files(folder: Path) -> list[Path]:
-    """The summary, timestamps, config snapshot and camera parameter files, from
-    `recording_info_dir` only: a folder recorded into
-    again carries the new take's metadata, not an older flat take's leftovers.
+    """The recording's metadata, from `recording_info_dir` only (a folder
+    recorded into again carries the new take's, not an older flat take's
+    leftovers): every file of its `octacam_recording` subfolder, plugins'
+    included (the twophoton plugin's twophoton.json); for an older flat
+    recording, the summary, timestamps, config snapshot and camera parameter
+    files beside its videos.
     """
     info = recording_info_dir(folder)
     names = [RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME, CONFIG_SNAPSHOT_FILENAME]
     files = [info / name for name in names]
     for ext in PARAM_FILE_EXTENSIONS:
         files.extend(sorted(info.glob(f"*.{ext}")))
+    if info != folder:  # the rest of the metadata folder too
+        files += sorted(p for p in info.iterdir() if p.is_file() and p not in files)
     # Hidden files (the "._name" forks a Mac leaves on a share) are not metadata.
     return [f for f in files if f.is_file() and not f.name.startswith(".")]
 

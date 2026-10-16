@@ -175,6 +175,9 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **The transfer copies every file of a recording's `octacam_recording`
+  folder**, a plugin's own included (it copied only the files it knew by name,
+  so with a delete after transfer a plugin's facts were lost).
 - **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
   error, which made a request for a missing feature or command a 500; it is a
   clean "no such node" again.
