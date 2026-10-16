@@ -1077,6 +1077,40 @@ def test_twophoton_sweep_transfers_unmatched_folder(tmp_path):
     assert (date_dir / "SyncData001" / "Episode001.h5").exists()
 
 
+def test_twophoton_sweep_deletes_verified_sources_when_rig_deletes(tmp_path):
+    # A rig that deletes after transfer clears the share of 2P-only data too,
+    # once its copy is verified.
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = _make_sync_folder_2p(
+        source_root, "Tests", "SyncData001", mtime=time.time() - 10_000
+    )
+    config_dir = _rig_config(
+        tmp_path,
+        dest_root,
+        source_root,
+        settle_s=60,
+        transfer={"delete_after_transfer": True},
+    )
+    result = runner.invoke(app, ["twophoton", "sweep", "--config", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    (date_dir,) = list((dest_root / "2p_only" / "Tests").iterdir())
+    assert (date_dir / "SyncData001" / "Episode001.h5").exists()
+    assert not folder.exists()
+
+
+def test_twophoton_sweep_keeps_sources_without_delete_after_transfer(tmp_path):
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = _make_sync_folder_2p(
+        source_root, "Tests", "SyncData001", mtime=time.time() - 10_000
+    )
+    config_dir = _rig_config(tmp_path, dest_root, source_root, settle_s=60)
+    result = runner.invoke(app, ["twophoton", "sweep", "--config", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert folder.exists()
+
+
 def test_twophoton_sweep_skips_folder_still_settling(tmp_path):
     dest_root = tmp_path / "dest"
     source_root = tmp_path / "windows_share" / "MD"
@@ -1749,6 +1783,34 @@ def test_twophoton_verify_reports_safe_to_delete_for_verified_folder(tmp_path):
     assert "1 safe to delete" in _out(result)
     assert folder.exists()
     assert dest_2p.exists()
+
+
+def test_twophoton_verify_delete_removes_only_verified_folders(tmp_path):
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    good = _make_sync_folder_2p(
+        source_root, "exp", "SyncData102", mtime=time.time() - 10_000
+    )
+    bad = _make_sync_folder_2p(
+        source_root, "exp", "SyncData103", mtime=time.time() - 10_000
+    )
+    missing = _make_sync_folder_2p(
+        source_root, "exp", "SyncData104", mtime=time.time() - 10_000
+    )
+    for folder, corrupt in ((good, False), (bad, True)):
+        dest_2p = dest_root / "day1" / "Fly1" / "001" / "2P" / folder.name
+        dest_2p.mkdir(parents=True)
+        for f in folder.iterdir():
+            data = f.read_bytes()
+            if corrupt and f.suffix == ".h5":
+                data += b"corrupted"
+            (dest_2p / f.name).write_bytes(data)
+    result = _run_verify(tmp_path, dest_root, source_root, "--delete")
+    assert result.exit_code != 0  # the mismatch still fails the run
+    assert not good.exists()
+    assert bad.exists()
+    assert missing.exists()
+    assert "Removed 2P source" in _out(result)
 
 
 def test_twophoton_verify_flags_content_mismatch(tmp_path):

@@ -7,7 +7,7 @@ says a copy was made, not that it was checked.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from octacam.plugins.twophoton.copying import verify_stack
@@ -93,6 +93,8 @@ class VerifyReport:
     not_transferred: int = 0
     writing: int = 0
     mismatched: int = 0
+    # The share folders found identical at the destination.
+    safe_paths: list[Path] = field(default_factory=list)
 
 
 def verify(
@@ -125,6 +127,7 @@ def verify(
             )
         else:
             report.safe += 1
+            report.safe_paths.append(folder.path)
             log.info(
                 "2P verify: %s -> %s verified \N{EM DASH} safe to delete",
                 folder.path,

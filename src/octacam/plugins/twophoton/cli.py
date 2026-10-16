@@ -73,11 +73,19 @@ def verify(
         list[Path] | None,
         typer.Argument(help="Only these experiment (or 2P) folders on the share."),
     ] = None,
+    delete: Annotated[
+        bool,
+        typer.Option(
+            "--delete",
+            help="Delete the share folders found identical at the destination.",
+        ),
+    ] = False,
     verbose: Verbose = False,
 ) -> None:
     """Which 2P folders on the share are verifiably at the destination, and so
-    safe to delete there by hand. Read-only: compares every file (a stacked
-    channel page by page); exits 1 on any mismatch.
+    safe to delete. Compares every file (a stacked channel page by page);
+    exits 1 on any mismatch. Read-only unless --delete, which deletes only the
+    folders this run verified.
     """
     from octacam.plugins.twophoton.nas import NasIndex
     from octacam.plugins.twophoton.verify import verify as run
@@ -91,6 +99,10 @@ def verify(
         log.info("2P verify: nothing found")
         return
     report = run(folders, NasIndex.build(dest_root), settings.settle_s)
+    if delete and report.safe_paths:
+        from octacam.plugins.twophoton.copying import remove_sources
+
+        remove_sources(report.safe_paths)
     if report.mismatched:
         sys.exit(f"{report.mismatched} folder(s) failed verification")
 
@@ -115,17 +127,20 @@ def sweep(
     source, folders = _scan(settings)
     transfer = load_config_dir(resolve_config_arg(config_dir)).transfer
     checksum = bool(transfer and transfer.checksum)
+    # The rig's delete after transfer applies to the share's folders too.
+    deleting = bool(transfer and transfer.delete_after_transfer)
     result = run(
         source,
         folders,
         NasIndex.build(dest_root),
         settings,
         CopyMode(
-            verify=checksum,
-            by_content=False,
+            verify=checksum or deleting,
+            by_content=deleting,
             dry_run=dry_run,
             assemble=settings.assemble_tiff_stacks,
         ),
+        delete_sources=deleting,
     )
     if result.failed:
         sys.exit(f"{result.failed} file(s) failed to transfer")

@@ -188,12 +188,15 @@ def sweep(
     mode: CopyMode,
     *,
     claimed_this_run: frozenset[Path] = frozenset(),
+    delete_sources: bool = False,
 ) -> SweepResult:
     """Pair pending takes with share folders that have settled since, then copy
     every settled folder nobody claims: not paired with a take (this run's,
     cached local ones', or any on the destination) and not on the destination
     already (by acquisition identity, as names repeat across experiments).
-    *folders* is this run's scan of *source_root*.
+    *folders* is this run's scan of *source_root*. With *delete_sources* (the
+    rig deletes after transfer), each share folder whose copy was verified by
+    content is deleted, as a paired take's are.
     """
     result = SweepResult()
     claimed = (
@@ -214,6 +217,7 @@ def sweep(
         return result
 
     names = fly_names(index) if settings.attribute_unclaimed_to_fly else {}
+    deletable: list[Path] = []
     for folder in todo:
         experiment = folder.path.parent.name
         images = [
@@ -242,6 +246,16 @@ def sweep(
             if fly_dir is not None:
                 write_source_marker(dest, experiment)
             index.note_copy(dest, experiment if fly_dir is not None else None)
+            if delete_sources and mode.verify and mode.by_content:
+                deletable.append(folder.path)
+    if deletable:
+        remove_sources(deletable)
+    elif delete_sources and mode.dry_run and todo:
+        log.info(
+            "[dry-run] 2P sweep: would delete the %d share folder(s) once their "
+            "copies are verified",
+            len(todo),
+        )
     log.info(
         "%s2P sweep: %d folder(s), %d file(s) copied, %d failed",
         "[dry-run] " if mode.dry_run else "",

@@ -528,7 +528,7 @@ $ octacam twophoton [OPTIONS] COMMAND [ARGS]...
 
 ### `octacam twophoton verify`
 
-Which 2P folders on the share are verifiably at the destination, and so safe to delete there by hand. Read-only: compares every file (a stacked channel page by page); exits 1 on any mismatch.
+Which 2P folders on the share are verifiably at the destination, and so safe to delete. Compares every file (a stacked channel page by page); exits 1 on any mismatch. Read-only unless --delete, which deletes only the folders this run verified.
 
 **Usage**:
 
@@ -543,6 +543,7 @@ $ octacam twophoton verify [OPTIONS] [paths]...
 **Options**:
 
 * `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `--delete`: Delete the share folders found identical at the destination.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.
 

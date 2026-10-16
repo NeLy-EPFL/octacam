@@ -124,8 +124,12 @@ episode is read once (its capture windows are kept in octacam's cache), and a
 its files changed (`.octacam_verified.json` in the copy; `octacam twophoton
 verify` always compares afresh). With
 `[transfer].delete_after_transfer`, a share folder is deleted once its copy is
-verified; on a share whose account may not delete, octacam says so once and
-`octacam twophoton verify` tells which folders are safe to delete by hand.
+verified: a paired take's, and 2P-only data the sweep files (a Z-stack, a
+test). The share's account needs delete rights on the 2P PC for that (on a
+`noperm` CIFS mount the Windows server alone decides); without them octacam
+says so once and keeps going. `octacam twophoton verify` tells which folders
+are safe to delete, and `octacam twophoton verify --delete` deletes exactly
+those, for a backlog.
 
 ## Where things land
 
@@ -158,7 +162,7 @@ are read the same way.
 
 | Command | What it does |
 | --- | --- |
-| `octacam twophoton verify [SHARE_FOLDERS] -c <rig>` | Which share folders are verifiably at the destination (read-only; a stacked channel is compared page by page). |
+| `octacam twophoton verify [SHARE_FOLDERS] -c <rig>` | Which share folders are verifiably at the destination (read-only; a stacked channel is compared page by page). `--delete` deletes the ones verified. |
 | `octacam twophoton sweep -c <rig>` | File the share's unclaimed 2P data, pair waiting takes. |
 | `octacam twophoton manifest -c <rig>` | Rewrite every day's `2p_reconciliation.md`. |
 | `octacam twophoton reconcile DAYS_OR_FLIES -c <rig>` | Renumber flies (`--all`: every fly, and group the generic bucket into new flies). |

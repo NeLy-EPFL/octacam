@@ -386,8 +386,9 @@ def remove_sources(paths: list[Path]) -> None:
         experiments = sorted({str(p.parent) for p in denied})
         log.warning(
             "No permission to delete %d verified 2P source folder(s) on the share "
-            "(%s) \N{EM DASH} they are safe at the destination; check with `octacam "
-            "twophoton verify %s` and delete them by hand",
+            "(%s) \N{EM DASH} they are safe at the destination. Give the share's "
+            "account delete rights on the 2P PC, then `octacam twophoton verify "
+            "--delete %s` removes them (or delete them by hand there)",
             len(denied),
             ", ".join(p.name for p in denied),
             " ".join(experiments),
