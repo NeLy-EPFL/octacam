@@ -535,3 +535,19 @@ def test_by_content_recopies_a_same_size_file_that_differs(tmp_path):
     result = transfer_folder(src, dest, files, metadata=False, by_content=True)
     assert result.copied == ["camera_LF.mp4"]
     assert (dest / "camera_LF.mp4").read_bytes() == b"good"
+
+
+def test_every_file_of_the_metadata_folder_travels(tmp_path):
+    # A plugin's own facts sit beside the summary (the twophoton plugin's
+    # twophoton.json): a delete after transfer must not lose them.
+    src = tmp_path / "rec"
+    info = src / RECORDING_INFO_DIRNAME
+    info.mkdir(parents=True)
+    (info / RECORDING_SUMMARY_FILENAME).write_text("{}")
+    (info / "twophoton.json").write_text('{"armed": true}')
+    (src / "camera_LF.mp4").write_bytes(b"v")
+    dest = tmp_path / "dest"
+    transfer_folder(src, dest, [src / "camera_LF.mp4"])
+    assert (dest / RECORDING_INFO_DIRNAME / "twophoton.json").read_text() == (
+        '{"armed": true}'
+    )
