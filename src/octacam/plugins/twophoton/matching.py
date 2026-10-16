@@ -119,6 +119,9 @@ class TakeInfo:
     # Stopped from octacam (not by ThorImage nor its duration): the board's
     # cancel lands a little after the cameras stopped.
     stopped_early: bool = False
+    # The board's stop_idle_ms for a take synced with ThorImage (s); None: the
+    # plugin's default (a take from before twophoton.json recorded it).
+    stop_idle_s: float | None = None
 
 
 DELTA = "\N{GREEK CAPITAL LETTER DELTA}"
@@ -734,6 +737,7 @@ def match_takes_to_twophoton_batch(
                         seg,
                         take.camera_frame_counts,
                         late_stop_s=LATE_STOP_S if take.stopped_early else 0.0,
+                        stop_idle_s=take.stop_idle_s,
                     )
                     if diff is not None and diff <= _VERIFY_TOLERANCE:
                         ranked.append((diff, gap, c, idx))

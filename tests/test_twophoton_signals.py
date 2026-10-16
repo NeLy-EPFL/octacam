@@ -366,10 +366,34 @@ def test_an_early_thorimage_stop_explains_the_pulses_thorsync_missed(tmp_path):
         di.create_dataset("Cameras", data=_pulse_train(total, cams))
         di.create_dataset("FrameOut", data=frameout[:, None])
     (segment,) = read_capture_segments(folder)
-    assert segment.cameras_cut_s > 0
+    assert segment.cut_s(2.0) > 0
     edges = segment.cameras_edges
     assert camera_edge_diff(segment, [edges + 5]) == 0  # missed at the end
     assert camera_edge_diff(segment, [edges - 5]) == 5  # fewer frames: not explained
+
+
+def test_the_missed_tail_is_bounded_by_the_take_s_own_stop_idle(tmp_path):
+    # The board pulses stop_idle_ms past FrameOut's last HIGH sample: a take
+    # armed with a short wait cannot have missed what a 2 s one could.
+    total = 300_000  # 3 s at 100 kHz
+    frameout = np.zeros(total, dtype=np.uint32)
+    frameout[150:150_000] = 1  # then LOW for the last 1.5 s
+    folder = tmp_path / "SyncData001"
+    folder.mkdir()
+    (folder / "ThorRealTimeDataSettings.xml").write_text(SETTINGS_XML)
+    with h5py.File(folder / "Episode001.h5", "w") as f:
+        di = f.create_group("DI")
+        di.create_dataset("CaptureOn", data=_square_wave(total, [(100, 140_000)]))
+        cams = list(range(110, total, 1000))  # 100 Hz, to the file's end
+        di.create_dataset("Cameras", data=_pulse_train(total, cams))
+        di.create_dataset("FrameOut", data=frameout[:, None])
+    (segment,) = read_capture_segments(folder)
+    assert segment.frameout_quiet_s == pytest.approx(1.5)
+    assert segment.cut_s(2.0) == pytest.approx(1.0)
+    assert segment.cut_s(0.2) == 0.0
+    extra = segment.cameras_edges + 50
+    assert camera_edge_diff(segment, [extra], stop_idle_s=2.0) == 0
+    assert camera_edge_diff(segment, [extra], stop_idle_s=0.2) == 50
 
 
 def test_a_late_board_cancel_explains_extra_pulses():

@@ -238,7 +238,12 @@ def _probe_size(ffmpeg: str, video: Path) -> tuple[int, int] | None:
 _SEGMENT_TOLERANCE = 2
 
 
-def _pick_segment(sync_dir: Path, frame_counts: list[int], late_stop_s: float = 0.0):
+def _pick_segment(
+    sync_dir: Path,
+    frame_counts: list[int],
+    late_stop_s: float = 0.0,
+    stop_idle_s: float | None = None,
+):
     """The CaptureOn segment that is this take's own -- its Cameras edges match
     the take's frame count. Never merely the closest: a take whose own segment
     is missing (ThorSync cut off before it ended) must not be aligned on
@@ -253,7 +258,12 @@ def _pick_segment(sync_dir: Path, frame_counts: list[int], late_stop_s: float = 
     ranked = [
         (d, s)
         for s in segments
-        if (d := camera_edge_diff(s, frame_counts, late_stop_s=late_stop_s)) is not None
+        if (
+            d := camera_edge_diff(
+                s, frame_counts, late_stop_s=late_stop_s, stop_idle_s=stop_idle_s
+            )
+        )
+        is not None
         and d <= _SEGMENT_TOLERANCE
     ]
     if not ranked:
@@ -315,12 +325,13 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
         if isinstance(c.get("frames"), int)
     ]
     from octacam.plugins.twophoton.matching import LATE_STOP_S
-    from octacam.plugins.twophoton.takes import stopped_early
+    from octacam.plugins.twophoton.takes import stop_idle_s, stopped_early
 
     segment = _pick_segment(
         inputs.sync_dir,
         frame_counts,
         LATE_STOP_S if stopped_early(summary) else 0.0,
+        stop_idle_s(take_dir, summary),
     )
     if segment is None:
         from octacam.plugins.twophoton.signals import describe_cut_off, episode_cut_off

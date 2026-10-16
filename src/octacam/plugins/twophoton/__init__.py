@@ -676,9 +676,12 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         """The take's 2P facts for `process`: whether it was armed (the
         operator's intent, not the handshake: it says whether to look for its 2P
         data at all), synced with ThorImage, and the board's STOP report (absent
-        when octacam ended the run: a manual stop or abort).
+        when octacam ended the run: a manual stop or abort), and the wait
+        after ThorImage stopped it was armed with.
         """
         info: dict = {"armed": self._take_armed, "match_thorimage": self._take_synced}
+        if self._take_synced:
+            info["stop_idle_ms"] = self.stop_idle_ms
         if self._stop_report is not None:
             info["stop"] = self._stop_report
         return info

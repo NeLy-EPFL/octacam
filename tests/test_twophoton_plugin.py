@@ -843,7 +843,11 @@ def test_match_arm_sends_the_ceiling_and_idle_timeout():
     plugin.on_recording_start({"fps": 100, "duration_ms": 5000})
     magic, fps, dur, idle = struct.unpack(ARM_FORMAT, link.snapshot()[0])
     assert (magic, fps, dur, idle) == (ARM_MAGIC, 100, 600_000, 2000)
-    assert plugin.take_info() == {"armed": True, "match_thorimage": True}
+    assert plugin.take_info() == {
+        "armed": True,
+        "match_thorimage": True,
+        "stop_idle_ms": plugin.stop_idle_ms,
+    }
 
 
 def test_fixed_duration_arm_disables_idle_detection():
@@ -1014,7 +1018,12 @@ def test_the_take_info_lands_in_the_take_folder(tmp_path):
     plugin._on_stop_report(report)
     plugin.on_recording_stop(aborted=False)
     info = json.loads((tmp_path / "octacam_recording" / "twophoton.json").read_text())
-    assert info == {"armed": True, "match_thorimage": True, "stop": report}
+    assert info == {
+        "armed": True,
+        "match_thorimage": True,
+        "stop_idle_ms": 2000,
+        "stop": report,
+    }
 
 
 def test_an_unarmed_take_is_recorded_as_such(tmp_path):

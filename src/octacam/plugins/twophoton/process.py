@@ -47,6 +47,7 @@ from octacam.plugins.twophoton.takes import (
     is_armed,
     match_start_s,
     start_s,
+    stop_idle_s,
     stopped_early,
     summary_of,
 )
@@ -226,6 +227,7 @@ class TwoPhotonSteps(ProcessSteps):
                     if isinstance(c.get("frames"), int)
                 ],
                 stopped_early=stopped_early(summary),
+                stop_idle_s=stop_idle_s(folder, summary),
             )
         if not takes:
             return 0, set()

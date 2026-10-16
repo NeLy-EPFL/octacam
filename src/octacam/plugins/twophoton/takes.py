@@ -76,6 +76,14 @@ def pending_record(take: Path) -> dict | None:
     return read_json(info_file(take, PENDING_FILENAME))
 
 
+def stop_idle_s(take: Path, summary: dict) -> float | None:
+    """The board's wait after ThorImage stopped (s) the take was armed with, if
+    recorded.
+    """
+    ms = take_info(take, summary).get("stop_idle_ms")
+    return ms / 1000 if isinstance(ms, (int, float)) and ms > 0 else None
+
+
 def is_armed(take: Path, summary: dict) -> bool:
     """Whether *take* was armed for the 2P trigger. A take recorded before
     octacam noted it (summary schema < 4, no plugin facts) may have been:

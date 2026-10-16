@@ -106,11 +106,21 @@ class CaptureSegment:
     # 2026-10-14 SyncData166: 199 of 19817 pulses in the 1.98 s after the fall).
     # None means end_sample.
     cameras_end_sample: int | None = None
-    # How much of that tail ThorSync did not record (s): it stopped with
-    # ThorImage before the board did (real 2026-10-16: ThorImage stopped early,
-    # 27 of 1840 pulses after ThorSync's end). Bounds the frames a take may have
-    # beyond the recorded pulses.
-    cameras_cut_s: float = 0.0
+    # When the episode ends inside that tail (ThorSync stopped with ThorImage
+    # before the board did; real 2026-10-16: 27 of 1840 pulses after ThorSync's
+    # end): how long its input (FrameOut) had been LOW by then (s). The board
+    # ran stop_idle_ms past FrameOut's last HIGH sample, so the pulses
+    # ThorSync missed span the rest of that wait (`cut_s`). None: the tail was
+    # recorded.
+    frameout_quiet_s: float | None = None
+
+    def cut_s(self, stop_idle_s: float) -> float:
+        """How long the board pulsed after ThorSync stopped, at most, for a
+        take armed with *stop_idle_s*.
+        """
+        if self.frameout_quiet_s is None:
+            return 0.0
+        return max(0.0, stop_idle_s + STOP_IDLE_MARGIN_S - self.frameout_quiet_s)
 
     @property
     def duration_s(self) -> float | None:
@@ -139,9 +149,10 @@ def _falling_edge_indices(signal) -> list[int]:
     return [int(i) for i in np.flatnonzero(diff == -1) + 1]
 
 
-# The board stops this long at most after its input's last pulse (FrameOut):
-# the twophoton plugin's stop_idle_ms, 2 s by default, with margin.
-_MAX_STOP_IDLE_S = 3.0
+# The board stops stop_idle_ms after its input's last pulse (FrameOut): the
+# take's own (twophoton.json), else the plugin's default, plus this margin.
+STOP_IDLE_MARGIN_S = 0.5
+DEFAULT_STOP_IDLE_S = 2.0
 # How long after a capture's CaptureOn fall its camera pulses can still run:
 # a take synced with ThorImage keeps triggering the cameras for the plugin's
 # stop_idle_ms (default 2 s; real data: 199 pulses over 1.98 s) before it ends.
@@ -221,7 +232,7 @@ def _load_segments(cache_key: tuple[str, int, float]) -> list[CaptureSegment] | 
 
     try:
         data = json.loads(_segments_file(cache_key).read_text())
-        if data.get("key") != list(cache_key) or data.get("version") != 4:
+        if data.get("key") != list(cache_key) or data.get("version") != 5:
             return None
         return [CaptureSegment(**seg) for seg in data["segments"]]
     except OSError, ValueError, TypeError, KeyError:
@@ -241,7 +252,7 @@ def _save_segments(
         tmp.write_text(
             json.dumps(
                 {
-                    "version": 4,
+                    "version": 5,
                     "key": list(cache_key),
                     "segments": [dataclasses.asdict(seg) for seg in segments],
                 }
@@ -306,15 +317,14 @@ def _read_capture_segments(
         # until its input (FrameOut) has been LOW for stop_idle_ms, and a
         # capture stopped mid-frame holds FrameOut HIGH (real 2026-10-16: 1.7
         # s past its last rise). The pulses ThorSync could have missed end at
-        # FrameOut's last HIGH sample + that idle.
-        cut = 0
+        # FrameOut's last HIGH sample + that idle (CaptureSegment.cut_s).
+        quiet: float | None = None
         if cameras_end == n_samples:
             i_fo = bisect.bisect_left(frameout_falls, cameras_end) - 1
             last_low = frameout_falls[i_fo] if i_fo >= 0 else next_fall
             if frameout_high_at_end:
                 last_low = n_samples
-            idle = int(_MAX_STOP_IDLE_S * (sample_rate or 100_000.0))
-            cut = max(0, last_low + idle - n_samples)
+            quiet = (n_samples - last_low) / (sample_rate or 100_000.0)
         segments.append(
             CaptureSegment(
                 start_sample=rise,
@@ -327,7 +337,7 @@ def _read_capture_segments(
                 ),
                 sample_rate=sample_rate,
                 cameras_end_sample=cameras_end,
-                cameras_cut_s=cut / (sample_rate or 100_000.0),
+                frameout_quiet_s=quiet,
             )
         )
         next_fall = next(fall_iter, None)
@@ -335,14 +345,19 @@ def _read_capture_segments(
 
 
 def camera_edge_diff(
-    segment: CaptureSegment, camera_frame_counts: list[int], *, late_stop_s: float = 0.0
+    segment: CaptureSegment,
+    camera_frame_counts: list[int],
+    *,
+    late_stop_s: float = 0.0,
+    stop_idle_s: float | None = None,
 ) -> int | None:
     """The smallest unexplained difference between *segment*'s Cameras edges
     and a frame count of *camera_frame_counts*, or None if the list is empty.
 
     Two differences are explained, each only up to the pulses its time allows
     at the segment's own pulse rate: frames past the recorded pulses when
-    ThorSync stopped before the synced stop's tail ended (`cameras_cut_s`), and
+    ThorSync stopped before the synced stop's tail ended (`CaptureSegment.cut_s`
+    for the take's *stop_idle_s*, the plugin's default when None), and
     pulses past the frames for a take stopped
     from octacam (*late_stop_s*: the board's cancel lands after the cameras
     stopped; real 2026-10-16: 11 pulses).
@@ -357,7 +372,8 @@ def camera_edge_diff(
     span = (segment.cameras_end_sample or segment.end_sample) - segment.start_sample
     rate = segment.sample_rate or 100_000.0
     pulses_per_s = edges / (span / rate) if span > 0 else 0.0
-    missed = math.ceil(pulses_per_s * segment.cameras_cut_s)
+    idle = DEFAULT_STOP_IDLE_S if stop_idle_s is None else stop_idle_s
+    missed = math.ceil(pulses_per_s * segment.cut_s(idle))
     late = math.ceil(pulses_per_s * late_stop_s)
 
     def unexplained(frames: int) -> int:
