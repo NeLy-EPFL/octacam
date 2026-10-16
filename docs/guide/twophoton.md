@@ -107,7 +107,9 @@ and metadata are transferred:
    ThorSync's recorded camera pulses (the take's frame count) when there is a
    `SyncData` folder, else by start time; copy them into the take as
    `2P/<name>`, ThorImage's frames as one stack per channel (every page
-   compared with its frame when copies are verified). A take whose 2P data is
+   compared with its frame when copies are verified; a capture stopped early
+   is stacked with the frames it recorded, and FastZ or a Z-stack repeated
+   over time as one stack per plane). A take whose 2P data is
    still being written waits (`twophoton_pending.json`) and is paired by a
    later run.
 2. **Sweep** the share for settled 2P data no take claims, filed under its
