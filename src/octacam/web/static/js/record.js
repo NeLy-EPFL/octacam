@@ -92,6 +92,16 @@ export class RecordTab {
 
     this.fields = document.getElementById("record-fields");
     this.durationValue = document.getElementById("duration-value");
+    this.durationRow = document.getElementById("duration-row");
+    this.durationSyncRow = document.getElementById("duration-sync-row");
+    this.durationSyncLabel = document.getElementById("duration-sync-label");
+    this.durationSync = document.getElementById("duration-sync");
+    this.durationSyncWarning = document.getElementById("duration-sync-warning");
+    this._durationSyncSpec = null;
+    this.durationSync.addEventListener("change", () => {
+      this._durationSyncSpec?.onChange?.(this.durationSync.checked);
+      this._syncDurationRows();
+    });
     this.durationUnit = document.getElementById("duration-unit");
     // The server composes save_dir from these two halves.
     this.recordDir = document.getElementById("record-dir");
@@ -336,6 +346,29 @@ export class RecordTab {
       !this.connected || this.state === "finishing" || this.requestPending;
   }
 
+  // A plugin that can end the take itself offers a checkbox in place of the
+  // Duration field: spec = {label, title, checked, onChange(checked),
+  // warning?}, null withdraws it. Ticked hides the Duration row; unticked the
+  // duration applies. The plugin owns the choice (it builds the start params);
+  // this renders it, reports flips back, and shows `warning` under the rows.
+  setDurationSync(spec) {
+    this._durationSyncSpec = spec || null;
+    if (spec) {
+      this.durationSyncLabel.textContent = spec.label;
+      this.durationSyncRow.title = spec.title || "";
+      this.durationSync.checked = Boolean(spec.checked);
+    }
+    this.durationSyncWarning.textContent = spec?.warning || "";
+    this.durationSyncWarning.hidden = !spec?.warning;
+    this._syncDurationRows();
+  }
+
+  _syncDurationRows() {
+    const offered = this._durationSyncSpec != null;
+    this.durationSyncRow.hidden = !offered;
+    this.durationRow.hidden = offered && this.durationSync.checked;
+  }
+
   // null when no recording is counting down.
   _remainingMs() {
     if (this.deadline == null) return null;
@@ -343,6 +376,20 @@ export class RecordTab {
   }
 
   _syncCountdown(snap) {
+    // A take a plugin ends itself (snap.ended_by_plugin) has no countdown, only
+    // elapsed time: anchor its start locally so the re-render ticks smoothly.
+    if (snap.state === "recording" && snap.elapsed_ms != null) {
+      if (snap.recording_id !== this.recordingId || this.elapsedStart == null) {
+        this.recordingId = snap.recording_id;
+        this.elapsedStart = performance.now() - snap.elapsed_ms;
+      }
+      this.endedBy = snap.ended_by_plugin || null;
+      this.deadline = null;
+      this.totalMs = null;
+      return;
+    }
+    this.elapsedStart = null;
+    this.endedBy = null;
     if (snap.state !== "recording" || snap.remaining_ms == null) {
       this.deadline = null;
       this.totalMs = null;
@@ -381,10 +428,15 @@ export class RecordTab {
     if (this.state === "waiting") {
       text = "Waiting for first trigger...";
     } else if (this.state === "recording") {
-      text =
-        remaining != null
-          ? `Remaining time: ${formatHMS(remaining)}`
-          : "Recording...";
+      if (this.elapsedStart != null) {
+        const elapsed = Math.max(0, performance.now() - this.elapsedStart);
+        text = `Recording (${this.endedBy} ends it) \u2014 ${formatHMS(elapsed)} elapsed`;
+      } else {
+        text =
+          remaining != null
+            ? `Remaining time: ${formatHMS(remaining)}`
+            : "Recording...";
+      }
     } else if (this.state === "finishing") {
       text = "Finishing…";
     } else if (this.lastEvent) {

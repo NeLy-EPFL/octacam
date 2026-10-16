@@ -445,7 +445,9 @@ class TriggerboxPlugin(SerialPlugin[TriggerboxLink]):
 
     # -------------------------------------------------- recording lifecycle
 
-    def default_start_params(self, fps: float, duration_s: float) -> dict:
+    def default_start_params(
+        self, fps: float, duration_s: float, *, fixed_duration: bool = False
+    ) -> dict:
         """The configured spec as the arm slice for headless `octacam record`."""
         return {
             "fps": round(fps),

@@ -611,7 +611,16 @@ relaunch from the recording behaves differently), `api_router`,
 (`generates_trigger = True`, found by `PluginManager.trigger_plugin()`),
 `trigger_train` (the exact `{period_ns, count}` the recording arm will emit — the
 recording counts frames against it) and `prime_trigger` (sacrificial pulses
-before the train). Every hook taking start params gets its own slice
+before the train); `take_ceiling_s` for a plugin that **ends the take
+itself** (twophoton: when ThorImage stops) — its ceiling replaces the duration
+as the deadline and the pulse count (`Take.ceiling`), it ends the take with
+`controller.finish_recording(name)` (a *completed* take, unlike
+`stop_recording`), the snapshot reports `elapsed_ms` instead of
+`remaining_ms`, and the summary records `ended_by`, `duration_limit_s` and the
+real length as `duration_s`. Every summary also carries
+`first_frame_time_ns` (the countdown's start: for an external trigger, long
+after `start_time_ns`). `controller.event(level, message)` is the public way
+for a plugin to tell the operator. Every hook taking start params gets its own slice
 (`params[plugin.name]`, None when absent). `PluginManager.attach()` (from the
 controller's constructor and `create_app`) sets each plugin's `controller` and
 `broadcast`; `PluginManager._call` logs and isolates a raising hook. Each plugin

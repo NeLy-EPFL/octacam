@@ -192,6 +192,12 @@ def _capped(indices: list[int]) -> list[int]:
     return list(indices[:SUMMARY_INDEX_LIMIT])
 
 
+def _real_duration_s(settings: RecordingSettings, cameras: list[CameraStats]) -> float:
+    """A plugin-ended take's length: its most frames over the target fps."""
+    frames = max((camera.frames for camera in cameras), default=0)
+    return round(frames / settings.fps, 3) if settings.fps > 0 else 0.0
+
+
 def build_recording_summary(
     settings: RecordingSettings,
     cameras: list[CameraStats],
@@ -201,11 +207,20 @@ def build_recording_summary(
     sync: dict | None = None,
     primed_pulses: int = 0,
     completed: bool | None = None,
+    first_frame_wall_ns: int = 0,
+    ended_by: str | None = None,
+    duration_limit_s: float | None = None,
 ) -> dict:
     """The recording_summary.json payload, from each camera's stats (no I/O).
 
     `transform_applied` is true only when the transform was baked into the
     video (display form and a non-identity transform).
+
+    A take a plugin bounds itself (`duration_limit_s`, its ceiling) records
+    who ended it (`ended_by`) and its real length as `duration_s` (frames /
+    target fps): the set duration never applied. `first_frame_time_ns` is when
+    the first frames were in, which for an external trigger can be long after
+    `start_time_ns` (Start pressed).
     """
     extension = settings.video_format().extension
     start_iso = (
@@ -268,7 +283,12 @@ def build_recording_summary(
         # cameras that disagree by it.
         "completed": completed,
         "fps_target": settings.fps,
-        "duration_s": settings.duration_s,
+        "duration_s": _real_duration_s(settings, cameras)
+        if duration_limit_s is not None
+        else settings.duration_s,
+        "duration_limit_s": duration_limit_s,
+        "ended_by": ended_by,
+        "first_frame_time_ns": first_frame_wall_ns or None,
         "trigger_source": settings.trigger_source,
         "save_method": settings.save_method,
         # The args of the encoder used (nvenc's for save_method="nvenc").
