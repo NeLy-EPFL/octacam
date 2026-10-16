@@ -62,12 +62,14 @@ export class Connection {
         this._setMode("offline");
       }
     });
-    // Disconnect (a rare, easy-to-misclick action) hides behind the Advanced
-    // switch while connected. Once the socket is down the button is the
-    // Connect/Reconnect control and always shown: the switch sits in
-    // #record-fields, which a disconnect disables, so it can't reveal it then.
-    this.advancedToggle = byId("record-advanced-toggle");
-    this.advancedToggle.addEventListener("change", () => this._syncDisconnectVisibility());
+    // Disconnect (a rare, easy-to-misclick action) shows only while one of the
+    // Record tab's sections is open (someone digging in). Once the socket is
+    // down the button is the Connect/Reconnect control and always shown: the
+    // sections sit in #record-fields, which a disconnect disables.
+    this.sections = [...document.querySelectorAll("#record-advanced details")];
+    for (const section of this.sections) {
+      section.addEventListener("toggle", () => this._syncDisconnectVisibility());
+    }
     this._syncDisconnectVisibility();
   }
 
@@ -106,7 +108,8 @@ export class Connection {
   }
 
   _syncDisconnectVisibility() {
-    this.disconnectBtn.hidden = !(this.advancedToggle.checked || !this.connected);
+    const digging = this.sections.some((s) => s.open);
+    this.disconnectBtn.hidden = !(digging || !this.connected);
   }
 
   _setMode(mode) {
