@@ -445,6 +445,7 @@ def build_grids(
                     ffmpeg_params=visualization.ffmpeg_params
                     or cfg.transcode.ffmpeg_params,
                     dry_run=options.dry_run,
+                    max_width=visualization.max_width,
                     # A detached job has no bar: report the encode's own
                     # progress, so the GUI can say how long is left.
                     on_progress=progress.file(i, folder, "grid: ")

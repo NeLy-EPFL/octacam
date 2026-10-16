@@ -155,8 +155,10 @@ class VisualizationConfig(BaseModel):
     process` builds in each recording folder.
 
     `layout` is a 2D list of camera names, rows of equal length, `""` a black
-    cell. An empty `ffmpeg_params` uses `[transcode].ffmpeg_params`.
-    For example, a 3x3 grid on an 8-camera rig::
+    cell. An empty `ffmpeg_params` uses `[transcode].ffmpeg_params`;
+    `max_width` (px) scales the cells down so the whole grid fits, for a quick
+    look that encodes fast and stays light. For example, a 3x3 grid on an
+    8-camera rig::
 
         [[visualization]]
         name = "grid.mp4"
@@ -165,11 +167,14 @@ class VisualizationConfig(BaseModel):
             ["camera_LM", "camera_F",  "camera_RM"],
             ["camera_LH", "camera_H",  "camera_RH"],
         ]
+        ffmpeg_params = "-c:v libx264 -preset medium -crf 20"
+        max_width = 1440
     """
 
     name: ScalarStr = "grid.mp4"
     layout: list[list[str]]
     ffmpeg_params: _ScalarFfmpegArgs = ""
+    max_width: int | None = Field(default=None, ge=64)
 
     @field_validator("layout")
     @classmethod
