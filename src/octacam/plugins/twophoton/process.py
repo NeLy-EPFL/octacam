@@ -47,6 +47,7 @@ from octacam.plugins.twophoton.takes import (
     is_armed,
     match_start_s,
     start_s,
+    stopped_early,
     summary_of,
 )
 from octacam.process import ProcessContext, ProcessSteps, deletes_local
@@ -223,6 +224,7 @@ class TwoPhotonSteps(ProcessSteps):
                     for c in summary.get("cameras", [])
                     if isinstance(c.get("frames"), int)
                 ],
+                stopped_early=stopped_early(summary),
             )
         if not takes:
             return 0, set()

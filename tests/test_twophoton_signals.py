@@ -16,6 +16,8 @@ h5py = pytest.importorskip("h5py")
 import numpy as np
 
 from octacam.plugins.twophoton.signals import (
+    CaptureSegment,
+    camera_edge_diff,
     channel_sample_rate,
     h5py_available,
     read_capture_segments,
@@ -343,3 +345,44 @@ def test_an_episode_is_read_once_across_runs(tmp_path, monkeypatch):
     monkeypatch.setattr(sig, "_SEGMENT_CACHE", {})
     with pytest.raises(AssertionError, match="read again"):
         read_capture_segments(folder)
+
+
+def test_an_early_thorimage_stop_explains_the_pulses_thorsync_missed(tmp_path):
+    # Real 2026-10-16: ThorImage stopped mid-frame, FrameOut stayed HIGH 1.7 s,
+    # the board triggered 2 s more, and ThorSync stopped first: 1813 pulses for
+    # 1840 frames. The pulses after ThorSync's end are explained, no others.
+    total = 2000
+    capture = [(100, 1500)]
+    frameout = np.zeros(total, dtype=np.uint32)
+    frameout[150:160] = 1
+    frameout[400:1700] = 1  # held HIGH past the capture: stopped mid-frame
+    folder = tmp_path / "SyncData001"
+    folder.mkdir()
+    (folder / "ThorRealTimeDataSettings.xml").write_text(SETTINGS_XML)
+    with h5py.File(folder / "Episode001.h5", "w") as f:
+        di = f.create_group("DI")
+        di.create_dataset("CaptureOn", data=_square_wave(total, capture))
+        cams = list(range(110, total, 10))  # still pulsing at the file's end
+        di.create_dataset("Cameras", data=_pulse_train(total, cams))
+        di.create_dataset("FrameOut", data=frameout[:, None])
+    (segment,) = read_capture_segments(folder)
+    assert segment.cameras_cut_s > 0
+    edges = segment.cameras_edges
+    assert camera_edge_diff(segment, [edges + 5]) == 0  # missed at the end
+    assert camera_edge_diff(segment, [edges - 5]) == 5  # fewer frames: not explained
+
+
+def test_a_late_board_cancel_explains_extra_pulses():
+    # Real 2026-10-16: octacam stopped at 992 frames, the board's cancel landed
+    # 11 pulses later.
+    segment = CaptureSegment(
+        start_sample=0,
+        end_sample=100_000,
+        cameras_edges=1003,
+        frameout_edges=95,
+        sample_rate=100_000.0,
+        cameras_end_sample=1_003_000,
+    )
+    assert camera_edge_diff(segment, [992]) == 11
+    assert camera_edge_diff(segment, [992], late_stop_s=0.5) == 0
+    assert camera_edge_diff(segment, [900], late_stop_s=0.5) > 0

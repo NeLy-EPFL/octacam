@@ -23,7 +23,9 @@ unexpected file -- simply gets no verification, not a crashed transfer.
 
 from __future__ import annotations
 
+import bisect
 import logging
+import math
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,6 +106,11 @@ class CaptureSegment:
     # 2026-10-14 SyncData166: 199 of 19817 pulses in the 1.98 s after the fall).
     # None means end_sample.
     cameras_end_sample: int | None = None
+    # How much of that tail ThorSync did not record (s): it stopped with
+    # ThorImage before the board did (real 2026-10-16: ThorImage stopped early,
+    # 27 of 1840 pulses after ThorSync's end). Bounds the frames a take may have
+    # beyond the recorded pulses.
+    cameras_cut_s: float = 0.0
 
     @property
     def duration_s(self) -> float | None:
@@ -132,6 +139,9 @@ def _falling_edge_indices(signal) -> list[int]:
     return [int(i) for i in np.flatnonzero(diff == -1) + 1]
 
 
+# The board stops this long at most after its input's last pulse (FrameOut):
+# the twophoton plugin's stop_idle_ms, 2 s by default, with margin.
+_MAX_STOP_IDLE_S = 3.0
 # How long after a capture's CaptureOn fall its camera pulses can still run:
 # a take synced with ThorImage keeps triggering the cameras for the plugin's
 # stop_idle_ms (default 2 s; real data: 199 pulses over 1.98 s) before it ends.
@@ -211,7 +221,7 @@ def _load_segments(cache_key: tuple[str, int, float]) -> list[CaptureSegment] | 
 
     try:
         data = json.loads(_segments_file(cache_key).read_text())
-        if data.get("key") != list(cache_key):
+        if data.get("key") != list(cache_key) or data.get("version") != 4:
             return None
         return [CaptureSegment(**seg) for seg in data["segments"]]
     except OSError, ValueError, TypeError, KeyError:
@@ -231,6 +241,7 @@ def _save_segments(
         tmp.write_text(
             json.dumps(
                 {
+                    "version": 4,
                     "key": list(cache_key),
                     "segments": [dataclasses.asdict(seg) for seg in segments],
                 }
@@ -270,6 +281,8 @@ def _read_capture_segments(
     falls = _falling_edge_indices(capture_on)
     cameras_edges_all = _rising_edge_indices(cameras) if cameras is not None else []
     frameout_edges_all = _rising_edge_indices(frameout) if frameout is not None else []
+    frameout_falls = _falling_edge_indices(frameout) if frameout is not None else []
+    frameout_high_at_end = frameout is not None and bool(frameout[-1])
 
     segments: list[CaptureSegment] = []
     # Pair each rise with the next fall after it -- tolerates a trailing
@@ -289,6 +302,19 @@ def _read_capture_segments(
         cameras_end = min(
             rises[i + 1] if i + 1 < len(rises) else n_samples, next_fall + tail
         )
+        # ThorSync may stop before the board's camera pulses did: they run
+        # until its input (FrameOut) has been LOW for stop_idle_ms, and a
+        # capture stopped mid-frame holds FrameOut HIGH (real 2026-10-16: 1.7
+        # s past its last rise). The pulses ThorSync could have missed end at
+        # FrameOut's last HIGH sample + that idle.
+        cut = 0
+        if cameras_end == n_samples:
+            i_fo = bisect.bisect_left(frameout_falls, cameras_end) - 1
+            last_low = frameout_falls[i_fo] if i_fo >= 0 else next_fall
+            if frameout_high_at_end:
+                last_low = n_samples
+            idle = int(_MAX_STOP_IDLE_S * (sample_rate or 100_000.0))
+            cut = max(0, last_low + idle - n_samples)
         segments.append(
             CaptureSegment(
                 start_sample=rise,
@@ -301,6 +327,7 @@ def _read_capture_segments(
                 ),
                 sample_rate=sample_rate,
                 cameras_end_sample=cameras_end,
+                cameras_cut_s=cut / (sample_rate or 100_000.0),
             )
         )
         next_fall = next(fall_iter, None)
@@ -308,19 +335,37 @@ def _read_capture_segments(
 
 
 def camera_edge_diff(
-    segment: CaptureSegment, camera_frame_counts: list[int]
+    segment: CaptureSegment, camera_frame_counts: list[int], *, late_stop_s: float = 0.0
 ) -> int | None:
-    """Smallest ``|Cameras edges - frame count|`` across *camera_frame_counts*,
-    or None if the list is empty. A caller comparing several candidate
-    segments against the same take should rank by this (smaller is better,
-    0 = exact) rather than a yes/no check -- real data found more than one
-    segment can fall within tolerance of a take's frame count when nearby takes
-    ran for similar durations, and the exact match is the one actually confirmed
-    correct.
+    """The smallest unexplained difference between *segment*'s Cameras edges
+    and a frame count of *camera_frame_counts*, or None if the list is empty.
+
+    Two differences are explained, each only up to the pulses its time allows
+    at the segment's own pulse rate: frames past the recorded pulses when
+    ThorSync stopped before the synced stop's tail ended (`cameras_cut_s`), and
+    pulses past the frames for a take stopped
+    from octacam (*late_stop_s*: the board's cancel lands after the cameras
+    stopped; real 2026-10-16: 11 pulses).
+
+    A caller comparing several segments against one take ranks by this
+    (smaller is better, 0 = exact): nearby takes of similar length can all fall
+    within tolerance, and the exact one is the one confirmed correct.
     """
     if not camera_frame_counts:
         return None
-    return min(abs(segment.cameras_edges - n) for n in camera_frame_counts)
+    edges = segment.cameras_edges
+    span = (segment.cameras_end_sample or segment.end_sample) - segment.start_sample
+    rate = segment.sample_rate or 100_000.0
+    pulses_per_s = edges / (span / rate) if span > 0 else 0.0
+    missed = math.ceil(pulses_per_s * segment.cameras_cut_s)
+    late = math.ceil(pulses_per_s * late_stop_s)
+
+    def unexplained(frames: int) -> int:
+        if frames > edges:
+            return max(0, frames - edges - missed)
+        return max(0, edges - frames - late)
+
+    return min(unexplained(n) for n in camera_frame_counts)
 
 
 def frameout_edge_diff(segment: CaptureSegment, timepoints: int) -> int:

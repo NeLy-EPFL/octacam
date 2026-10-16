@@ -39,6 +39,7 @@ from octacam.plugins.twophoton.takes import (
     read_json,
     sidecar,
     start_s,
+    stopped_early,
     summary_of,
 )
 
@@ -165,6 +166,7 @@ def pending_takes(source_root: Path) -> list[PendingTake]:
             start_time=match_start_s(folder, summary) or record["start_time"],
             duration_s=record["duration_s"],
             camera_frame_counts=record.get("camera_frame_counts", []),
+            stopped_early=stopped_early(summary),
         )
         pending.append(PendingTake(folder, take, record))
     return pending

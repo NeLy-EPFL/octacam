@@ -238,7 +238,7 @@ def _probe_size(ffmpeg: str, video: Path) -> tuple[int, int] | None:
 _SEGMENT_TOLERANCE = 2
 
 
-def _pick_segment(sync_dir: Path, frame_counts: list[int]):
+def _pick_segment(sync_dir: Path, frame_counts: list[int], late_stop_s: float = 0.0):
     """The CaptureOn segment that is this take's own -- its Cameras edges match
     the take's frame count. Never merely the closest: a take whose own segment
     is missing (ThorSync cut off before it ended) must not be aligned on
@@ -253,7 +253,7 @@ def _pick_segment(sync_dir: Path, frame_counts: list[int]):
     ranked = [
         (d, s)
         for s in segments
-        if (d := camera_edge_diff(s, frame_counts)) is not None
+        if (d := camera_edge_diff(s, frame_counts, late_stop_s=late_stop_s)) is not None
         and d <= _SEGMENT_TOLERANCE
     ]
     if not ranked:
@@ -314,7 +314,14 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
         for c in summary.get("cameras", [])
         if isinstance(c.get("frames"), int)
     ]
-    segment = _pick_segment(inputs.sync_dir, frame_counts)
+    from octacam.plugins.twophoton.matching import LATE_STOP_S
+    from octacam.plugins.twophoton.takes import stopped_early
+
+    segment = _pick_segment(
+        inputs.sync_dir,
+        frame_counts,
+        LATE_STOP_S if stopped_early(summary) else 0.0,
+    )
     if segment is None:
         from octacam.plugins.twophoton.signals import describe_cut_off, episode_cut_off
 
@@ -338,7 +345,8 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
     if edges is None or not edges[0] or not edges[1]:
         log.info("synced render: skipping %s (no camera/FrameOut edges)", take_dir)
         return None
-    cam_times = np.asarray(edges[0])
+    # A take stopped from octacam has a few pulses past its last frame.
+    cam_times = np.asarray(edges[0][: max(frame_counts, default=len(edges[0]))])
     frameout_times = np.asarray(edges[1])
 
     stacks = channel_stacks(inputs.image_dir)

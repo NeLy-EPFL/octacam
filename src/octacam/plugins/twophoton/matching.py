@@ -58,6 +58,8 @@ SYNC_FOLDER_PREFIX = "SyncData"
 # the take's own recorded frame count / ThorImage's own timepoints) -- shared
 # by match_takes_to_twophoton_batch and correlate_sync_folder_to_image.
 _VERIFY_TOLERANCE = 1
+# How late the board's cancel can land after octacam stopped the cameras.
+LATE_STOP_S = 0.5
 # No acquisition outlasts this (the plugin's ceiling defaults to 1 h): an
 # older start rules a folder out without reading its files' mtimes.
 _LONGEST_ACQUISITION_S = 4 * 3600.0
@@ -114,6 +116,9 @@ class TakeInfo:
     start_time: float
     duration_s: float
     camera_frame_counts: list[int]  # per-camera recorded frame counts
+    # Stopped from octacam (not by ThorImage nor its duration): the board's
+    # cancel lands a little after the cameras stopped.
+    stopped_early: bool = False
 
 
 DELTA = "\N{GREEK CAPITAL LETTER DELTA}"
@@ -672,7 +677,11 @@ def match_takes_to_twophoton_batch(
                 for idx, seg in enumerate(segments):
                     if (c.path, idx) in claimed_segments:
                         continue
-                    diff = camera_edge_diff(seg, take.camera_frame_counts)
+                    diff = camera_edge_diff(
+                        seg,
+                        take.camera_frame_counts,
+                        late_stop_s=LATE_STOP_S if take.stopped_early else 0.0,
+                    )
                     if diff is not None and diff <= _VERIFY_TOLERANCE:
                         ranked.append((diff, gap, c, idx))
             if ranked:

@@ -116,6 +116,11 @@ def match_start_s(take: Path, summary: dict) -> float | None:
     return arm_s
 
 
+def stopped_early(summary: dict) -> bool:
+    """Whether the take was stopped from octacam: not completed, not aborted."""
+    return summary.get("completed") is False and not summary.get("aborted")
+
+
 def current_take_dest(dest: Path, start_time_s: float | None) -> Path:
     """Where the take transferred to *dest* is now: *dest*, or the renumbered
     `RecordingN_*` sibling with the same start, so a re-run copies into it
