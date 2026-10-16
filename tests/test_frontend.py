@@ -337,14 +337,14 @@ def test_max_nvenc_sessions_change_rounds_to_int(page):
 # --- advanced-options toggle ----------------------------------------------- #
 
 
-def _flip_advanced(page, on: bool) -> None:
+def _toggle_section(page, name: str, on: bool) -> None:
     page.evaluate(
-        """(on) => {
-            const t = document.getElementById('record-advanced-toggle');
-            t.checked = on;
-            t.dispatchEvent(new Event('change'));
+        """([name, on]) => {
+            const d = document.querySelector(`details[data-section="${name}"]`);
+            d.open = on;
+            d.dispatchEvent(new Event('toggle'));
         }""",
-        on,
+        [name, on],
     )
 
 
@@ -382,11 +382,18 @@ ADVANCED_IDS = [
 ]
 
 
-def test_advanced_section_hidden_by_default(page):
-    """The advanced knobs start collapsed and the switch is off."""
+def test_every_section_starts_collapsed(page):
+    """Only what a recording needs shows at first: each section is closed."""
     make_tab(page)
-    assert prop(page, "#record-advanced-toggle", "e => e.checked") is False
-    assert prop(page, "#record-advanced", "e => e.hidden") is True
+    opened = page.eval_on_selector_all(
+        "#record-advanced details", "els => els.map(e => [e.dataset.section, e.open])"
+    )
+    assert opened == [
+        ["paths", False],
+        ["triggering", False],
+        ["encoding", False],
+        ["postprocessing", False],
+    ]
 
 
 @pytest.mark.parametrize("field_id", ESSENTIAL_IDS)
@@ -608,25 +615,18 @@ def test_grid_keyboard_helpers_drive_selection_and_zoom(page):
     assert result["views"] > 0  # zoom/maximize pushed a fresh view spec
 
 
-def test_advanced_toggle_reveals_and_hides_and_persists(page):
-    """Flipping the switch shows/hides the advanced block and remembers the
-    choice in localStorage.
-    """
+def test_a_section_remembers_being_opened(page):
+    """Opening a section is remembered per browser, and restored."""
     make_tab(page)
-    _flip_advanced(page, True)
-    assert prop(page, "#record-advanced", "e => e.hidden") is False
-    assert page.evaluate("() => localStorage.getItem('octacam.record.advanced')") == "1"
-    _flip_advanced(page, False)
-    assert prop(page, "#record-advanced", "e => e.hidden") is True
-    assert page.evaluate("() => localStorage.getItem('octacam.record.advanced')") == "0"
-
-
-def test_advanced_state_restored_from_storage(page):
-    """A remembered "open" choice is restored when the tab is (re)constructed."""
-    page.evaluate("() => localStorage.setItem('octacam.record.advanced', '1')")
+    _toggle_section(page, "encoding", True)
+    key = "octacam.record.section.encoding"
+    assert page.evaluate(f"() => localStorage.getItem('{key}')") == "1"
+    _toggle_section(page, "encoding", False)
+    assert page.evaluate(f"() => localStorage.getItem('{key}')") == "0"
+    page.evaluate(f"() => localStorage.setItem('{key}', '1')")
     make_tab(page)
-    assert prop(page, "#record-advanced-toggle", "e => e.checked") is True
-    assert prop(page, "#record-advanced", "e => e.hidden") is False
+    assert prop(page, 'details[data-section="encoding"]', "e => e.open") is True
+    assert prop(page, 'details[data-section="paths"]', "e => e.open") is False
 
 
 # --- update-available banner (update.js) ----------------------------------- #
@@ -2013,8 +2013,11 @@ def test_users_are_picked_and_added_from_the_record_tab(static_server, browser):
         return handle
 
     def select(route):
-        state["users"]["active"] = json.loads(route.request.post_data)["initials"]
-        return {**state["users"], "settings": {"user": state["users"]["active"]}}
+        active = json.loads(route.request.post_data)["initials"]
+        state["users"]["active"] = active
+        own = {u["initials"]: u["transfer_directory"] for u in state["users"]["users"]}
+        settings = {"user": active, "transfer_directory": own.get(active, "")}
+        return {**state["users"], "settings": settings}
 
     def add(route):
         new = json.loads(route.request.post_data)
@@ -2085,6 +2088,23 @@ def test_users_are_picked_and_added_from_the_record_tab(static_server, browser):
             "() => document.getElementById('user-hint').title === '/nas/MD/BallPushing'"
         )
         assert ("POST", "users/select") in calls
+        # Paths say they follow the user, and when they were changed.
+        assert page.text_content("#paths-source") == "\N{EM DASH} from MD"
+        assert page.eval_on_selector("#paths-reset", "e => e.hidden")
+        page.evaluate(
+            """() => window.__pushWs({type: 'settings', user: 'MD',
+                transfer_directory: '/elsewhere', relative_directory: 'a/b/001'})"""
+        )
+        page.wait_for_function(
+            "() => document.getElementById('paths-source').textContent"
+            ".includes('changed for this session')"
+        )
+        assert not page.eval_on_selector("#paths-reset", "e => e.hidden")
+        page.evaluate("() => document.getElementById('paths-reset').click()")
+        page.wait_for_function(
+            "() => document.getElementById('paths-source').textContent"
+            ".includes('from MD')"
+        )
 
         # A NAS folder not set up yet opens the dialog with its folders guessed.
         page.evaluate(
