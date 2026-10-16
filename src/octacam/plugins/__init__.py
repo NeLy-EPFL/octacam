@@ -10,8 +10,12 @@ import importlib
 import logging
 import sys
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from octacam.plugins.base import Plugin, PluginManager
+
+if TYPE_CHECKING:
+    from typer import Typer
 
 log = logging.getLogger("octacam")
 
@@ -20,6 +24,13 @@ _PLUGINS = {
     "flywheel": "octacam.plugins.flywheel:FlywheelPlugin",
     "twophoton": "octacam.plugins.twophoton:TwoPhotonPlugin",
     "triggerbox": "octacam.plugins.triggerbox.plugin:TriggerboxPlugin",
+}
+
+# name -> "module:app" of a plugin's typer command group, mounted as
+# `octacam <name>`. Kept apart from the plugin module so the CLI starts without
+# importing every plugin's hardware layer.
+_COMMANDS: dict[str, str] = {
+    "twophoton": "octacam.plugins.twophoton.cli:app",
 }
 
 # Old plugin names, still loaded (with a warning) so no rig loses its plugin.
@@ -37,6 +48,20 @@ def plugin_class(name: str) -> type[Plugin]:
     """
     module, _, cls = _PLUGINS[name].partition(":")
     return getattr(importlib.import_module(module), cls)
+
+
+def command_groups() -> list[tuple[str, Typer]]:
+    """`(name, typer app)` of each plugin's command group; one that fails to
+    import is skipped (its plugin's own commands are then missing, nothing else).
+    """
+    groups = []
+    for name, target in _COMMANDS.items():
+        module, _, attr = target.partition(":")
+        try:
+            groups.append((name, getattr(importlib.import_module(module), attr)))
+        except Exception as e:  # an optional dependency missing, a bug
+            log.debug("plugin %s: no commands (%s)", name, e)
+    return groups
 
 
 def _resolve_selection(config_plugins, enabled) -> list[tuple[str, dict]]:

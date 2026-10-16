@@ -11,6 +11,67 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **2-photon rigs** (`twophoton` plugin): a take synced with ThorImage ends
+  when ThorImage stops (the Record tab's **Synced with ThorImage**; firmware
+  protocol v2, reflash with `octacam flash`), the GUI warns when ThorSync is set
+  to stop before a take can end, and `octacam process` pairs each take with its
+  ThorSync/ThorImage data (by ThorSync's recorded camera pulses), copies it with
+  ThorImage's frames as stacks, files 2P-only data under its fly, renumbers each
+  fly's sessions and renders synced behavior + 2P videos and Z-stack MIPs.
+  `octacam twophoton verify|sweep|manifest|reconcile|reassemble|render` run
+  these by hand. With `delete_after_transfer`, verified share folders are
+  deleted, 2P-only ones too (the share's account needs delete rights);
+  `octacam twophoton verify --delete` clears a backlog of verified ones.
+  Settings are the plugin's options (`source`, ...); see the 2-photon guide.
+- **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
+  its cells down; with its own faster `ffmpeg_params` a grid builds several
+  times faster (see Configuration).
+- **The GUI shows background processing.** While a detached `octacam
+  process` job runs, a strip along the bottom of the camera view says what it
+  is doing and how long the current step has left; once that step is done the
+  job pauses until the GUI closes, as before, and the strip says so. The event
+  log (and, with **Notify me**, a desktop notification) records when it pauses
+  and ends, and Start recording asks first while a step is still running.
+- **Jobs count their warnings**: every warning or error a detached job logs is
+  kept in its status (`octacam jobs list` has a Warnings column, the GUI says
+  "finished with N warnings"), and the log ends with a summary of them. Jobs
+  also report grid progress and name items as `Fly1/003`.
+- **Users**: `[users.<initials>]` in the rig config says who records and where
+  their data goes (their transfer destination, and plugin folders such as the
+  2P share). The Record tab picks the user from a list and adds a new one in a
+  dialog that suggests and checks their folders (also `octacam users
+  list|add`, and `--user` on `gui` and `record`); each user gets their last
+  folder name back, and summaries name who recorded.
+- **Experiment / Fly / Take fields with Next fly** in the Record tab, and a
+  **Ready?** strip saying what to fix before recording (cameras, boards, disk,
+  destination, and each plugin's own checks).
+- **`octacam process` transfers the data before building grids**, so a day's
+  videos are on the destination hours earlier; grids are built and transferred
+  after. **Plugins can add processing steps** (`Plugin.process_steps`, a
+  `process.ProcessSteps`): data steps right after the transfer, renders at the
+  very end. `process` never instantiates a plugin or touches its hardware.
+  A step that moves a transferred recording steers later copies
+  (`ProcessSteps.transfer_dest`, `ctx.dests`). A plugin can also add a command
+  group (`octacam <name> ...`, from `plugins._COMMANDS`) and its own `octacam
+  doctor` checks (`Plugin.doctor`).
+- **`[transfer].delete_after_transfer`** (and `process
+  --delete-after-transfer/--no-delete-after-transfer`) removes each local
+  recording once all of it is content-verified at the destination, after its
+  grids. `transfer.transfer_tree` copies a whole folder the same way, for a
+  plugin's acquisition data.
+- **A plugin can end the take itself**: `Plugin.take_ceiling_s` returns a
+  safety ceiling that replaces the set duration (deadline and pulse count),
+  and `controller.finish_recording(name)` ends the take as *completed* (not an
+  early stop). The GUI and `octacam record` show elapsed time for such a take;
+  its summary records `ended_by`, `duration_limit_s` and its real length as
+  `duration_s`. Every summary now also has `first_frame_time_ns`, when the
+  first frames were in (for an external trigger, possibly long after Start),
+  and plugins tell the operator through `controller.event(level, message)`.
+  `octacam record --duration` is exact: `Plugin.default_start_params` gets
+  `fixed_duration=True`, so such a plugin leaves that take to the duration (a
+  plugin overriding the hook must accept the new keyword). Its tab can offer a
+  checkbox in place of the Record tab's Duration (`setDurationSync` in a
+  plugin tab's context).
 - **`--set KEY=VALUE` on `gui` and `record`** overrides any config key for one
   launch by its dotted path (`--set record.save_method=raw`), the same flag
   deeperfly and spintrack take. The value is read as TOML, a list may drop its
@@ -159,6 +220,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **Saving the rig config from the GUI kept only the tables it knew**: any
+  other table in the file (now `[users]`) was dropped by the rewrite.
+- **The transfer copies every file of a recording's `octacam_recording`
+  folder**, a plugin's own included (it copied only the files it knew by name,
+  so with a delete after transfer a plugin's facts were lost).
 - **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
   error, which made a request for a missing feature or command a 500; it is a
   clean "no such node" again.

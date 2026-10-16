@@ -13,8 +13,11 @@ import { initTheme, applyConfigTheme } from "./theme.js";
 import { SaveDialog } from "./save.js";
 import { ShutdownDialog } from "./shutdown.js";
 import { DirPicker } from "./dirpicker.js";
+import { ReadyStrip } from "./ready.js";
+import { UsersPanel } from "./users.js";
 import { initShortcuts } from "./shortcuts.js";
 import { initUpdateBanner } from "./update.js";
+import { JobsNotice } from "./jobs.js";
 
 const byId = (id) => document.getElementById(id);
 
@@ -75,6 +78,9 @@ async function main() {
   let viewTab = null;
   let saveDialog = null;
   let systemReady = Boolean(system.ready);
+  // Before the socket: a system push re-checks readiness.
+  const ready = new ReadyStrip();
+  let usersPanel = null; // built with the Record tab, below
   let initError = system.init_error || null;
   let recordingActive = false;
   let recordingsMade = 0; // this session's, for "Shut down & process"
@@ -104,6 +110,9 @@ async function main() {
     addEvent(evt);
     record?.handleEvent(evt);
   };
+  // Background `octacam process` jobs: banner + pause/end announcements (jobs.js).
+  const jobsNotice = new JobsNotice({ notify });
+  jobsNotice.apply(system.jobs);
 
   const conn = new Connection({
     onOpen: () => {
@@ -120,6 +129,8 @@ async function main() {
   let pluginTabs = new Map();
   record = new RecordTab({
     formats: system.formats,
+    // "Record anyway?" while a background job is still mid-step (jobs.js).
+    backgroundJobWarning: () => jobsNotice.busyMessage(),
     // {name: start-params slice}, sent as the start request's plugin_params.
     getPluginParams: () => {
       const params = {};
@@ -140,6 +151,7 @@ async function main() {
     send: (m) => conn.send(m),
     notify,
     getRecordSettings: () => record.settings,
+    setDurationSync: (spec) => record.setDurationSync(spec),
   });
 
   const benchmark = new BenchmarkTab({ notify });
@@ -148,6 +160,13 @@ async function main() {
     onPick: (path) => record.setRecordDir(path),
     getStart: () => record.getRecordDir(),
   });
+  usersPanel = new UsersPanel({
+    notify,
+    dirPicker,
+    onChange: () => ready.refresh(true),
+  });
+  usersPanel.load();
+  ready.refresh();
 
   // The grid is built later, so the shortcuts reach it through this stable
   // forwarder (a no-op until it exists).
@@ -195,6 +214,9 @@ async function main() {
       case "system":
         applySystem(msg);
         break;
+      case "jobs":
+        jobsNotice.apply(msg);
+        break;
       case "state":
       case "telemetry":
         recordingActive = ["waiting", "recording", "finishing"].includes(msg.state);
@@ -218,6 +240,7 @@ async function main() {
       case "settings":
         record.applySettings(msg);
         benchmark.applySettings(msg);
+        usersPanel?.applySettings(msg);
         break;
       case "diagnostics":
         benchmark.applyReport(msg);
@@ -322,6 +345,8 @@ async function main() {
   // Apply a /api/system descriptor (the WS handshake or the init's push).
   function applySystem(sys) {
     systemReady = Boolean(sys.ready);
+    if (sys.jobs) jobsNotice.apply(sys.jobs);
+    ready.refresh(true); // the cameras (or their failure) are in
     initError = sys.init_error || null;
     showMissingCameras(sys);
     record.setManagedAvailable(!!sys.managed_trigger_available);

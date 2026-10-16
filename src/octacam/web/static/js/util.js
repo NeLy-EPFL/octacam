@@ -8,6 +8,13 @@ export function el(tag, className, text) {
   return node;
 }
 
+// A long path as its last folders ("…/MD/BallPushing_Imaging"), for narrow
+// spaces; show the whole one in a tooltip.
+export function shortPath(path, keep = 2) {
+  const parts = String(path || "").split("/").filter(Boolean);
+  return parts.length > keep ? `\u2026/${parts.slice(-keep).join("/")}` : String(path || "");
+}
+
 // localStorage that never throws (it can in private mode or a sandbox): a
 // failed read is null and a failed write is dropped.
 export const store = {

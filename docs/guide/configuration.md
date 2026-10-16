@@ -112,14 +112,49 @@ disable transfer.
 [transfer]
 directory = "/mnt/store/matthias"    # strftime %-codes expand here too
 checksum = true                      # content-verify each copy (default)
+delete_after_transfer = false        # keep the local recording (default)
 ```
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `directory` | `""` | Destination base folder; recordings mirror into it under their relative directory. Blank disables transfer. |
 | `checksum` | `true` | blake2b content-verify each copy. `false` = faster size-only verify. |
+| `delete_after_transfer` | `false` | Remove the local recording once every file of it is content-verified at the destination. |
 
 See [Processing → Transfer](processing.md#transfer).
+
+## Users
+
+`[users.<initials>]` lists who records on this rig, each with where their data
+goes. Picking a user (the Record tab's **User**, or `--user MD` on `gui` and
+`record`) replaces `[transfer].directory` with theirs, gives each plugin their
+own folders (a sub-table named after the plugin), brings back the last folder
+name they recorded under, and notes them in each recording's summary. The last
+user is remembered on this machine.
+
+```toml
+[users.MD]
+name = "Matthias Durrieu"
+transfer_directory = "/mnt/upramdya_data/MD/BallPushing_Imaging"
+
+[users.MD.twophoton]
+source = "/mnt/windows_share/MD"     # the plugin's per-user option
+```
+
+Users are kept in each rig's own config, as rigs rarely share paths. Nobody
+needs to edit them by hand: **+ Add yourself…** in the User list (or
+`octacam users add <config> <INITIALS>`) asks for the initials and suggests
+the folders from the other users' (the same root, your own initials folder),
+checking that each exists. Initials folders found beside the users' on the NAS
+appear in the list as people who can be set up in one click. Adding a user
+appends their block to the config and leaves the rest of the file as it is.
+`octacam users list <config>` shows them all.
+
+| Key | Meaning |
+| --- | --- |
+| `name` | Shown in the user list. |
+| `transfer_directory` | Their transfer destination; blank keeps `[transfer].directory`. |
+| `[users.XX.<plugin>]` | That plugin's per-user options (the 2-photon plugin: `source`). |
 
 ## `[[cameras]]`
 
@@ -169,11 +204,18 @@ layout = [
     ["camera_LH", "",          "camera_RH"],
 ]
 # ffmpeg_params = ""         # optional per-grid encoder override
+# max_width = 1440           # optional: scale the cells so the grid fits
 ```
 
 Each cell is a camera `name`; `""` is a black fill. All rows must have the same
 number of columns. `octacam config` offers to write a near-square layout of the
 rig's cameras for you.
+
+A grid is for watching, not analysis: without its own `ffmpeg_params` it uses
+the archival `[transcode]` settings, at full size. A faster preset and a
+`max_width` make it much quicker to build and lighter to share (a 3x3 grid of
+960x580 cameras at 100 fps: ~8x faster with
+`ffmpeg_params = "-c:v libx264 -preset medium -crf 20"` and `max_width = 1440`).
 
 ## `[[plugins]]`
 

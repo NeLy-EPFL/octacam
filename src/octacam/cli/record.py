@@ -13,7 +13,9 @@ from octacam.cli._common import (
     EnabledPlugins,
     NoPlugins,
     Sets,
+    User,
     Verbose,
+    check_user,
     command,
     open_rig,
     resolve_config_arg,
@@ -73,7 +75,18 @@ def _drive_record_progress(controller, duration_s: float) -> None:
             snap = controller.snapshot()
             state = snap["state"]
             frames = sum(c["frames"] for c in snap["cameras"])
-            if state == "recording" and snap.get("remaining_ms") is not None:
+            if state == "recording" and snap.get("elapsed_ms") is not None:
+                # A plugin ends this take: elapsed time against its ceiling.
+                progress.update(
+                    task,
+                    total=snap.get("duration_limit_s") or duration_s,
+                    completed=snap["elapsed_ms"] / 1000.0,
+                    description=(
+                        f"Recording until {snap.get('ended_by_plugin')} ends it "
+                        f"\N{EM DASH} {frames} frames"
+                    ),
+                )
+            elif state == "recording" and snap.get("remaining_ms") is not None:
                 elapsed = max(0.0, duration_s - snap["remaining_ms"] / 1000.0)
                 progress.update(
                     task,
@@ -120,7 +133,8 @@ def record(
             "--duration",
             "-d",
             help="Recording duration in seconds (default: the config's "
-            "`record.duration` and `record.duration_unit`).",
+            "`record.duration` and `record.duration_unit`). Given here, it is "
+            "exact: a plugin that would end the take itself does not.",
         ),
     ] = None,
     out: Annotated[
@@ -154,6 +168,7 @@ def record(
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
     sets: Sets = None,
+    user: User = None,
     verbose: Verbose = False,
 ) -> None:
     """Record videos headlessly from the cameras in `config_dir`.
@@ -167,11 +182,16 @@ def record(
     from octacam.config import RecordingSettings, load_config_dir
     from octacam.controller import RecordingController
     from octacam.plugins import build_plugins
+    from octacam.users import recording_user, settings_for_user
 
     config_dir = resolve_config_arg(config_dir)
     config = with_sets(load_config_dir(config_dir), sets)
 
+    check_user(config, user)
     settings = RecordingSettings.from_config(config, fps=fps)
+    initials = recording_user(config, config_dir, user)
+    if initials:
+        settings = settings.updated(**settings_for_user(config, initials))
     if duration is not None:
         settings.duration_s = duration
     if out is not None:
@@ -213,6 +233,8 @@ def record(
             )
 
         plugins = build_plugins(config, resolve_enabled(enabled_plugins, no_plugins))
+        if initials:
+            plugins.on_user(config.users[initials].plugins)
         plugins.setup_all()
 
         # Wrong firmware would record against the wrong protocol, or get no
@@ -248,7 +270,7 @@ def record(
             # No GUI posts plugin_params here: without a start slice triggerbox
             # never arms and its cameras wait forever for a trigger.
             plugin_params = plugins.default_start_params(
-                settings.fps, settings.duration_s
+                settings.fps, settings.duration_s, fixed_duration=duration is not None
             )
             result = controller.start_recording(
                 confirm_overwrite=True, plugin_params=plugin_params or None

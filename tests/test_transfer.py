@@ -301,7 +301,7 @@ def test_verify_mismatch_fails_and_cleans_up(tmp_path, monkeypatch):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"data" * 100})
     dest_root = tmp_path / "dest"
     # Force every read-back digest to differ from the (real, inline) source digest.
-    monkeypatch.setattr(transfer_mod, "_file_digest", lambda *a, **k: "deadbeef")
+    monkeypatch.setattr(transfer_mod, "file_digest", lambda *a, **k: "deadbeef")
 
     dest = dest_root / "rec"
     result = _transfer(src, dest=dest, verify=True)
@@ -491,3 +491,63 @@ def test_discovery_finds_nested_recordings_never_their_subfolder(tmp_path):
     # Naming the subfolder means the recording around it.
     info = nested / RECORDING_INFO_DIRNAME
     assert find_recording_dirs([info], recursive=False) == [nested]
+
+
+def test_a_tree_lands_at_the_same_relative_paths_and_resumes(tmp_path):
+    src = tmp_path / "Fly1_Zstack"
+    (src / "jpeg").mkdir(parents=True)
+    (src / "Experiment.xml").write_text("<x/>")
+    (src / "ChanA_001.tif").write_bytes(b"frame")
+    (src / "jpeg" / "preview.jpg").write_bytes(b"jpg")
+    dest = tmp_path / "nas" / "2P" / "Fly1_Zstack"
+
+    plan = transfer_mod.transfer_tree(src, dest, dry_run=True)
+    assert sorted(plan.copied) == [
+        "ChanA_001.tif",
+        "Experiment.xml",
+        "jpeg/preview.jpg",
+    ]
+    assert not dest.exists()
+
+    excluded = frozenset({src / "ChanA_001.tif"})  # e.g. assembled elsewhere
+    result = transfer_mod.transfer_tree(src, dest, exclude=excluded)
+    assert sorted(result.copied) == ["Experiment.xml", "jpeg/preview.jpg"]
+    assert (dest / "jpeg" / "preview.jpg").read_bytes() == b"jpg"
+    assert not (dest / "ChanA_001.tif").exists()
+
+    again = transfer_mod.transfer_tree(src, dest, exclude=excluded)
+    assert again.copied == []
+    assert sorted(again.skipped) == ["Experiment.xml", "jpeg/preview.jpg"]
+
+
+def test_by_content_recopies_a_same_size_file_that_differs(tmp_path):
+    # Before deleting the source, a file "already there" must be the same bytes,
+    # not merely the same size.
+    src = tmp_path / "rec"
+    src.mkdir()
+    (src / "camera_LF.mp4").write_bytes(b"good")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "camera_LF.mp4").write_bytes(b"bad!")
+    files = [src / "camera_LF.mp4"]
+    by_size = transfer_folder(src, dest, files, metadata=False)
+    assert by_size.skipped == ["camera_LF.mp4"]
+    result = transfer_folder(src, dest, files, metadata=False, by_content=True)
+    assert result.copied == ["camera_LF.mp4"]
+    assert (dest / "camera_LF.mp4").read_bytes() == b"good"
+
+
+def test_every_file_of_the_metadata_folder_travels(tmp_path):
+    # A plugin's own facts sit beside the summary (the twophoton plugin's
+    # twophoton.json): a delete after transfer must not lose them.
+    src = tmp_path / "rec"
+    info = src / RECORDING_INFO_DIRNAME
+    info.mkdir(parents=True)
+    (info / RECORDING_SUMMARY_FILENAME).write_text("{}")
+    (info / "twophoton.json").write_text('{"armed": true}')
+    (src / "camera_LF.mp4").write_bytes(b"v")
+    dest = tmp_path / "dest"
+    transfer_folder(src, dest, [src / "camera_LF.mp4"])
+    assert (dest / RECORDING_INFO_DIRNAME / "twophoton.json").read_text() == (
+        '{"armed": true}'
+    )

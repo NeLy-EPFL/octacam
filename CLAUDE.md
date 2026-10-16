@@ -611,7 +611,16 @@ relaunch from the recording behaves differently), `api_router`,
 (`generates_trigger = True`, found by `PluginManager.trigger_plugin()`),
 `trigger_train` (the exact `{period_ns, count}` the recording arm will emit — the
 recording counts frames against it) and `prime_trigger` (sacrificial pulses
-before the train). Every hook taking start params gets its own slice
+before the train); `take_ceiling_s` for a plugin that **ends the take
+itself** (twophoton: when ThorImage stops) — its ceiling replaces the duration
+as the deadline and the pulse count (`Take.ceiling`), it ends the take with
+`controller.finish_recording(name)` (a *completed* take, unlike
+`stop_recording`), the snapshot reports `elapsed_ms` instead of
+`remaining_ms`, and the summary records `ended_by`, `duration_limit_s` and the
+real length as `duration_s`. Every summary also carries
+`first_frame_time_ns` (the countdown's start: for an external trigger, long
+after `start_time_ns`). `controller.event(level, message)` is the public way
+for a plugin to tell the operator. Every hook taking start params gets its own slice
 (`params[plugin.name]`, None when absent). `PluginManager.attach()` (from the
 controller's constructor and `create_app`) sets each plugin's `controller` and
 `broadcast`; `PluginManager._call` logs and isolates a raising hook. Each plugin
@@ -679,6 +688,19 @@ uses a backward-compatible identify *sentinel* over the shared reader
 
 FastAPI + a vanilla-JS static frontend (`web/static/`). Preview/telemetry/control
 share one WebSocket.
+
+**Background-processing notice** (`js/jobs.js`): a GUI session marks
+capture-active, so a detached `process` job finishes its current step and
+parks until the GUI closes; the GUI only makes that visible. `ws.jobs_loop`
+polls `AppState.refresh_jobs` every `JOBS_INTERVAL_S` and broadcasts WS `jobs`
+= `{live: [process_jobs.notice_dict], ended: [...]}` when it changes (also in
+`/api/system`). The strip announces pause/end transitions (never what was
+already so at page load) and `RecordTab._start` confirms while a job is
+mid-step. The ETA needs within-item progress (`JobStatus.item_started` /
+`item_percent`, `item_eta_s`): grids feed `reporter.transcode_progress` when
+there is no bar. `process_jobs.worker` captures every WARNING+ the run logs
+into `JobStatus.warnings`/`warning_count` (a handler on the `octacam` logger,
+removed at the end with a summary line); `jobs list` shows the count.
 
 **Deferred startup (serve-first).** `octacam gui` binds uvicorn and serves the
 page *before* touching hardware, so time-to-first-paint never waits on vendor-SDK
@@ -757,8 +779,15 @@ opens a camera (safe during a live session). A rig **instance-lock**
 prevents two octacams owning one rig; doctor names its holder with
 `locks.holder`, a `files.flock_held` probe that never takes or blocks the lock.
 
-`process.run(folders, ProcessOptions, reporter)` drives transcode → grid →
-transfer. The run side is `process_jobs`: `worker(jd)` yields the run's reporter
+`process.run(folders, ProcessOptions, reporter)` drives transcode → transfer
+(videos + metadata) → plugin data steps → grid → transfer (grids, no metadata)
+→ plugin renders: the data reaches the destination before the grids (hours
+for a full day). A plugin contributes steps through its class attribute
+`process_steps` (a `process.ProcessSteps`: `after_transfer(ctx)` and
+`render(ctx)`, each returning its failed-file count, with a `ProcessContext`
+of the recordings whose config enables it, their destinations, configs,
+options and reporter); `process` never instantiates a plugin or touches its
+hardware. The run side is `process_jobs`: `worker(jd)` yields the run's reporter
 (a `NullReporter` outside a detached job) and records done/cancelled/failed, and
 `pause_gate` holds a work unit while a gui/record has the cameras.
 

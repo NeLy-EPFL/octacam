@@ -74,9 +74,12 @@ The matching firmware is in
 
 Arms an Arduino hardware camera trigger for a 2-photon rig. The Arduino waits for
 a ThorSync rising edge, then emits a square-wave trigger at the recording's fps
-for its duration. Adds the web GUI's **2-Photon** tab (live Arduino state plus
-"arm with recording") and arms at recording start, so capture is synced to the
-ThorSync edge.
+until ThorImage stops (its ThorSync input quiet for `stop_idle_ms`), and the
+take ends with it: no duration to set. Unticking the Record tab's **Synced with
+ThorImage** (or `match_thorimage = false`) records for the set duration instead.
+Adds the web GUI's **2-Photon** tab (live Arduino state plus "arm with
+recording"), warns when ThorSync is set to stop before the take can end, and
+gives `octacam process` its 2P steps: see [2-photon rigs](twophoton.md).
 
 The firmware and wiring notes are in
 [arduino/2photon_trigger/](https://github.com/NeLy-EPFL/octacam/tree/main/arduino/2photon_trigger).

@@ -22,7 +22,7 @@ import octacam
 from octacam import config_writer
 from octacam.config import OctacamConfig
 from octacam.controller import RecordingController
-from octacam.web import cameras, record, save, system, ws
+from octacam.web import cameras, record, save, system, users, ws
 from octacam.web.hub import Hub
 from octacam.web.preview import preview_loop
 from octacam.web.state import AppState
@@ -54,9 +54,11 @@ def create_app(
     controller: RecordingController,
     config: OctacamConfig,
     shutdown_callback: Callable[[], None] = _default_shutdown,
+    user: str | None = None,
 ) -> FastAPI:
     """The GUI's app for `controller`, serving the plugins it was built with
-    and saving to its config dir.
+    and saving to its config dir. *user* (`--user`) is chosen at start, else
+    the last user of this rig on this machine.
     """
     config_dir = str(controller.config_dir or "")
     hub = Hub()
@@ -81,6 +83,7 @@ def create_app(
         raw_config=config_writer.load_raw_config(config_dir) if config_dir else {},
         plugin_web=plugin_web,
     )
+    users.choose_initial_user(state, user)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -90,6 +93,7 @@ def create_app(
         tasks = [
             asyncio.create_task(preview_loop(hub, controller, interval)),
             asyncio.create_task(ws.telemetry_loop(hub, controller)),
+            asyncio.create_task(ws.jobs_loop(state)),
         ]
         yield
         for task in tasks:
@@ -110,6 +114,7 @@ def create_app(
     app.include_router(record.router(state))
     app.include_router(cameras.router(state))
     app.include_router(save.router(state))
+    app.include_router(users.router(state))
     app.include_router(ws.router(state))
     # Plugin REST routes, registered before the "/" catch-all.
     for plugin in plugins.plugins:

@@ -27,6 +27,8 @@ $ octacam [OPTIONS] COMMAND [ARGS]...
 * `process`: Post-recording pipeline: transcode, build...
 * `jobs`: Manage detached `octacam process` jobs...
 * `cache`: Inspect and clear the octacam cache...
+* `users`: The rig's users: who records and where...
+* `twophoton`: 2-photon data on the destination: verify,...
 
 ## `octacam gui`
 
@@ -50,6 +52,7 @@ $ octacam gui [OPTIONS] [config_dir]
 * `--plugin <str>`: Enable a plugin (repeatable); adds to the config's `plugins` (e.g. --plugin flywheel). See `octacam doctor`.
 * `--no-plugins`: Disable all plugins for this launch, ignoring the config.
 * `--set KEY=VALUE`: Override one config key for this launch by its dotted path, `table.key=value`; repeatable. The value is read as TOML (a list may drop its brackets), and `none` restores the default.
+* `-u, --user <str>`: Who records: initials from the rig config's [users] (their transfer destination and plugin folders). Default: the last user on this machine. See `octacam users list`.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.
 
@@ -125,13 +128,14 @@ $ octacam record [OPTIONS] [config_dir]
 **Options**:
 
 * `-f, --fps <float>`: Frame rate (default: the config's `record.fps`).
-* `-d, --duration <float>`: Recording duration in seconds (default: the config's `record.duration` and `record.duration_unit`).
+* `-d, --duration <float>`: Recording duration in seconds (default: the config's `record.duration` and `record.duration_unit`). Given here, it is exact: a plugin that would end the take itself does not.
 * `-o, --out <path>`: Save directory, overriding the config's templated `record.directory` and `record.relative_directory`.
 * `-y, --yes`: Before recording, reflash without asking a serial plugin's board that runs an old build of its firmware (a blank or foreign board is only warned about).
 * `-F, --force`: Overwrite an existing save directory without the interactive confirmation prompt.
 * `--plugin <str>`: Enable a plugin (repeatable); adds to the config's `plugins` (e.g. --plugin flywheel). See `octacam doctor`.
 * `--no-plugins`: Disable all plugins for this launch, ignoring the config.
 * `--set KEY=VALUE`: Override one config key for this launch by its dotted path, `table.key=value`; repeatable. The value is read as TOML (a list may drop its brackets), and `none` restores the default.
+* `-u, --user <str>`: Who records: initials from the rig config's [users] (their transfer destination and plugin folders). Default: the last user on this machine. See `octacam users list`.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.
 
@@ -248,6 +252,8 @@ $ octacam process [OPTIONS] [paths]...
 * `--force`: Re-transcode and rebuild grids even when the output already exists. By default existing transcode/grid outputs are skipped (as the transfer step skips files already at the destination).
 * `-c, --config <directory>`: Fallback config dir for recordings that lack an embedded octacam_config.toml (older recordings). Normally not needed.
 * `-d, --delete-source`: Delete each source .mkv/.raw once it transcodes successfully. The recording's summary, timestamps and config snapshot are kept.
+* `--delete-after-transfer`: Remove each local recording once every file of it is on the [transfer] destination, content-verified (after its grids are built from it). Default: the config's [transfer].delete_after_transfer.
+* `--no-delete-after-transfer`: Keep the local recordings even when the config's [transfer].delete_after_transfer is set.
 * `--progress-style <octacam|ffmpeg>`: How to show transcode progress. octacam (default): an octacam-style bar. ffmpeg: stream ffmpeg's own output verbatim.  [default: octacam]
 * `--dry-run`: List what each step would do (files to transcode, grids to build, files to transfer) without running ffmpeg, copying, or deleting anything. Work that is already done is only counted.
 * `--detach`: Run the pipeline as a detached background job that survives an SSH disconnect, then return its id. Watch it with `octacam jobs attach`; a running gui/record auto-pauses it.
@@ -433,5 +439,216 @@ $ octacam cache clear [OPTIONS]
 
 * `--all`: Also remove finished detached-job logs (kept by default).
 * `-y, --yes`: Clear without the confirmation prompt.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+## `octacam users`
+
+The rig's users: who records and where their data goes.
+
+**Usage**:
+
+```console
+$ octacam users [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `list`: List the rig's users and where each one's...
+* `add`: Add a user to the rig config (appended;...
+
+### `octacam users list`
+
+List the rig's users and where each one's data goes.
+
+**Usage**:
+
+```console
+$ octacam users list [OPTIONS] {config_dir}
+```
+
+**Arguments**:
+
+* `config_dir`: The rig's config directory.  [required]
+
+**Options**:
+
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam users add`
+
+Add a user to the rig config (appended; the rest is left as is).
+
+**Usage**:
+
+```console
+$ octacam users add [OPTIONS] {config_dir} {initials}
+```
+
+**Arguments**:
+
+* `config_dir`: The rig's config directory.  [required]
+* `initials`: 2 to 4 capital letters, like MD.  [required]
+
+**Options**:
+
+* `--name <str>`: Full name.
+* `--transfer-directory <str>`: Where `octacam process` copies their recordings. Default: guessed from the other users' (their own initials folder).
+* `--option PLUGIN.OPTION=VALUE`: A plugin's per-user option, e.g. twophoton.source=/mnt/share/MA; repeatable. Default: guessed like the transfer directory.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+## `octacam twophoton`
+
+2-photon data on the destination: verify, sweep, renumber, render.
+
+**Usage**:
+
+```console
+$ octacam twophoton [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `verify`: Which 2P folders on the share are...
+* `sweep`: Copy the share's settled 2P data no take...
+* `manifest`: Rewrite every day's 2p_reconciliation.md...
+* `reconcile`: Renumber flies' sessions into one...
+* `reassemble`: Stack ThorImage folders still holding...
+* `render`: Render the synced behavior + 2P video...
+
+### `octacam twophoton verify`
+
+Which 2P folders on the share are verifiably at the destination, and so safe to delete. Compares every file (a stacked channel page by page); exits 1 on any mismatch. Read-only unless --delete, which deletes only the folders this run verified.
+
+**Usage**:
+
+```console
+$ octacam twophoton verify [OPTIONS] [paths]...
+```
+
+**Arguments**:
+
+* `paths...`: Only these experiment (or 2P) folders on the share.
+
+**Options**:
+
+* `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `--delete`: Delete the share folders found identical at the destination.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton sweep`
+
+Copy the share's settled 2P data no take claims, under its fly (else 2p_only/<experiment>/<date>/), and pair takes still waiting for theirs. `octacam process` does this after each run.
+
+**Usage**:
+
+```console
+$ octacam twophoton sweep [OPTIONS]
+```
+
+**Options**:
+
+* `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `--dry-run`: List what would be done, change nothing.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton manifest`
+
+Rewrite every day's 2p_reconciliation.md on the destination.
+
+**Usage**:
+
+```console
+$ octacam twophoton manifest [OPTIONS]
+```
+
+**Options**:
+
+* `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `--dry-run`: List what would be done, change nothing.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton reconcile`
+
+Renumber flies' sessions into one RecordingN_<Beh|2P|Synced> sequence. `octacam process` does this for the flies it touches; this covers older data and flies spread over several runs. Every rename goes to the fly's reconciliation_log.md.
+
+**Usage**:
+
+```console
+$ octacam twophoton reconcile [OPTIONS] [paths]...
+```
+
+**Arguments**:
+
+* `paths...`: Day (experiment) or fly folders on the destination.
+
+**Options**:
+
+* `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `--all`: Every fly on the destination (slow over a share), and turn the generic bucket's groups into new flies.
+* `--dry-run`: List what would be done, change nothing.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton reassemble`
+
+Stack ThorImage folders still holding per-frame TIFFs (copied by hand, or before stacking existed): one stack per channel, every page compared with its frame, then the frames deleted.
+
+**Usage**:
+
+```console
+$ octacam twophoton reassemble [OPTIONS] [paths]...
+```
+
+**Arguments**:
+
+* `paths...`: Folders to search (default: the whole destination).
+
+**Options**:
+
+* `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `--dry-run`: List what would be done, change nothing.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton render`
+
+Render the synced behavior + 2P video (synced_2p.mp4, beside the grid) of each paired take and the MIPs of each Z-stack under *paths*: older data, or other settings (--force). `octacam process` renders new data itself.
+
+**Usage**:
+
+```console
+$ octacam twophoton render [OPTIONS] {paths}...
+```
+
+**Arguments**:
+
+* `paths...`: Transferred takes, or any folder above them (searched).  [required]
+
+**Options**:
+
+* `--synced / --no-synced`: Behavior + 2P videos.  [default: synced]
+* `--mip / --no-mip`: Z-stack MIPs.  [default: mip]
+* `--force`: Re-render existing outputs.
+* `--green <str>`: ThorImage channel shown green.  [default: ChanA]
+* `--red <str>`: ThorImage channel shown red.  [default: ChanB]
+* `--fastz-projection <str>`: A FastZ timepoint's planes: mean or max.  [default: mean]
+* `--fps <float>`: Synced video frame rate.  [default: 25.0]
+* `--height <int>`: Synced video height (px).  [default: 720]
+* `--smooth <int>`: 2P box-blur radius (px, 0: off).  [default: 1]
+* `--dry-run`: List what would be done, change nothing.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.

@@ -18,13 +18,18 @@ that keep them flat beside the videos are processed just the same.
 
 ## The three steps
 
-`process` runs three steps in order; skip any of them:
+`process` runs three steps; skip any of them:
 
 | Step | Skip flag | What it does |
 | --- | --- | --- |
 | Transcode | `--no-transcode` | Re-encode each recording to mp4 per its `recording_summary.json`. |
-| Grid | `--no-grid` | Build one composite tiled video per `[[visualization]]` entry — **opt-in**, see below. |
 | Transfer | `--no-transfer` | Copy the outputs to the `[transfer]` destination. |
+| Grid | `--no-grid` | Build one composite tiled video per `[[visualization]]` entry — **opt-in**, see below. |
+
+The data comes first: the videos and metadata are transferred before any grid
+is built (a full day's grids take hours), then the grids are built and
+transferred on their own. A plugin can add steps of its own — data steps right
+after the transfer, slow renders at the very end.
 
 Transcode and transfer run by default. The grid step only does something for a
 rig whose config asks for one, so `--no-transcode --no-transfer` regenerates just
@@ -135,6 +140,15 @@ since an edited config is often the same size), so a killed copy simply
 resumes — at most the one in-progress file is redone. Set `checksum = false` for a faster size-only
 verify on trusted, fast links.
 
+**Deleting the local copy.** With `delete_after_transfer = true` (or
+`--delete-after-transfer` for one run; `--no-delete-after-transfer` overrides the
+config), `process` removes each local recording folder once all of it is at the
+destination: every copy is content-verified then, whatever `checksum` says, and
+files already there are compared by content, not size. It runs after the grids,
+which are built from the local videos, and keeps any folder with a file that
+failed to transcode or transfer (or whose plugin step failed). `--dry-run` lists
+what it would remove.
+
 ## Selecting recordings from the cache
 
 Instead of typing paths, let octacam remember where it recorded. Every finished
@@ -160,7 +174,7 @@ octacam process --all           # every folder still in the cache
 ## The one-command end-of-day workflow
 
 Because each recording embeds its own config, the entire pipeline — transcode →
-grid → transfer — is one command:
+transfer → grid — is one command:
 
 ```bash
 octacam process --all
@@ -229,3 +243,11 @@ watch from a terminal with `octacam jobs attach`.
     GUI that failed to open them never parks a processing run. The pause has no
     timeout, so to process *now* while a GUI sits on the preview, pass
     `--ignore-capture` — processing then competes with capture for CPU/GPU/disk.
+
+    The GUI shows this as a strip along the bottom of the camera view: what the
+    job is doing right now (e.g. *building a grid video (Fly2/001, 7 of 16,
+    ~15 min left)*), then *paused — it resumes when you close octacam* once
+    that step is done. The event log notes when it pauses and when it ends
+    (with how many warnings it logged; **Notify me** makes those desktop
+    notifications), and Start recording asks first while a step is still
+    running. `octacam jobs list` shows each job's warning count.

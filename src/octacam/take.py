@@ -10,6 +10,7 @@ summary.
 """
 
 import contextlib
+import dataclasses
 import logging
 import shutil
 import threading
@@ -485,7 +486,15 @@ class Take:
         self.plugins = plugins
         self.plugin_params = plugin_params
         self.profiles = profiles
-        self.clock = resolve_pulse_clock(settings, plugins, plugin_params)
+        # A plugin that ends the take itself (twophoton, when ThorImage stops)
+        # sets a ceiling that stands in for the duration, deadline and pulses.
+        self.ceiling = plugins.take_ceiling(plugin_params)
+        clock_settings = (
+            dataclasses.replace(settings, duration_s=self.ceiling[1])
+            if self.ceiling
+            else settings
+        )
+        self.clock = resolve_pulse_clock(clock_settings, plugins, plugin_params)
         # octacam drives the trigger, so it can prime the cameras.
         self.primed = settings.trigger_source in ("software", "managed")
         self.hooks_timeout_s = start_sequence_timeout_s(
@@ -499,18 +508,29 @@ class Take:
         self.primed_pulses = 0
         self.train_end: float | None = None  # monotonic, once the train started
         self.deadline: float | None = None  # monotonic, once the countdown started
+        self.countdown_started: float | None = None  # monotonic, the first frame
+        self.first_frame_wall_ns = 0  # wall clock at the first frame
         self.completed: bool | None = None  # ran to its end (None: not over yet)
+        self.ended_by: str | None = None  # the plugin that ended it (finish)
         self.sync: dict | None = None
         self._event = event
         self._config_dir = config_dir
         self._session_id = session_id
         self._record_kind = record_kind
         self._stop = threading.Event()
+        self._finish = threading.Event()
 
     def stop(self, abort: bool) -> None:
         """End the take early; the last call says whether it was aborted."""
         self.aborted = abort
         self._stop.set()
+
+    def finish(self, by: str) -> None:
+        """End the take as complete: the plugin `by` decides its end (it set a
+        ceiling, `Plugin.take_ceiling_s`), so this is not an early stop.
+        """
+        self.ended_by = by
+        self._finish.set()
 
     # ---------------------------------------------------------------- start
 
@@ -712,7 +732,12 @@ class Take:
         """
         self.hooks_done.wait(self.hooks_timeout_s)
         self.plugins.on_first_frame(self.plugin_params)
-        self.deadline = time.monotonic() + self.settings.duration_s + STOP_GRACE_S
+        # An externally triggered take starts on its first frame, which may come
+        # long after Start (octacam armed before the 2P acquisition starts).
+        self.first_frame_wall_ns = time.time_ns()
+        self.countdown_started = time.monotonic()
+        duration_s = self.ceiling[1] if self.ceiling else self.settings.duration_s
+        self.deadline = self.countdown_started + duration_s + STOP_GRACE_S
 
     def countdown(self) -> None:
         """Run until stopped or the take is over, telling the operator of missed
@@ -725,7 +750,7 @@ class Take:
         assert deadline is not None
         reported: dict[str, int] = {}
         takes = self.camera_takes
-        while not self._stop.is_set():
+        while not self._stop.is_set() and not self._finish.is_set():
             if takes and all(take.tracker.complete for take in takes):
                 break
             train_end = self.train_end
@@ -885,6 +910,9 @@ class Take:
                 sync=self.sync,
                 primed_pulses=self.primed_pulses,
                 completed=self.completed,
+                first_frame_wall_ns=self.first_frame_wall_ns,
+                ended_by=self.ended_by,
+                duration_limit_s=self.ceiling[1] if self.ceiling else None,
             )
             log.info("Wrote recording summary: %s", write_summary(folder, summary))
         except Exception:
