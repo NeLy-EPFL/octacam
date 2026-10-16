@@ -125,7 +125,7 @@ $ octacam record [OPTIONS] [config_dir]
 **Options**:
 
 * `-f, --fps <float>`: Frame rate (default: the config's `record.fps`).
-* `-d, --duration <float>`: Recording duration in seconds (default: the config's `record.duration` and `record.duration_unit`).
+* `-d, --duration <float>`: Recording duration in seconds (default: the config's `record.duration` and `record.duration_unit`). Given here, it is exact: a plugin that would end the take itself does not.
 * `-o, --out <path>`: Save directory, overriding the config's templated `record.directory` and `record.relative_directory`.
 * `-y, --yes`: Before recording, reflash without asking a serial plugin's board that runs an old build of its firmware (a blank or foreign board is only warned about).
 * `-F, --force`: Overwrite an existing save directory without the interactive confirmation prompt.
