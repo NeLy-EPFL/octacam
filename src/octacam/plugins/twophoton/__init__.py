@@ -78,6 +78,8 @@ BOOT_SETTLE_S = 2.5
 
 # How long an arm waits for the board's 'A' (sent within ms) before reporting it.
 ACK_TIMEOUT_S = 1.0
+# How often an idle plugin re-reads ThorSync's duration from the share.
+THORSYNC_REFRESH_S = 60.0
 # How long an arm waits for a ThorSync read still running (headless `record`
 # arms right after startup began one).
 THORSYNC_READ_WAIT_S = 5.0
@@ -344,6 +346,7 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         self._thorsync_lock = threading.Lock()
         self._thorsync_thread: threading.Thread | None = None
         self._thorsync_stale = False
+        self._watching = threading.Event()  # set: stop re-reading ThorSync
 
     @classmethod
     def from_options(cls, options: dict) -> TwoPhotonPlugin:
@@ -395,6 +398,17 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
     def setup(self) -> None:
         super().setup()
         self.refresh_thorsync_limit()
+        # ThorSync's setting changes between takes (raised for longer ones):
+        # re-read it while idle, so the arm's check is never stale.
+        self._watching.clear()
+        threading.Thread(
+            target=self._watch_thorsync, name="twophoton-thorsync-watch", daemon=True
+        ).start()
+
+    def _watch_thorsync(self) -> None:
+        while not self._watching.wait(THORSYNC_REFRESH_S):
+            if self.board_state not in ("armed", "triggered"):
+                self.refresh_thorsync_limit()
 
     def _identify(self) -> None:
         """As the base, but a board that does not identify itself is not armed:
@@ -469,6 +483,7 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         self._set_state("idle")
 
     def teardown(self) -> None:
+        self._watching.set()
         self._link.send_cancel()
         self._link.close()
         self.board_state = "idle"

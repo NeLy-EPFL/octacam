@@ -1831,13 +1831,11 @@ TWOPHOTON_JS = (
 )
 
 
-def test_twophoton_offers_synced_with_thorimage_and_warns_about_thorsync(
-    static_server, browser
-):
+def test_twophoton_offers_synced_with_thorimage(static_server, browser):
     """An armed 2-Photon tab replaces the Record tab's Duration with "Synced with
-    ThorImage" (the config's default), warns when ThorSync would stop before
-    ThorImage's planned acquisition ends, gives Duration back when unticked, and
-    withdraws the offer when "Arm with recording" is unticked.
+    ThorImage" (the config's default), gives Duration back when unticked, and
+    withdraws the offer when "Arm with recording" is unticked. The ThorSync
+    check is the Ready? strip's alone: not repeated under the checkbox.
     """
     page = browser.new_page()
     plugins = {
@@ -1885,11 +1883,9 @@ def test_twophoton_offers_synced_with_thorimage_and_warns_about_thorsync(
             "() => document.getElementById('duration-sync-label').textContent"
         ) == ("Synced with ThorImage:")
         assert page.evaluate("() => document.getElementById('duration-row').hidden")
-        warning = page.evaluate(
-            "() => document.getElementById('duration-sync-warning').textContent"
+        assert page.evaluate(
+            "() => document.getElementById('duration-sync-warning').hidden"
         )
-        assert "ThorSync is set to stop after 320 s" in warning
-        assert "acquire 390 s (read from PAM7xCI80/Fly5_Streaming)" in warning
 
         page.evaluate(
             """() => {
