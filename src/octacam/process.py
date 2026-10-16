@@ -344,6 +344,7 @@ def build_grids(
                     ffmpeg_params=visualization.ffmpeg_params
                     or cfg.transcode.ffmpeg_params,
                     dry_run=options.dry_run,
+                    max_width=visualization.max_width,
                     on_progress=progress.file(i, folder, "grid: ")
                     if progress
                     else None,
