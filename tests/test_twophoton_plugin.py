@@ -1139,3 +1139,21 @@ def test_doctor_checks_the_user_s_share(tmp_path):
     assert any("not reachable" in text for _status, text in rig)
     theirs = TwoPhotonPlugin.doctor({"source": str(tmp_path)}, config, None)
     assert ("ok", f"twophoton: 2P share {tmp_path}") in theirs
+
+
+def test_identify_asks_again_after_the_mega_s_boot(monkeypatch):
+    # Opening the port resets the Mega: its bootloader swallows the first query
+    # (the real board read as unidentified, and was refused, without this).
+    monkeypatch.setattr(twophoton, "BOOT_SETTLE_S", 0.0)
+    link = TwoPhotonLink(_noop, _noop, _noop)
+    queries = []
+
+    def write(data):
+        queries.append(data)
+        if len(queries) == 2:  # booted: the sketch answers
+            link._feed(b"2PHOTON 2 deadbeef\n")
+        return True
+
+    monkeypatch.setattr(link, "_write", write)
+    assert link.identify(timeout=0.05) == "2PHOTON 2 deadbeef"
+    assert len(queries) == 2

@@ -42,6 +42,7 @@ import json
 import logging
 import struct
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +71,10 @@ MIN_STOP_IDLE_MS = 200
 # The take's safety ceiling while matching ThorImage (seconds); only reached
 # when the stop never comes.
 DEFAULT_MAX_DURATION_S = 3_600.0
+
+# The Mega 2560 resets when its port opens (DTR): its bootloader runs this long
+# before the sketch answers an identify.
+BOOT_SETTLE_S = 2.5
 
 # How long an arm waits for the board's 'A' (sent within ms) before reporting it.
 ACK_TIMEOUT_S = 1.0
@@ -235,6 +240,17 @@ class TwoPhotonLink(SerialLink):
 
     def send_cancel(self) -> None:
         self._write(bytes([_CANCEL_MAGIC]))
+
+    def identify(self, timeout: float = 0.5) -> str | None:
+        """The banner, asking once more after the Mega's boot: opening its port
+        resets it (DTR), and its bootloader swallows a query sent in the first
+        ~2 s. Asking repeatedly would only extend the bootloader's wait.
+        """
+        banner = super().identify(timeout)
+        if banner is None:
+            time.sleep(BOOT_SETTLE_S)
+            banner = super().identify(timeout)
+        return banner
 
     def _feed(self, chunk: bytes) -> None:
         # Neither line starts with a status byte, so a status byte with an empty
