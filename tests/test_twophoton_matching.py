@@ -1038,10 +1038,14 @@ def test_sync_folder_start_survives_a_copy(tmp_path):
     assert classify_twophoton_folder(folder).start_time == 1_000
 
 
-def test_batch_flags_two_sync_folders_fitting_equally_well(tmp_path):
+@pytest.mark.parametrize(("other_gap", "ambiguous"), [(4.0, True), (40.0, False)])
+def test_batch_flags_two_sync_folders_fitting_equally_well(
+    tmp_path, other_gap, ambiguous
+):
     # Two ThorSync folders with the take's exact camera pulse count: the start
-    # gap decides, and the pick is flagged ambiguous for audit (before, only an
-    # exact float tie of the gap flagged anything -- never in practice).
+    # gap decides. Flagged ambiguous for audit only when the other one also
+    # started about as close; takes of one length all fit each other's counts
+    # (real 2026-10-16: every 67 s take was flagged, the others minutes away).
     take = TakeInfo(
         folder=tmp_path / "rec",
         start_time=1000.0,
@@ -1058,7 +1062,7 @@ def test_batch_flags_two_sync_folders_fitting_equally_well(tmp_path):
             cameras_per_segment=[500],
             frameout_per_segment=[0],
         )
-        for name, gap in (("SyncData001", 2.0), ("SyncData002", 40.0))
+        for name, gap in (("SyncData001", 2.0), ("SyncData002", other_gap))
     ]
     (match,) = match_takes_to_twophoton_batch(
         [take],
@@ -1068,7 +1072,7 @@ def test_batch_flags_two_sync_folders_fitting_equally_well(tmp_path):
         verify_with_signals=True,
     )[take.folder]
     assert match.folder.path.name == "SyncData001"
-    assert match.ambiguous is True
+    assert match.ambiguous is ambiguous
 
 
 def _zstack_xml(folder: Path, *, steps: int, timepoints: int = 1, average: int = 1):

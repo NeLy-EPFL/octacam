@@ -644,6 +644,19 @@ def match_take_to_twophoton(
     return matches
 
 
+def _tied(ranked: list, best_diff: int, best_gap: float, window_s: float) -> int:
+    """Folders in *ranked* (diff, gap, folder, ...) as good as the best: the
+    same edge-count diff and a start gap within *window_s* of the best's.
+    """
+    return len(
+        {
+            id(r[2])
+            for r in ranked
+            if r[0] == best_diff and abs(r[1] - best_gap) <= window_s
+        }
+    )
+
+
 def match_takes_to_twophoton_batch(
     takes: list[TakeInfo],
     candidates: list[TwoPhotonFolder],
@@ -728,9 +741,11 @@ def match_takes_to_twophoton_batch(
                 ranked.sort(key=lambda r: (r[0], r[1]))
                 best_diff, best_gap, best_folder, best_idx = ranked[0]
                 # Ambiguous when another folder fits the pulse count equally
-                # well -- the start gap then decided (worth auditing). Exact
-                # float gap ties never happen, so they flagged nothing.
-                tied = len({id(f) for d, _g, f, *_ in ranked if d == best_diff})
+                # well and starts about as close: the start gap then barely
+                # decided. Takes of one length all fit each other's counts
+                # (real 2026-10-16: every 67 s take flagged), but one started
+                # seconds from the take and the others minutes away.
+                tied = _tied(ranked, best_diff, best_gap, match_window_s)
                 matches.append(
                     TwoPhotonMatch(
                         folder=best_folder,
@@ -777,7 +792,7 @@ def match_takes_to_twophoton_batch(
             if image_ranked:
                 image_ranked.sort(key=lambda r: (r[0], r[1]))
                 best_diff, best_gap, best_folder = image_ranked[0]
-                tied = len({id(f) for d, _g, f in image_ranked if d == best_diff})
+                tied = _tied(image_ranked, best_diff, best_gap, match_window_s)
                 matches.append(
                     TwoPhotonMatch(
                         folder=best_folder,
