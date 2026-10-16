@@ -117,9 +117,10 @@ export default class TwoPhotonTab extends SerialTab {
       ? `ThorImage is set to acquire ${fmtDuration(planned)} (read from ${t.planned_folder})`
       : `this take can run up to ${fmtDuration(longest)}`;
     return (
-      `ThorSync is set to stop after ${fmtDuration(t.limit_s)} (read from ${t.folder}) ` +
-      `but ${take} — ThorSync would miss the rest (timing, AirFlow). ` +
-      "Raise the acquisition duration in ThorSync."
+      `ThorSync is set to stop after ${fmtDuration(t.limit_s)} (as of its last ` +
+      `recording, ${t.folder}) but ${take} — ThorSync would miss the rest ` +
+      "(timing, AirFlow). Raise the duration in ThorSync; this check sees it after " +
+      "ThorSync's next recording."
     );
   }
 

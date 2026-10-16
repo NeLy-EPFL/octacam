@@ -145,9 +145,10 @@ def thorsync_limit_message(
     )
     return (
         f"ThorSync is set to stop after {fmt(limit_s)} (its acquisition duration, "
-        f"read from {folder}) but {take} \N{EM DASH} ThorSync would miss the rest "
-        "of it (timing, AirFlow and every other channel). Raise the duration in "
-        "ThorSync."
+        f"as of its last recording, {folder}) but {take} \N{EM DASH} ThorSync "
+        "would miss the rest of it (timing, AirFlow and every other channel). "
+        "Raise the duration in ThorSync; this check sees it after ThorSync's next "
+        "recording."
     )
 
 
