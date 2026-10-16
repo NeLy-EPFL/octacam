@@ -13,6 +13,11 @@ export class UsersPanel {
     this.onChange = onChange || (() => {});
     this.select = document.getElementById("user-select");
     this.hint = document.getElementById("user-hint");
+    this.pathsSource = document.getElementById("paths-source");
+    this.pathsNote = document.getElementById("paths-note");
+    this.pathsReset = document.getElementById("paths-reset");
+    this.pathsReset.addEventListener("click", () => this._choose(this.data.active));
+    this.settings = null;
     this.data = { users: [], active: "", discovered: [], user_options: {} };
     this.dialog = new UserDialog({ notify, dirPicker, onAdded: (d) => this._apply(d) });
     this.select.addEventListener("change", () => this._picked());
@@ -26,14 +31,19 @@ export class UsersPanel {
     if (d) this._apply(d);
   }
 
-  // The settings changed elsewhere (another browser picked a user).
+  // Every settings change: a user picked elsewhere (another browser) reloads
+  // the list; an edited path shows as changed for this session.
   applySettings(s) {
-    if (s && s.user !== this.data.active) this.load();
+    if (!s) return;
+    this.settings = s;
+    if (s.user !== this.data.active) this.load();
+    else this._renderPaths();
   }
 
   _apply(d) {
     const changed = d.active !== this.data.active;
     this.data = d;
+    if (d.settings) this.settings = { ...this.settings, ...d.settings };
     this._render();
     if (changed || d.settings) this.onChange(d);
   }
@@ -69,6 +79,33 @@ export class UsersPanel {
       : users.length
         ? "Pick yourself so your data goes to your own folders."
         : "First time here? Add yourself so your data goes to your own folders.";
+    this._renderPaths();
+  }
+
+  // The Paths section says where its values come from: the chosen user's
+  // settings, or a change made for this session only.
+  _renderPaths() {
+    const user = this.data.users.find((u) => u.initials === this.data.active);
+    const own = user?.transfer_directory;
+    if (!user || !own) {
+      this.pathsSource.textContent = "";
+      this.pathsNote.hidden = true;
+      this.pathsReset.hidden = true;
+      return;
+    }
+    const changed = this.settings && this.settings.transfer_directory !== own;
+    this.pathsSource.textContent = changed
+      ? "\u2014 changed for this session"
+      : `\u2014 from ${user.initials}`;
+    this.pathsSource.className = `adv-source${changed ? " adv-source--changed" : ""}`;
+    this.pathsNote.hidden = false;
+    this.pathsNote.textContent = changed
+      ? `The transfer directory differs from ${user.initials}'s (${own}): it ` +
+        "applies to this session only."
+      : `Set by ${user.initials}'s settings in this rig's config ([users.${user.initials}]). ` +
+        "A change here applies to this session only.";
+    this.pathsReset.hidden = !changed;
+    this.pathsReset.textContent = `Use ${user.initials}'s folders`;
   }
 
   async _picked() {
@@ -79,7 +116,11 @@ export class UsersPanel {
       this.dialog.openFor(initials, this.data.user_options);
       return;
     }
-    const d = await request("POST", "/api/users/select", { initials: value }, {
+    await this._choose(value);
+  }
+
+  async _choose(initials) {
+    const d = await request("POST", "/api/users/select", { initials }, {
       action: "Choosing the user",
       notify: this.notify,
     });

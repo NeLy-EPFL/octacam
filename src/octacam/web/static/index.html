@@ -44,11 +44,6 @@
       <fieldset id="record-fields" disabled>
         <!-- Essentials: always visible. Everything else lives under the
              Advanced-options switch below (see record.js). -->
-        <label class="row" id="user-row"
-          title="Who is recording: your data goes to your own folders (set when you add yourself). Kept in this rig's config, so everyone on this rig sees the same users."><span>User:</span>
-          <select id="user-select"></select>
-        </label>
-        <span id="user-hint" class="hint" hidden></span>
         <label class="row" title="How long each recording runs before it stops automatically"><span>Duration:</span>
           <span class="duration">
             <input id="duration-value" type="number" min="0.01" step="any" value="20"
@@ -63,6 +58,13 @@
         <label class="row" title="Target capture rate in frames per second (applies to every camera)"><span>FPS:</span>
           <input id="fps" type="number" min="0.01" max="1000" step="1">
         </label>
+        <!-- Who records and the recording's name; their folders (Paths, below)
+             follow the user. -->
+        <label class="row" id="user-row"
+          title="Who is recording: your data goes to your own folders (set when you add yourself). Kept in this rig's config, so everyone on this rig sees the same users."><span>User:</span>
+          <select id="user-select"></select>
+        </label>
+        <span id="user-hint" class="hint" hidden></span>
         <div class="col" id="take-name" hidden>
           <label class="col-label"
             title="This recording's folder: experiment / fly / take. Also its place on the transfer destination.">Recording:</label>
@@ -85,20 +87,14 @@
             title="Sub-path under the base directory for this recording; also mirrored onto the destination by the transfer step"></textarea>
         </div>
 
-        <!-- Binary on/off switch that reveals the less-common recording,
-             encoding, and post-processing knobs (wired in record.js). -->
-        <label class="adv-toggle" title="Show the less-common recording, encoding, and post-processing options">
-          <span>Advanced options</span>
-          <span class="switch">
-            <input id="record-advanced-toggle" type="checkbox"
-              title="Show the less-common recording, encoding, and post-processing options">
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </span>
-        </label>
-
-        <div id="record-advanced" hidden>
-          <div class="adv-group">
-            <div class="adv-group-head" title="Usually set by the rig and the user: change them here for one session">Paths</div>
+        <!-- Everything not needed to start a recording, in sections collapsed by
+             default (each remembers whether it was opened: record.js). -->
+        <div id="record-advanced">
+          <details class="adv-group" data-section="paths">
+            <summary class="adv-group-head" title="Where recordings are written and transferred">Paths <span id="paths-source" class="adv-source"></span></summary>
+            <span id="paths-note" class="hint" hidden></span>
+            <button type="button" id="paths-reset" class="btn" hidden
+              title="Go back to the chosen user's folders">Use the user's folders</button>
           <div class="col">
             <label class="col-label" for="record-dir"
               title="Base folder on the rig that recordings are written under">Directory:</label>
@@ -116,9 +112,9 @@
             <textarea id="transfer-dir" rows="2" spellcheck="false"
               title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs."></textarea>
           </div>
-          </div>
-          <div class="adv-group">
-            <div class="adv-group-head">Triggering</div>
+          </details>
+          <details class="adv-group" data-section="triggering">
+            <summary class="adv-group-head">Triggering</summary>
             <label class="row"
               title="software: the server starts each frame on a timer. managed: octacam drives an external hardware trigger via a plugin (e.g. the triggerbox). external: every frame is driven by a hardware trigger octacam does not control."><span>Trigger source:</span>
               <select id="trigger-source">
@@ -135,10 +131,10 @@
                 <option value="free_running">free running</option>
               </select>
             </label>
-          </div>
+          </details>
 
-          <div class="adv-group">
-            <div class="adv-group-head">Encoding &amp; output</div>
+          <details class="adv-group" data-section="encoding">
+            <summary class="adv-group-head">Encoding &amp; output</summary>
             <label class="row"
               title="How the saved video files are written. ffmpeg: encode now on the CPU (libx264). nvenc: encode now on an NVIDIA GPU (H.264 NVENC). raw: store Mono8 to transcode later."><span>Save method:</span>
               <select id="format"></select>
@@ -181,11 +177,11 @@
               title="Per-camera frame buffer between the grab loop and its encoder, in frames. A deeper queue absorbs transient encoder stalls (a full queue is the only source of a dropped frame) at the cost of peak RAM (frame bytes × queue × cameras). Default 64."><span>Writer queue size:</span>
               <input id="writer-queue-size" type="number" min="1" max="4096" step="1">
             </label>
-          </div>
+          </details>
 
-          <div class="adv-group">
-            <div class="adv-group-head"
-              title="Post-recording pipeline, run later by `octacam process`. These values are baked into this recording's config snapshot; the rig config file is left untouched.">Post-processing</div>
+          <details class="adv-group" data-section="postprocessing">
+            <summary class="adv-group-head"
+              title="Post-recording pipeline, run later by `octacam process`. These values are baked into this recording's config snapshot; the rig config file is left untouched.">Post-processing</summary>
             <div class="col">
               <label class="col-label" for="transcode-ffmpeg-params"
                 title="Verbatim ffmpeg output/encoder arguments `octacam process` uses to transcode the recordings">Transcode ffmpeg parameters:</label>
@@ -196,7 +192,7 @@
               title="Content-verify each transferred file with a checksum before promoting it (safer but slower); off = size-only comparison"><span>Verify transfer (checksum):</span>
               <input id="transfer-checksum" type="checkbox">
             </label>
-          </div>
+          </details>
         </div>
       </fieldset>
       <button type="button" id="record-button" class="start" disabled

@@ -5,7 +5,8 @@ import { api, clamp, clampInput, el, formatBytes, formatHMS, request, store } fr
 const BUSY_STATES = new Set(["waiting", "recording", "finishing"]);
 
 // The Advanced-options switch is remembered per browser; off by default.
-const ADV_KEY = "octacam.record.advanced";
+// Each collapsible section's open state, per browser: `${SECTION_KEY}<name>`.
+const SECTION_KEY = "octacam.record.section.";
 
 // A recording folder `<experiment...>/<fly>/<take>` as its three parts, or
 // null when it has fewer than three (then the raw field is shown).
@@ -141,8 +142,7 @@ export class RecordTab {
       if (parts) this._commitTakeName(nextFly(parts));
     });
     this.diskFree = document.getElementById("disk-free");
-    this.advancedToggle = document.getElementById("record-advanced-toggle");
-    this.advancedSection = document.getElementById("record-advanced");
+    this.sections = [...document.querySelectorAll("#record-advanced details[data-section]")];
     this.trigger = document.getElementById("trigger-source");
     this.format = document.getElementById("format");
     // One encoder-params box per save method (see _syncSaveMethodFields).
@@ -211,7 +211,7 @@ export class RecordTab {
       )
     );
     this.button.addEventListener("click", () => this._onButton());
-    this._initAdvancedToggle();
+    this._initSections();
 
     // Re-render between telemetry updates; this only reads `this.deadline`.
     setInterval(() => {
@@ -222,15 +222,13 @@ export class RecordTab {
   }
 
   // The rows inside keep their own `hidden` state (_syncSaveMethodFields).
-  _initAdvancedToggle() {
-    const open = store.get(ADV_KEY) === "1";
-    this.advancedToggle.checked = open;
-    this.advancedSection.hidden = !open;
-    this.advancedToggle.addEventListener("change", () => {
-      const shown = this.advancedToggle.checked;
-      this.advancedSection.hidden = !shown;
-      store.set(ADV_KEY, shown ? "1" : "0");
-    });
+  _initSections() {
+    // Closed by default: only what a recording needs shows at first.
+    for (const section of this.sections) {
+      const key = SECTION_KEY + section.dataset.section;
+      section.open = store.get(key) === "1";
+      section.addEventListener("toggle", () => store.set(key, section.open ? "1" : "0"));
+    }
   }
 
   // ------------------------------------------------------ server -> UI
