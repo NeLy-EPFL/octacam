@@ -553,3 +553,47 @@ def test_an_unclassified_board_says_why(monkeypatch, tmp_path, sketch, probed, d
     info = plugin.firmware_provisioning()
     assert (info["state"], info["needs_flash"]) == (None, False)
     assert info["detail"].startswith(detail)
+
+
+def test_a_plugin_s_command_group_is_found_and_a_broken_one_skipped(monkeypatch):
+    import sys
+    import types
+
+    import typer
+
+    module = types.ModuleType("spy_commands")
+    module.app = typer.Typer()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "spy_commands", module)
+    monkeypatch.setattr(
+        plugins_mod,
+        "_COMMANDS",
+        {"spy": "spy_commands:app", "broken": "no_such_module_anywhere:app"},
+    )
+    assert plugins_mod.command_groups() == [("spy", module.app)]  # type: ignore[attr-defined]
+
+
+def test_doctor_runs_each_enabled_plugin_s_own_checks(monkeypatch, tmp_path):
+    from octacam.cli.doctor import _doctor_plugins, _Report
+
+    seen = []
+
+    class Spy(Plugin):
+        name = "spy"
+
+        @classmethod
+        def doctor(cls, options, config, config_dir):
+            seen.append((options, config_dir))
+            return [("warn", "spy: the share is not reachable")]
+
+    monkeypatch.setattr(
+        plugins_mod,
+        "available_plugins",
+        lambda: [plugins_mod.PluginInfo("spy", "a spy", True)],
+    )
+    monkeypatch.setattr(plugins_mod, "plugin_class", lambda name: Spy)
+    cfg = OctacamConfig(plugins=[PluginConfig(name="spy", options={"source": "/x"})])
+    report = _Report()
+    _doctor_plugins(report, cfg, tmp_path)
+    ((_title, items),) = report.sections
+    assert ("warn", "spy: the share is not reachable") in items
+    assert seen == [({"source": "/x"}, tmp_path)]
