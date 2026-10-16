@@ -214,6 +214,7 @@ def build_grid_video(
     pix_fmt: str = "yuv420p",
     dry_run: bool = False,
     on_progress: ProgressCallback | None = None,
+    max_width: int | None = None,
 ) -> Path | None:
     """Write *layout*'s camera videos as one grid to *output* (default
     `folder/grid.mp4`).
@@ -221,9 +222,10 @@ def build_grid_video(
     *ffmpeg_params* picks the encoder (empty: the transcode default); its
     `-pix_fmt`/`-vf` are ignored, as the grid owns its filters and writes
     *pix_fmt* (yuv420p, for QuickTime/Keynote). Every cell takes the first
-    probed camera's size; other sizes are letterboxed, a missing camera is
-    black. Returns *output* (also on *dry_run*, which only logs the command),
-    or None when nothing was built.
+    probed camera's size (scaled down so the grid is at most *max_width* px
+    wide); other sizes are letterboxed, a missing camera is black. Returns
+    *output* (also on *dry_run*, which only logs the command), or None when
+    nothing was built.
     """
     if not layout or not layout[0]:
         log.warning("Grid layout is empty \N{EM DASH} skipping grid")
@@ -246,6 +248,12 @@ def build_grid_video(
         )
         return None
     width, height, fps, duration = ref
+    cols = len(layout[0])
+    if max_width and cols * width > max_width:
+        factor = max_width / (cols * width)
+        width, height = int(width * factor), int(height * factor)
+        width -= width & 1  # stays within max_width
+        height -= height & 1
     # yuv420p needs even dimensions, and some sensors size in 1-px steps.
     width += width & 1
     height += height & 1
