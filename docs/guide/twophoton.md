@@ -108,8 +108,8 @@ and metadata are transferred:
    `SyncData` folder, else by start time; copy them into the take as
    `2P/<name>`, ThorImage's frames as one stack per channel (every page
    compared with its frame when copies are verified; a capture stopped early
-   is stacked with the frames it recorded, and FastZ or a Z-stack repeated
-   over time as one stack per plane). A take whose 2P data is
+   is stacked with the frames it recorded, and FastZ as one stack per
+   plane). A take whose 2P data is
    still being written waits (`twophoton_pending.json`) and is paired by a
    later run.
 2. **Sweep** the share for settled 2P data no take claims, filed under its
@@ -172,3 +172,11 @@ are read the same way.
 | `octacam twophoton render PATHS` | Render (or re-render with `--force`) synced videos and Z-stack MIPs. |
 
 Each takes `--dry-run` (but `verify`, which changes nothing anyway).
+
+## Not supported yet
+
+- **A Z-stack repeated over time** (a step-and-shoot Z-stack with ThorImage's
+  Timelapse above 1, streaming off): no such capture has been recorded on the
+  rig. octacam stacks its frames one file per plane and assumes ThorSync
+  records one capture window per slice of every volume, but neither has been
+  checked against real data. Study a first real capture before relying on it.

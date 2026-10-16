@@ -408,8 +408,8 @@ def thorimage_zstack_signature(experiment_xml: Path) -> tuple[int, int] | None:
 
     Slices are the ones recorded: a stack stopped early has fewer, as many
     as its frames. A Z-stack repeated over time (Z+T, streaming off) is
-    taken as one segment per slice of every volume (not yet seen on real
-    data).
+    assumed to be one segment per slice of every volume: never seen on real
+    data, to study on a first real capture (out of scope for now).
     """
     try:
         root = ET.parse(experiment_xml).getroot()

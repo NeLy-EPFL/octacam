@@ -23,6 +23,9 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   deleted, 2P-only ones too (the share's account needs delete rights);
   `octacam twophoton verify --delete` clears a backlog of verified ones.
   Settings are the plugin's options (`source`, ...); see the 2-photon guide.
+- **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
+  its cells down; with its own faster `ffmpeg_params` a grid builds several
+  times faster (see Configuration).
 - **The GUI shows background processing.** While a detached `octacam
   process` job runs, a strip along the bottom of the camera view says what it
   is doing and how long the current step has left; once that step is done the
