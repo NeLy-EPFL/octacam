@@ -21,6 +21,12 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   group (`octacam <name> ...`, from `plugins._COMMANDS`) and its own `octacam
   doctor` checks (`Plugin.doctor`).
 
+- **`[transfer].delete_after_transfer`** (and `process
+  --delete-after-transfer/--no-delete-after-transfer`) removes each local
+  recording once all of it is content-verified at the destination, after its
+  grids. `transfer.transfer_tree` copies a whole folder the same way, for a
+  plugin's acquisition data.
+
 - **`--set KEY=VALUE` on `gui` and `record`** overrides any config key for one
   launch by its dotted path (`--set record.save_method=raw`), the same flag
   deeperfly and spintrack take. The value is read as TOML, a list may drop its
@@ -169,6 +175,9 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **The transfer copies every file of a recording's `octacam_recording`
+  folder**, a plugin's own included (it copied only the files it knew by name,
+  so with a delete after transfer a plugin's facts were lost).
 - **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
   error, which made a request for a missing feature or command a 500; it is a
   clean "no such node" again.

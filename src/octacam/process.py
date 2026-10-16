@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import logging
+import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -60,6 +61,9 @@ class ProcessOptions:
     ignore_capture: bool = False
     config_dir: Path | None = None  # for a recording with no config snapshot
     raw_output: bool = False  # stream ffmpeg's own output, not a progress bar
+    # Remove each local recording once it is verified at its destination
+    # (None: its config's `[transfer].delete_after_transfer`).
+    delete_after_transfer: bool | None = None
 
     def argv(self, folders: list[Path]) -> list[str]:
         """The `process` arguments that rerun these options on *folders*, for
@@ -77,6 +81,12 @@ class ProcessOptions:
             "--ignore-capture": self.ignore_capture,
         }
         argv = [flag for flag, on in flags.items() if on]
+        if self.delete_after_transfer is not None:
+            argv.append(
+                "--delete-after-transfer"
+                if self.delete_after_transfer
+                else "--no-delete-after-transfer"
+            )
         if self.config_dir is not None:
             argv += ["--config", str(self.config_dir.resolve())]
         return argv + [str(Path(f).resolve()) for f in folders]
@@ -144,6 +154,7 @@ class Transcoded:
     rewritten: set[Path] = field(default_factory=set)
     completed: int = 0
     failures: int = 0
+    failed_folders: set[Path] = field(default_factory=set)
 
 
 def run(
@@ -199,6 +210,8 @@ def run(
             return dest
 
         dests: dict[Path, Path | None] = {}
+        # Each folder's failed copies: a folder with any keeps its local copy.
+        failed_by_folder: dict[Path, int] = {}
         if options.transfer:
             failed, dests = transfer_outputs(
                 done.outputs,
@@ -208,12 +221,16 @@ def run(
                 reporter,
                 bar,
                 resolve_dest=resolve_dest,
+                failed_by_folder=failed_by_folder,
             )
             transfer_failed += failed
         for plugin_steps, plugin_folders in steps:
-            transfer_failed += plugin_steps.after_transfer(
+            failed = plugin_steps.after_transfer(
                 ProcessContext(plugin_folders, dests, configs, options, reporter)
             )
+            transfer_failed += failed
+            for folder in plugin_folders if failed else ():
+                failed_by_folder[folder] = failed_by_folder.get(folder, 0) + failed
         grids = (
             build_grids(done.outputs, done.rewritten, options, configs, reporter, bar)
             if options.grid
@@ -230,8 +247,14 @@ def run(
                 metadata=False,
                 label="Transfer (grids)",
                 dests=dests,  # as the plugins' steps left them
+                failed_by_folder=failed_by_folder,
             )
             transfer_failed += failed
+        if options.transfer:
+            # After the grids, which are built from the local videos.
+            delete_transferred(
+                dests, failed_by_folder, done.failed_folders, options, configs
+            )
         for plugin_steps, plugin_folders in steps:
             transfer_failed += plugin_steps.render(
                 ProcessContext(plugin_folders, dests, configs, options, reporter)
@@ -321,6 +344,7 @@ def transcode_videos(
                     print(result, flush=True)
                 except Exception as e:  # one bad file must not abort the batch
                     done.failures += 1
+                    done.failed_folders.add(source.parent)
                     log.error("Failed to transcode %s: %s", source, e)
                     continue
                 done.completed += 1
@@ -480,13 +504,16 @@ def transfer_outputs(
     label: str = "Transfer",
     dests: dict[Path, Path | None] | None = None,
     resolve_dest: Callable[[Path, Path], Path] | None = None,
+    failed_by_folder: dict[Path, int] | None = None,
 ) -> tuple[int, dict[Path, Path | None]]:
     """Copy each folder's outputs, grids and (with *metadata*) metadata to its
     `[transfer]` destination, under its summary's `relative_directory`; return
     how many files failed and each folder's destination (None: not
     transferred). *dests* gives the destinations instead (an earlier pass's);
     *resolve_dest* may move a computed one (`ProcessSteps.transfer_dest`).
-    *label* names the pass in its log line.
+    *label* names the pass in its log line; *failed_by_folder* adds up each
+    folder's failures. A folder to be deleted afterwards (`deletes_local`) is
+    content-verified, already-present files included.
     """
     copied = skipped = failed = 0
     given = dests
@@ -518,18 +545,24 @@ def transfer_outputs(
                     if resolve_dest is not None:
                         dest = resolve_dest(folder, dest)
                 result_dests[folder] = dest
+                deleting = deletes_local(folder, options, configs)
                 result = transfer_folder(
                     folder,
                     dest,
                     files_only=files + grids.get(folder, []),
                     dry_run=options.dry_run,
-                    verify=transfer.checksum,
+                    verify=transfer.checksum or deleting,
                     on_progress=on_bar or reporter.transfer_progress(i, len(outputs)),
                     metadata=metadata,
+                    by_content=deleting,
                 )
                 copied += len(result.copied)
                 skipped += len(result.skipped)
                 failed += len(result.failed)
+                if failed_by_folder is not None and result.failed:
+                    failed_by_folder[folder] = failed_by_folder.get(folder, 0) + len(
+                        result.failed
+                    )
             reporter.item_done()
     if options.dry_run:
         log.info(
@@ -540,6 +573,51 @@ def transfer_outputs(
         if failed:
             log.error("%d file(s) failed to transfer", failed)
     return failed, result_dests
+
+
+def deletes_local(
+    folder: Path, options: ProcessOptions, configs: dict[Path, OctacamConfig]
+) -> bool:
+    """Whether this run removes *folder* once it is on its destination: the
+    `--delete-after-transfer` flag, else its config's setting.
+    """
+    if options.delete_after_transfer is not None:
+        return options.delete_after_transfer
+    transfer = configs[folder].transfer
+    return bool(transfer and transfer.delete_after_transfer)
+
+
+def delete_transferred(
+    dests: dict[Path, Path | None],
+    failed_by_folder: dict[Path, int],
+    transcode_failed: set[Path],
+    options: ProcessOptions,
+    configs: dict[Path, OctacamConfig],
+) -> None:
+    """Remove each local recording `deletes_local` names whose every file is
+    content-verified at its destination: none failed to transcode, transfer or
+    in a plugin's data step. A dry run lists them.
+    """
+    for folder, dest in dests.items():
+        if dest is None or not deletes_local(folder, options, configs):
+            continue
+        if folder in transcode_failed:
+            reason = "a file failed to transcode"
+        elif failed_by_folder.get(folder):
+            reason = f"{failed_by_folder[folder]} file(s) failed to transfer"
+        else:
+            reason = None
+        if reason is not None:
+            log.warning("Keeping local %s: %s", folder, reason)
+        elif options.dry_run:
+            log.info("[dry-run] would remove local %s (verified at %s)", folder, dest)
+        else:
+            try:
+                shutil.rmtree(folder)
+            except OSError as e:
+                log.error("Could not remove local %s: %s", folder, e)
+            else:
+                log.info("Removed local %s (verified at %s)", folder, dest)
 
 
 def is_stale(output: Path, source: Path) -> bool:
