@@ -295,14 +295,21 @@ def thorimage_frame_average(experiment_xml: Path) -> int:
 def thorimage_frameout_tolerance(experiment_xml: Path) -> int:
     """Allowed ``|FrameOut edges - expected|`` for this capture: an averaged
     capture stopped early can end mid-group, leaving up to N-1 scans that
-    never became a saved frame, plus the one being scanned at the stop -- for
-    FastZ, a whole volume's scans.
+    never became a saved frame, plus the ones being scanned at the stop --
+    for FastZ, whole volumes' scans.
     """
     geometry = _fastz_geometry(experiment_xml)
     scans_per_timepoint = geometry[0] + geometry[1] if geometry else 1
-    return max(
-        _VERIFY_TOLERANCE, scans_per_timepoint * thorimage_frame_average(experiment_xml)
-    )
+    scans = scans_per_timepoint * thorimage_frame_average(experiment_xml)
+    # Stopped early, ThorImage may scan up to two frames it never saves (real
+    # 2026-10-16: 93 and 112 saved frames, 95 and 114 FrameOut edges;
+    # 2026-10-14: 418 and 419).
+    declared = thorimage_timepoints(experiment_xml)
+    if declared is not None and declared > 1:
+        planes = geometry[0] if geometry else 1
+        if _timepoints_recorded(experiment_xml.parent, declared, planes) < declared:
+            scans *= 2
+    return max(_VERIFY_TOLERANCE, scans)
 
 
 def _channel_frames(folder: Path) -> int | None:

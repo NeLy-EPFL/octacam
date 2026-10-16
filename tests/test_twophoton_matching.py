@@ -991,10 +991,11 @@ def test_expected_frameout_edges_for_a_stopped_early_averaged_fastz(tmp_path):
             (tmp_path / f"ChanA_001_001_{z:03d}_{t:03d}.tif").write_bytes(b"")
     assert thorimage_expected_frameout_edges(xml) == 300 * 6  # stopped at 300 volumes
     assert thorimage_declared_frameout_edges(xml) == 3000
-    assert thorimage_frameout_tolerance(xml) == 6  # a stop can cut a volume short
+    # A stop can cut volumes short: two volumes' scans.
+    assert thorimage_frameout_tolerance(xml) == 12
     write(1)
     assert thorimage_expected_frameout_edges(xml) == 300 * 6 * 2
-    assert thorimage_frameout_tolerance(xml) == 12
+    assert thorimage_frameout_tolerance(xml) == 24
     assert thorimage_planned_duration_s(xml) == pytest.approx(500 * 6 * 2 / 10)
 
 
@@ -1155,3 +1156,23 @@ def test_recorded_frames_are_counted_in_an_assembled_stack(tmp_path):
         metadata={"axes": "TYX"},
     )
     assert thorimage_expected_frameout_edges(stream / "Experiment.xml") == 418
+
+
+def test_a_stopped_early_stream_may_scan_two_frames_it_never_saved(tmp_path):
+    # Real 2026-10-16 (ThorImage stopped early): 93 and 112 saved frames, 95
+    # and 114 FrameOut edges.
+    from octacam.plugins.twophoton.matching import thorimage_frameout_tolerance
+
+    xml = tmp_path / "Experiment.xml"
+    xml.write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Wavelengths>'
+        '<Wavelength name="ChanA" /></Wavelengths>'
+        '<Streaming enable="1" zFastEnable="0" /><Timelapse timepoints="3000" />'
+        "</ThorImageExperiment>"
+    )
+    for t in range(1, 3001):
+        (tmp_path / f"ChanA_001_001_001_{t:04d}.tif").write_bytes(b"")
+    assert thorimage_frameout_tolerance(xml) == 1  # complete
+    for t in range(94, 3001):
+        (tmp_path / f"ChanA_001_001_001_{t:04d}.tif").unlink()
+    assert thorimage_frameout_tolerance(xml) == 2
