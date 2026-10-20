@@ -187,9 +187,10 @@ class TransferConfig(BaseModel):
     A recording goes to `directory`/<its summary's `relative_directory`>;
     `directory` takes strftime `%`-codes like `record.directory`.
     `checksum` verifies each copy's content (false: its size only).
-    `delete_after_transfer` removes the local recording once every file of it
-    is on the destination, content-verified (whatever `checksum` says), after
-    the grids are built from it.
+    `delete_after_transfer` removes the local recording once every file in it
+    is accounted for at the destination (`process.unaccounted_files`): each
+    copy content-verified whatever `checksum` says, and a capture once its
+    transcoded mp4 is there. It runs after the grids are built from it.
     """
 
     directory: ScalarStr = ""
