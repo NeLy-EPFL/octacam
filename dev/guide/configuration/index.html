@@ -1224,10 +1224,16 @@ several entries to produce several grids. See
 <a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LH"</span><span class="p">,</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span><span class="w">          </span><span class="s2">"camera_RH"</span><span class="p">],</span>
 <a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="p">]</span>
 <a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="c1"># ffmpeg_params = ""         # optional per-grid encoder override</span>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="c1"># max_width = 1440           # optional: scale the cells so the grid fits</span>
 </code></pre></div>
 <p>Each cell is a camera <code>name</code>; <code>""</code> is a black fill. All rows must have the same
 number of columns. <code>octacam config</code> offers to write a near-square layout of the
 rig's cameras for you.</p>
+<p>A grid is for watching, not analysis: without its own <code>ffmpeg_params</code> it uses
+the archival <code>[transcode]</code> settings, at full size. A faster preset and a
+<code>max_width</code> make it much quicker to build and lighter to share (a 3x3 grid of
+960x580 cameras at 100 fps: ~8x faster with
+<code>ffmpeg_params = "-c:v libx264 -preset medium -crf 20"</code> and <code>max_width = 1440</code>).</p>
 <h2 id="plugins"><code>[[plugins]]</code><a class="headerlink" href="#plugins" title="Permanent link">&para;</a></h2>
 <p>Enables opt-in <a href="../plugins/">plugins</a>. The default launch loads none.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1"># Bare names work too: plugins = ["flywheel"]</span>

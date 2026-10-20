@@ -947,7 +947,7 @@ that snapshot. Point it at recording folders — the folders holding the videos 
 summary live in each recording's <code>octacam_recording/</code> subfolder; older recordings
 that keep them flat beside the videos are processed just the same.</p>
 <h2 id="the-three-steps">The three steps<a class="headerlink" href="#the-three-steps" title="Permanent link">&para;</a></h2>
-<p><code>process</code> runs three steps in order; skip any of them:</p>
+<p><code>process</code> runs three steps; skip any of them:</p>
 <table>
 <thead>
 <tr>
@@ -963,17 +963,21 @@ that keep them flat beside the videos are processed just the same.</p>
 <td>Re-encode each recording to mp4 per its <code>recording_summary.json</code>.</td>
 </tr>
 <tr>
-<td>Grid</td>
-<td><code>--no-grid</code></td>
-<td>Build one composite tiled video per <code>[[visualization]]</code> entry — <strong>opt-in</strong>, see below.</td>
-</tr>
-<tr>
 <td>Transfer</td>
 <td><code>--no-transfer</code></td>
 <td>Copy the outputs to the <code>[transfer]</code> destination.</td>
 </tr>
+<tr>
+<td>Grid</td>
+<td><code>--no-grid</code></td>
+<td>Build one composite tiled video per <code>[[visualization]]</code> entry — <strong>opt-in</strong>, see below.</td>
+</tr>
 </tbody>
 </table>
+<p>The data comes first: the videos and metadata are transferred before any grid
+is built (a full day's grids take hours), then the grids are built and
+transferred on their own. A plugin can add steps of its own — data steps right
+after the transfer, slow renders at the very end.</p>
 <p>Transcode and transfer run by default. The grid step only does something for a
 rig whose config asks for one, so <code>--no-transcode --no-transfer</code> regenerates just
 the grids after a layout change, and <code>--no-grid</code> skips even the configured ones.</p>
@@ -1109,7 +1113,7 @@ recording (from the GUI or <code>octacam record</code>) is noted in a small cach
 </ul>
 <h2 id="the-one-command-end-of-day-workflow">The one-command end-of-day workflow<a class="headerlink" href="#the-one-command-end-of-day-workflow" title="Permanent link">&para;</a></h2>
 <p>Because each recording embeds its own config, the entire pipeline — transcode →
-grid → transfer — is one command:</p>
+transfer → grid — is one command:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>--all
 </code></pre></div>
 <p>Each step shows a live progress bar (frame/fps/speed for transcode and grid;
@@ -1160,6 +1164,13 @@ gui</code>/<code>record</code> also print a one-line note at startup when a job 
 GUI that failed to open them never parks a processing run. The pause has no
 timeout, so to process <em>now</em> while a GUI sits on the preview, pass
 <code>--ignore-capture</code> — processing then competes with capture for CPU/GPU/disk.</p>
+<p>The GUI shows this as a strip along the bottom of the camera view: what the
+job is doing right now (e.g. <em>building a grid video (Fly2/001, 7 of 16,
+~15 min left)</em>), then <em>paused — it resumes when you close octacam</em> once
+that step is done. The event log notes when it pauses and when it ends
+(with how many warnings it logged; <strong>Notify me</strong> makes those desktop
+notifications), and Start recording asks first while a step is still
+running. <code>octacam jobs list</code> shows each job's warning count.</p>
 </div>
 
 
