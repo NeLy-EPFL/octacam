@@ -15,6 +15,16 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   its cells down; with its own faster `ffmpeg_params` a grid builds several
   times faster (see Configuration).
 
+- **`octacam process` transfers the data before building grids**, so a day's
+  videos are on the destination hours earlier; grids are built and transferred
+  after. **Plugins can add processing steps** (`Plugin.process_steps`, a
+  `process.ProcessSteps`): data steps right after the transfer, renders at the
+  very end. `process` never instantiates a plugin or touches its hardware.
+  A step that moves a transferred recording steers later copies
+  (`ProcessSteps.transfer_dest`, `ctx.dests`). A plugin can also add a command
+  group (`octacam <name> ...`, from `plugins._COMMANDS`) and its own `octacam
+  doctor` checks (`Plugin.doctor`).
+
 - **`--set KEY=VALUE` on `gui` and `record`** overrides any config key for one
   launch by its dotted path (`--set record.save_method=raw`), the same flag
   deeperfly and spintrack take. The value is read as TOML, a list may drop its

@@ -83,6 +83,43 @@ class ProcessOptions:
 
 
 @dataclass
+class ProcessContext:
+    """What a plugin's processing steps get: this run's recordings that enable
+    the plugin, where each was transferred (None: not transferred), each one's
+    config, the run's options and its reporter (phases, pause gate).
+    """
+
+    folders: list[Path]
+    dests: dict[Path, Path | None]
+    configs: dict[Path, OctacamConfig]
+    options: ProcessOptions
+    reporter: NullReporter
+
+
+class ProcessSteps:
+    """A plugin's post-processing (`Plugin.process_steps`), every step a no-op
+    by default. `after_transfer` runs once the recordings' own data is on its
+    destination and before the grids: the plugin's data steps (e.g. pairing and
+    copying its own acquisition data), so the data is usable early; a step that
+    moves a transferred recording updates `ctx.dests`, where the grids then go.
+    `render` runs last, after the grids: slow presentation outputs. Each
+    returns how many files failed; neither should raise.
+    """
+
+    def transfer_dest(self, folder: Path, dest: Path) -> Path:
+        """Where *folder* goes instead of *dest*: the folder an earlier run's
+        steps moved its copy to, so a re-run does not create a second one.
+        """
+        return dest
+
+    def after_transfer(self, ctx: ProcessContext) -> int:
+        return 0
+
+    def render(self, ctx: ProcessContext) -> int:
+        return 0
+
+
+@dataclass
 class TranscodeJob:
     """One source file to transcode. A `.raw` stream carries no geometry, so
     the summary supplies it; encoded inputs leave these None.
@@ -147,17 +184,57 @@ def run(
                 folder, sorted(p for p in folder.glob("*.mp4") if not is_partial(p))
             )
 
+    # The data first, the presentation outputs last: transfer the videos and
+    # metadata, run the plugins' data steps, then build and transfer the grids
+    # (hours for a full day) and run the plugins' renders.
     transfer_failed = 0
     if (options.grid or options.transfer) and done.outputs:
         configs = {folder: config(folder) for folder in done.outputs}
+        steps = _plugin_steps(configs)
+
+        def resolve_dest(folder: Path, dest: Path) -> Path:
+            for plugin_steps, plugin_folders in steps:
+                if folder in plugin_folders:
+                    dest = plugin_steps.transfer_dest(folder, dest)
+            return dest
+
+        dests: dict[Path, Path | None] = {}
+        if options.transfer:
+            failed, dests = transfer_outputs(
+                done.outputs,
+                {},
+                options,
+                configs,
+                reporter,
+                bar,
+                resolve_dest=resolve_dest,
+            )
+            transfer_failed += failed
+        for plugin_steps, plugin_folders in steps:
+            transfer_failed += plugin_steps.after_transfer(
+                ProcessContext(plugin_folders, dests, configs, options, reporter)
+            )
         grids = (
             build_grids(done.outputs, done.rewritten, options, configs, reporter, bar)
             if options.grid
             else {}
         )
-        if options.transfer:
-            transfer_failed = transfer_outputs(
-                done.outputs, grids, options, configs, reporter, bar
+        if options.transfer and any(grids.values()):
+            failed, _ = transfer_outputs(
+                {folder: [] for folder in grids},
+                grids,
+                options,
+                configs,
+                reporter,
+                bar,
+                metadata=False,
+                label="Transfer (grids)",
+                dests=dests,  # as the plugins' steps left them
+            )
+            transfer_failed += failed
+        for plugin_steps, plugin_folders in steps:
+            transfer_failed += plugin_steps.render(
+                ProcessContext(plugin_folders, dests, configs, options, reporter)
             )
 
     problems = []
@@ -364,6 +441,34 @@ def build_grids(
     return grids
 
 
+def _plugin_steps(
+    configs: dict[Path, OctacamConfig],
+) -> list[tuple[ProcessSteps, list[Path]]]:
+    """Each enabled plugin's processing steps (`Plugin.process_steps`), with
+    the recordings whose config enables it. A plugin that can't be imported is
+    warned about and skipped: processing never needs its hardware.
+    """
+    from octacam.plugins import _ALIASES, plugin_class
+
+    by_name: dict[str, list[Path]] = {}
+    for folder, cfg in configs.items():
+        for entry in cfg.plugins:
+            name = _ALIASES.get(entry.name, entry.name)
+            by_name.setdefault(name, [])
+            if folder not in by_name[name]:
+                by_name[name].append(folder)
+    steps: list[tuple[ProcessSteps, list[Path]]] = []
+    for name, folders in by_name.items():
+        try:
+            cls = plugin_class(name).process_steps
+        except Exception as e:  # an unknown or unimportable plugin
+            log.warning("Plugin %r: no processing steps (%s)", name, e)
+            continue
+        if cls is not None:
+            steps.append((cls(), folders))
+    return steps
+
+
 def transfer_outputs(
     outputs: dict[Path, list[Path]],
     grids: dict[Path, list[Path]],
@@ -371,12 +476,22 @@ def transfer_outputs(
     configs: dict[Path, OctacamConfig],
     reporter: NullReporter,
     bar: Callable[[int], FileProgressBar] | None = None,
-) -> int:
-    """Copy each folder's outputs, grids and metadata to its `[transfer]`
-    destination, under its summary's `relative_directory`; return how many
-    files failed.
+    *,
+    metadata: bool = True,
+    label: str = "Transfer",
+    dests: dict[Path, Path | None] | None = None,
+    resolve_dest: Callable[[Path, Path], Path] | None = None,
+) -> tuple[int, dict[Path, Path | None]]:
+    """Copy each folder's outputs, grids and (with *metadata*) metadata to its
+    `[transfer]` destination, under its summary's `relative_directory`; return
+    how many files failed and each folder's destination (None: not
+    transferred). *dests* gives the destinations instead (an earlier pass's);
+    *resolve_dest* may move a computed one (`ProcessSteps.transfer_dest`).
+    *label* names the pass in its log line.
     """
     copied = skipped = failed = 0
+    given = dests
+    result_dests: dict[Path, Path | None] = {}
     progress = bar(0) if bar else None
     reporter.begin_phase("transfer", len(outputs))
     with progress or contextlib.nullcontext():
@@ -388,21 +503,30 @@ def transfer_outputs(
                 )
             reporter.item_started(i, len(outputs), folder)
             transfer = configs[folder].transfer
+            dest = given.get(folder) if given is not None else None
+            result_dests[folder] = None
             if transfer is None or not transfer.directory:
                 log.warning(
                     "No [transfer].directory resolvable for %s; skipping transfer",
                     folder,
                 )
-            else:
-                relative = (_read_summary(folder) or {}).get("relative_directory")
+            elif given is None or dest is not None:
+                if dest is None:
+                    relative = (_read_summary(folder) or {}).get("relative_directory")
+                    dest = Path(resolve_dir_template(transfer.directory)) / (
+                        relative or folder.name
+                    )
+                    if resolve_dest is not None:
+                        dest = resolve_dest(folder, dest)
+                result_dests[folder] = dest
                 result = transfer_folder(
                     folder,
-                    Path(resolve_dir_template(transfer.directory))
-                    / (relative or folder.name),
+                    dest,
                     files_only=files + grids.get(folder, []),
                     dry_run=options.dry_run,
                     verify=transfer.checksum,
                     on_progress=on_bar or reporter.transfer_progress(i, len(outputs)),
+                    metadata=metadata,
                 )
                 copied += len(result.copied)
                 skipped += len(result.skipped)
@@ -410,13 +534,13 @@ def transfer_outputs(
             reporter.item_done()
     if options.dry_run:
         log.info(
-            "[dry-run] Transfer: %d to copy, %d already up to date", copied, skipped
+            "[dry-run] %s: %d to copy, %d already up to date", label, copied, skipped
         )
     else:
-        log.info("Transfer: %d copied, %d skipped, %d failed", copied, skipped, failed)
+        log.info("%s: %d copied, %d skipped, %d failed", label, copied, skipped, failed)
         if failed:
             log.error("%d file(s) failed to transfer", failed)
-    return failed
+    return failed, result_dests
 
 
 def is_stale(output: Path, source: Path) -> bool:

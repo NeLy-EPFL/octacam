@@ -14,7 +14,9 @@ if TYPE_CHECKING:
 
     from fastapi import APIRouter
 
+    from octacam.config import OctacamConfig
     from octacam.controller import RecordingController
+    from octacam.process import ProcessSteps
 
 log = logging.getLogger("octacam")
 
@@ -30,10 +32,23 @@ class Plugin:
     # on_recording_start arms idle cameras.
     generates_trigger: ClassVar[bool] = False
     web_dir: ClassVar[Path | None] = None  # serves <name>.js (+ <name>.css)
+    # `octacam process` steps for recordings whose config enables the plugin
+    # (no instance, no hardware): see process.ProcessSteps.
+    process_steps: ClassVar[type[ProcessSteps] | None] = None
     controller: RecordingController | None = None  # set by PluginManager.attach
 
     def broadcast(self, topic: str, payload: dict, /) -> None:
         """Push `payload` to every GUI client as `topic`; a no-op until attached."""
+
+    @classmethod
+    def doctor(
+        cls, options: dict, config: OctacamConfig, config_dir: Path | None
+    ) -> list[tuple[str, str]]:
+        """`octacam doctor`'s checks of this plugin's configuration, as
+        `(status, text)` with status "ok", "info", "warn" or "error". Never
+        touches the hardware (a running session may own it).
+        """
+        return []
 
     @classmethod
     def from_options(cls, options: dict) -> Plugin:
