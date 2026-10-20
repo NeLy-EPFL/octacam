@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict
 
 import octacam
-from octacam import updates
+from octacam import process_jobs, updates
 from octacam.config import ConfigError, OctacamConfig, find_config_file, parse_config
 from octacam.controller import RecordingController
 from octacam.web.hub import Hub
@@ -51,6 +51,10 @@ class AppState:
     # Set by POST /api/shutdown ("Shut down & process"); cli.gui's teardown then
     # starts a detached processing job.
     process_after: bool = False
+    # Detached `octacam process` jobs on this machine, for the GUI's
+    # background-processing notice (see refresh_jobs).
+    jobs: dict = dataclasses.field(default_factory=lambda: {"live": [], "ended": []})
+    _jobs_seen: set[str] = dataclasses.field(default_factory=set)
 
     def adopt_config(self, raw: dict) -> None:
         """Make the active config just saved from `raw` live: the next save
@@ -65,6 +69,38 @@ class AppState:
             log.error("Saved config did not parse back; keeping the live one: %s", e)
             return
         self.controller.camera_system.apply_display_config(self.config.cameras)
+
+    def refresh_jobs(self) -> bool:
+        """Re-read the detached processing jobs into `jobs`; True when it
+        changed. A job that is live while this GUI is open pauses at its next
+        step boundary (the session marks capture-active); this only makes that
+        visible. A job seen live during this session that has since ended is
+        listed under `ended`, so the GUI can say so. Fail-soft; never raises.
+        """
+        try:
+            all_jobs = process_jobs.list_jobs()
+        except Exception:
+            log.debug("job status read failed", exc_info=True)
+            return False
+        live = [j for j in all_jobs if not process_jobs.is_finished(j)]
+        self._jobs_seen.update(j.job_id for j in live)
+        jobs = {
+            "live": [process_jobs.notice_dict(j) for j in live],
+            "ended": [
+                {
+                    "job_id": j.job_id,
+                    "state": j.state,
+                    "error": j.error,
+                    "warning_count": j.warning_count,
+                    "warnings": j.warnings[:5],
+                }
+                for j in all_jobs
+                if j.job_id in self._jobs_seen and process_jobs.is_finished(j)
+            ],
+        }
+        changed = jobs != self.jobs
+        self.jobs = jobs
+        return changed
 
     def refresh_update_notice(self) -> None:
         """Set `update_notice` from a PyPI check. Fail-soft; never raises."""
@@ -124,6 +160,9 @@ class AppState:
         return {
             "version": octacam.__version__,
             "update": self.update_notice.as_dict() if self.update_notice else None,
+            # Detached `octacam process` jobs (refresh_jobs), also pushed live
+            # as WS "jobs".
+            "jobs": self.jobs,
             "ready": controller.ready,
             # Why the init opened no camera, instead of an endless placeholder.
             "init_error": controller.init_error,
