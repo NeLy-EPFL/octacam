@@ -2,7 +2,7 @@
 //
 // A job that is running while the GUI is open keeps going until its current
 // step is done (a grid encode, one take's transfer, ...), then pauses until the
-// GUI closes — the server marks this GUI session "capture-active", which every
+// GUI closes: the server marks this GUI session "capture-active", which every
 // job checks between steps. Nothing here changes that; it only makes it
 // visible: a banner over the camera grid while a job is running or paused, an
 // event-log entry (and a desktop notification, if allowed) when it pauses or
@@ -34,7 +34,7 @@ function isManual(job) {
   return (job.paused_reason || "").includes("manual");
 }
 
-// "item 3 of 16" — the step running now (1-based), or the count done when paused.
+// "item 3 of 16": the step running now (1-based), or the count done when paused.
 function stepText(job) {
   if (!job.files_total) return "";
   if (job.paused) return `${job.files_done} of ${job.files_total} done`;
@@ -44,7 +44,7 @@ function stepText(job) {
 
 function warningsText(job) {
   const n = job.warning_count || 0;
-  return n ? ` ⚠ ${n} warning${n === 1 ? "" : "s"} so far — see \`octacam jobs attach\`.` : "";
+  return n ? ` \u26a0 ${n} warning${n === 1 ? "" : "s"} so far \u2014 see "octacam jobs attach".` : "";
 }
 
 export function describeJob(job) {
@@ -53,9 +53,9 @@ export function describeJob(job) {
     const where = step ? ` (${phaseLabel(job.phase)}, ${step})` : "";
     return (
       (isManual(job)
-        ? `Background processing is paused by hand${where} — resume it with ` +
-          "`octacam jobs resume`."
-        : `Background processing is paused${where} — it resumes when you close octacam.`) +
+        ? `Background processing is paused by hand${where} \u2014 resume it with ` +
+          '"octacam jobs resume".'
+        : `Background processing is paused${where} \u2014 it resumes when you close octacam.`) +
       warningsText(job)
     );
   }
@@ -81,14 +81,14 @@ export class JobsNotice {
   apply(jobs) {
     const live = Array.isArray(jobs?.live) ? jobs.live : [];
     const ended = Array.isArray(jobs?.ended) ? jobs.ended : [];
-    // Announce transitions only — not what was already so when the page loaded.
+    // Announce transitions only, not what was already so when the page loaded.
     if (!this._first) {
       for (const job of live) {
         const was = this._paused.get(job.job_id);
         if (job.paused && was === false && !isManual(job)) {
           this._announce(
             "info",
-            "Background processing paused — it resumes when you close octacam."
+            "Background processing paused \u2014 it resumes when you close octacam."
           );
         }
       }
@@ -102,8 +102,8 @@ export class JobsNotice {
           this._announce(
             "warning",
             `Background processing finished with ${n} warning${n === 1 ? "" : "s"}` +
-              (first ? ` — first: ${first}` : "") +
-              ` — review them with \`octacam jobs attach ${job.job_id}\`.`
+              (first ? ` \u2014 first: ${first}` : "") +
+              ` \u2014 review them with "octacam jobs attach ${job.job_id}".`
           );
         } else {
           this._announce(
@@ -121,7 +121,7 @@ export class JobsNotice {
   }
 
   // A confirmation message while a job is still running a step (not yet
-  // paused) — recording then shares the workstation with it. Null otherwise.
+  // paused): recording then shares the workstation with it. Null otherwise.
   busyMessage() {
     const busy = this.live.find((j) => !j.paused);
     if (!busy) return null;

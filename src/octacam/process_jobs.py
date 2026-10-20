@@ -425,7 +425,7 @@ class JobReporter(NullReporter):
         self._status.warning_count += 1
         if len(self._status.warnings) < _MAX_KEPT_WARNINGS:
             self._status.warnings.append(message)
-        self._flush(force=True)
+        self._flush()
 
     def transcode_progress(self, index: int, total: int) -> ProgressCallback:
         """A transcode.ProgressCallback refining the within-item percent of any
