@@ -72,8 +72,11 @@ const FIELDS = [
 ];
 
 export class RecordTab {
-  constructor({ formats, getPluginParams, notify }) {
+  constructor({ formats, getPluginParams, notify, backgroundJobWarning }) {
     this.getPluginParams = getPluginParams; // () => {name: start-params slice}
+    // A confirmation message while a background `octacam process` job is
+    // still mid-step (it pauses once that step is done), else null.
+    this.backgroundJobWarning = backgroundJobWarning;
     this.notify = notify;
     this.settings = null;
     this.state = "idle";
@@ -522,6 +525,10 @@ export class RecordTab {
   }
 
   async _start() {
+    // Recording alongside a still-running processing step (a grid encode,
+    // a transfer) shares the workstation with it: ask first.
+    const busy = this.backgroundJobWarning?.();
+    if (busy && !window.confirm(busy)) return;
     const body = { confirm_overwrite: false };
     const pluginParams = this.getPluginParams?.() ?? {};
     if (Object.keys(pluginParams).length) body.plugin_params = pluginParams;

@@ -171,11 +171,18 @@ layout = [
     ["camera_LH", "",          "camera_RH"],
 ]
 # ffmpeg_params = ""         # optional per-grid encoder override
+# max_width = 1440           # optional: scale the cells so the grid fits
 ```
 
 Each cell is a camera `name`; `""` is a black fill. All rows must have the same
 number of columns. `octacam config` offers to write a near-square layout of the
 rig's cameras for you.
+
+A grid is for watching, not analysis: without its own `ffmpeg_params` it uses
+the archival `[transcode]` settings, at full size. A faster preset and a
+`max_width` make it much quicker to build and lighter to share (a 3x3 grid of
+960x580 cameras at 100 fps: ~8x faster with
+`ffmpeg_params = "-c:v libx264 -preset medium -crf 20"` and `max_width = 1440`).
 
 ## `[[plugins]]`
 
