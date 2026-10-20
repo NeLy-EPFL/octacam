@@ -11,6 +11,10 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
+  its cells down; with its own faster `ffmpeg_params` a grid builds several
+  times faster (see Configuration).
+
 - **`--set KEY=VALUE` on `gui` and `record`** overrides any config key for one
   launch by its dotted path (`--set record.save_method=raw`), the same flag
   deeperfly and spintrack take. The value is read as TOML, a list may drop its
