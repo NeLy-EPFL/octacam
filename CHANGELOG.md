@@ -11,6 +11,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **A plugin tab can hold a recording start**: an optional async
+  `confirmStart()` on the tab runs when Start is pressed, and returning false
+  cancels the start (for a reminder the operator must acknowledge, such as
+  twophoton's "is ThorSync ticked in ThorImage?").
+
 - **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
   its cells down; with its own faster `ffmpeg_params` a grid builds several
   times faster (see Configuration).
