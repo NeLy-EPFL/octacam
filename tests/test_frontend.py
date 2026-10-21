@@ -1911,6 +1911,106 @@ def test_twophoton_offers_synced_with_thorimage(static_server, browser):
         page.close()
 
 
+def test_twophoton_reminds_about_thorsync_and_announces_a_missed_take(
+    static_server, browser
+):
+    """ThorImage records ThorSync only with its box ticked: the session's first
+    armed take asks first (Cancel keeps it from starting), and a take ThorSync
+    did not record is announced in a popup, once.
+    """
+    page = browser.new_page()
+    plugins = {
+        "twophoton": {
+            "ready": True,
+            "device": "/dev/arduinoCams",
+            "arduino_state": "idle",
+            "match_thorimage": True,
+            "max_duration_s": 3600,
+            "stop_idle_ms": 2000,
+            "thorsync": None,
+            "thorsync_remind": True,
+            "thorsync_missing": None,
+            "web": {"module": "/plugins/twophoton/twophoton.js"},
+        }
+    }
+    starts = []
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(builder())
+        )
+
+    page.route("**/api/**", json_route(dict))
+    page.route(
+        "**/api/system",
+        json_route(lambda: _system_payload(ready=True, plugins=plugins)),
+    )
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=True)))
+    page.route(
+        "**/api/recording/start",
+        lambda route: (
+            starts.append(json.loads(route.request.post_data or "{}")),
+            route.fulfill(status=202, content_type="application/json", body="{}"),
+        ),
+    )
+    page.route(
+        "**/plugins/twophoton/twophoton.js",
+        lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=TWOPHOTON_JS.read_text()
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+    shown = (
+        "() => !document.getElementById('twophoton-dialog')"
+        ".classList.contains('hidden')"
+    )
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => !document.getElementById('duration-sync-row').hidden", timeout=5000
+        )
+        page.wait_for_function(
+            "() => !document.getElementById('record-button').disabled", timeout=5000
+        )
+        page.click("#record-button")
+        page.wait_for_function(shown, timeout=5000)
+        assert "ThorSync box ticked" in page.text_content("#twophoton-dialog-msg")
+        page.click("#twophoton-dialog-cancel")
+        page.wait_for_function(f"() => !({shown})()", timeout=5000)
+        page.wait_for_timeout(200)
+        assert starts == []
+
+        page.click("#record-button")
+        page.wait_for_function(shown, timeout=5000)
+        page.click("#twophoton-dialog-ok")
+        page.wait_for_timeout(300)
+        assert len(starts) == 1
+        assert starts[0]["plugin_params"]["twophoton"]["match_thorimage"] is True
+
+        missing = {
+            "capture": "Fly1_Streaming",
+            "message": "ThorSync did not record ThorImage's last capture",
+        }
+        state = {"type": "twophoton_state", "state": "idle", "ready": True}
+        page.evaluate(
+            "(m) => window.__pushWs(m)",
+            {**state, "thorsync_remind": True, "thorsync_missing": missing},
+        )
+        page.wait_for_function(shown, timeout=5000)
+        assert page.text_content("#twophoton-dialog-msg") == missing["message"]
+        assert page.is_hidden("#twophoton-dialog-cancel")
+        page.click("#twophoton-dialog-ok")
+        # The same missed capture again (every state push carries it): no popup.
+        page.evaluate(
+            "(m) => window.__pushWs(m)",
+            {**state, "thorsync_remind": True, "thorsync_missing": missing},
+        )
+        page.wait_for_timeout(200)
+        assert not page.evaluate(shown)
+    finally:
+        page.close()
+
+
 # --- users, recording name, readiness ---------------------------------------- #
 
 

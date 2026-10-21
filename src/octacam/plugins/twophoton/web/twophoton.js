@@ -2,7 +2,72 @@
 // take will be armed it also offers the Record tab a "Synced with ThorImage"
 // checkbox (the take ends when ThorImage stops) in place of Duration. Whether
 // ThorSync is set to record long enough is in the Record tab's Ready? strip.
+// ThorImage records ThorSync only with its ThorSync box ticked, so the session's
+// first armed take (and the next one after a take ThorSync missed) asks first,
+// and a take ThorSync did not record is announced in a popup.
+import { el, Modal } from "/js/util.js";
 import { SerialTab } from "/js/serial.js";
+
+const REMINDER =
+  "Is the ThorSync box ticked in ThorImage's Capture panel? Without it " +
+  "ThorSync records nothing: no AirFlow, no ThorSync channel, and the take " +
+  "can be paired with its 2P data by time only.";
+
+// A two-button popup: ask() resolves true for OK, false for Cancel/Escape.
+class ThorSyncDialog extends Modal {
+  constructor() {
+    const overlay = el("div", "modal hidden");
+    const card = el("div", "modal-card");
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true");
+    const title = el("h3");
+    title.id = "twophoton-dialog-title";
+    card.setAttribute("aria-labelledby", title.id);
+    const msg = el("p");
+    msg.id = "twophoton-dialog-msg";
+    const cancel = el("button", "btn");
+    cancel.type = "button";
+    cancel.id = "twophoton-dialog-cancel";
+    const ok = el("button", "btn");
+    ok.type = "button";
+    ok.id = "twophoton-dialog-ok";
+    const actions = el("div", "modal-actions");
+    actions.append(cancel, ok);
+    card.append(title, msg, actions);
+    overlay.append(card);
+    overlay.id = "twophoton-dialog";
+    document.body.append(overlay);
+    super(overlay);
+    Object.assign(this, { title, msg, ok, cancel, _resolve: null });
+    ok.addEventListener("click", () => this._done(true));
+    cancel.addEventListener("click", () => this._done(false));
+  }
+
+  // okLabel only: a notice (no Cancel).
+  ask(title, message, okLabel, cancelLabel = null) {
+    this._done(false); // a newer popup replaces an open one
+    this.title.textContent = title;
+    this.msg.textContent = message;
+    this.ok.textContent = okLabel;
+    this.cancel.textContent = cancelLabel || "";
+    this.cancel.hidden = !cancelLabel;
+    this.open(this.ok);
+    return new Promise((resolve) => {
+      this._resolve = resolve;
+    });
+  }
+
+  dismiss() {
+    this._done(false);
+  }
+
+  _done(choice) {
+    this.close();
+    const resolve = this._resolve;
+    this._resolve = null;
+    resolve?.(choice);
+  }
+}
 
 const STATE_LABELS = {
   idle:      "Idle — waiting for arm command",
@@ -46,6 +111,12 @@ export default class TwoPhotonTab extends SerialTab {
     // operator's (state pushes never overwrite it).
     this.matchThorImage = null;
     this._offered = null; // the last offer sent to the Record tab
+    // Server facts (link_status): ask before the next armed take; the last
+    // take's capture ThorSync did not record ({capture, message}).
+    this.thorsyncRemind = false;
+    this.thorsyncMissing = null;
+    this._announced = null; // the missed capture already shown in a popup
+    this.dialog = new ThorSyncDialog();
     this.stateValue = document.getElementById("twophoton-state-value");
     this.armWithRec = document.getElementById("twophoton-arm-with-recording");
     this.armWithRec.addEventListener("change", () => this.refresh());
@@ -64,7 +135,29 @@ export default class TwoPhotonTab extends SerialTab {
     if (this.matchThorImage == null && typeof msg.match_thorimage === "boolean") {
       this.matchThorImage = msg.match_thorimage;
     }
+    if (typeof msg.thorsync_remind === "boolean") this.thorsyncRemind = msg.thorsync_remind;
+    if ("thorsync_missing" in msg) {
+      this.thorsyncMissing = msg.thorsync_missing || null;
+      this._announceMissing();
+    }
     super.applyLink(msg);
+  }
+
+  // Once per missed capture: the operator must fix ThorImage before the next take.
+  _announceMissing() {
+    const missing = this.thorsyncMissing;
+    if (!missing || missing.capture === this._announced) return;
+    this._announced = missing.capture;
+    this.dialog.ask("ThorSync did not record this take", missing.message, "OK");
+  }
+
+  // Before an armed take that needs the reminder: false cancels the start.
+  async confirmStart() {
+    if (!this.thorsyncRemind || this.getStartParams() == null) return true;
+    const title = this.thorsyncMissing
+      ? "ThorSync missed the last take"
+      : "Before the first take: ThorSync";
+    return this.dialog.ask(title, REMINDER, "It is ticked — record", "Cancel");
   }
 
   applyState(msg) {

@@ -97,8 +97,10 @@ const FIELDS = [
 ];
 
 export class RecordTab {
-  constructor({ formats, getPluginParams, notify, backgroundJobWarning }) {
+  constructor({ formats, getPluginParams, confirmPlugins, notify, backgroundJobWarning }) {
     this.getPluginParams = getPluginParams; // () => {name: start-params slice}
+    // async () => whether every plugin lets the start go ahead (its reminders).
+    this.confirmPlugins = confirmPlugins;
     // A confirmation message while a background `octacam process` job is
     // still mid-step (it pauses once that step is done), else null.
     this.backgroundJobWarning = backgroundJobWarning;
@@ -649,6 +651,7 @@ export class RecordTab {
     // a transfer) shares the workstation with it: ask first.
     const busy = this.backgroundJobWarning?.();
     if (busy && !window.confirm(busy)) return;
+    if (this.confirmPlugins && !(await this.confirmPlugins())) return;
     const body = { confirm_overwrite: false };
     const pluginParams = this.getPluginParams?.() ?? {};
     if (Object.keys(pluginParams).length) body.plugin_params = pluginParams;

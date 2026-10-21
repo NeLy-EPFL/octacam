@@ -66,6 +66,18 @@ says when a rig config still has one.
     its log, the take's `twophoton_match.json`, and a **Warnings** section in
     the day's `2p_reconciliation.md`).
 
+!!! warning "Tick ThorSync in ThorImage"
+    ThorImage records ThorSync only with the **ThorSync** box in its Capture
+    panel ticked. Unticked, the 2P images are saved but nothing else: no AirFlow,
+    no ThorSync channel, and `octacam process` can pair the take by time only
+    (no check of the camera pulses). octacam reminds you: the GUI's first armed
+    take after launch asks whether the box is ticked before it starts. About 10 s
+    after each armed take it looks for that take's `SyncData` folder on the
+    share; if there is none, a popup says so (and the next take asks again).
+    The Record tab's **Ready?** strip and `octacam doctor` keep flagging it
+    until ThorSync records a capture again, and `octacam process` warns about
+    each take paired without ThorSync.
+
 ## Recording a paired take
 
 1. Start the octacam recording first. With **Arm with recording** checked in

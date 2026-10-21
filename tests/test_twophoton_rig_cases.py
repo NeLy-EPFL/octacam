@@ -2520,3 +2520,27 @@ def test_doctor_checks_thorsync_duration_against_the_longest_take(
     else:
         assert "ThorSync is set to stop" not in out
         assert "covers the longest take" in out
+
+
+def test_process_warns_about_a_take_thorsync_did_not_record(tmp_path):
+    # Real 2026-10-20: ThorImage's ThorSync box unticked, a whole day of takes
+    # paired with their images alone: no AirFlow, no signal check, no word.
+    pytest.importorskip("tifffile")
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(
+        source_root, "AllPAMxCI80", "Fly3_Streaming", u_time=take_start + 1, n_frames=4
+    )
+    folder = _armed_recording(
+        tmp_path / "rec",
+        source_root=source_root,
+        dest_root=dest_root,
+        take_start=take_start,
+    )
+    result = _process(folder)
+    assert result.exit_code == 0, result.output
+    out = _out(result)
+    assert "WARNING" in out
+    assert "no ThorSync recording for" in out
+    assert "(ThorImage Fly3_Streaming)" in out

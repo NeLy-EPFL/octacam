@@ -83,6 +83,11 @@ THORSYNC_REFRESH_S = 60.0
 # How long an arm waits for a ThorSync read still running (headless `record`
 # arms right after startup began one).
 THORSYNC_READ_WAIT_S = 5.0
+# How long after an armed take ends its ThorImage/ThorSync folders are looked
+# for (both are made when their acquisition starts; the share lags a little).
+THORSYNC_ATTACHED_CHECK_DELAY_S = 10.0
+# A capture starting this long before the take's arm is an earlier one.
+CAPTURE_BEFORE_ARM_S = 60.0
 
 _ARM_MAGIC = 0xA5
 _CANCEL_MAGIC = 0xCA
@@ -157,6 +162,33 @@ def thorsync_limit_message(
         "Raise the duration in ThorSync; this check sees it after ThorSync's next "
         "recording."
     )
+
+
+_TICK = (
+    "tick the ThorSync box in ThorImage's Capture panel before the next "
+    "capture \N{EM DASH} without it there is no AirFlow (or any other ThorSync "
+    "channel), and the take is aligned on the trigger board's timing alone"
+)
+
+
+def thorsync_missing_message(capture: str) -> str:
+    """The ThorSync-did-not-record warning (Ready? strip, doctor, after a take)."""
+    return f"ThorSync did not record ThorImage's last capture ({capture}): {_TICK}"
+
+
+def thorsync_attached_check(source: Path) -> tuple[str, str] | None:
+    """Whether ThorSync recorded ThorImage's newest capture, as a doctor check
+    (the Ready? strip's until a capture is recorded again).
+    """
+    from octacam.plugins.twophoton.matching import thorsync_coverage
+
+    coverage = thorsync_coverage(source)
+    if coverage is None:
+        return None
+    label = f"{coverage.capture.parent.name}/{coverage.capture.name}"
+    if coverage.sync is None:
+        return "warn", thorsync_missing_message(label)
+    return "ok", f"ThorSync recorded ThorImage's last capture ({label})"
 
 
 def parse_stop_report(line: str) -> dict | None:
@@ -338,6 +370,12 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         # armed and synced with ThorImage, and the board's STOP report for it.
         self._take_dir: Path | None = None
         self._take_armed = False
+        self._take_armed_at = 0.0
+        # The GUI asks whether ThorImage's ThorSync box is ticked before the
+        # session's first armed take, and again after a take ThorSync missed.
+        self.thorsync_remind = True
+        # {"capture", "message"}: the last take's capture ThorSync did not record.
+        self.thorsync_missing: dict | None = None
         self._take_synced = False
         self._stop_report: dict | None = None
         # ThorSync's duration limit as last read from the share, off-thread: the
@@ -434,6 +472,8 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
             "max_duration_s": self.max_duration_s,
             "stop_idle_ms": self.stop_idle_ms,
             "thorsync": self.thorsync,
+            "thorsync_remind": self.thorsync_remind,
+            "thorsync_missing": self.thorsync_missing,
         }
 
     def _on_status(self, status: str) -> None:
@@ -603,10 +643,12 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
             Path(controller.get_settings().save_dir) if controller else None
         )
         self._take_armed = params is not None
+        self._take_armed_at = time.time()
         self._take_synced = params is not None and self._wants_match(params)
         self._stop_report = None
         if params is None:
             return
+        self.thorsync_remind = False  # asked before this take (the GUI)
         arm = ArmParams.from_payload(
             params, self._default_fps, self._default_duration_ms
         )
@@ -668,9 +710,42 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         # so the state is reset here.
         self._link.send_cancel()
         self._set_state("idle")
+        armed = self._take_armed
         self._write_take_info()
         # The take's own SyncData folder is now the newest: re-read its settings.
         self.refresh_thorsync_limit()
+        if armed and self._source_dir() is not None:
+            threading.Thread(
+                target=self._check_thorsync_attached,
+                args=(self._take_armed_at,),
+                name="twophoton-thorsync-attached",
+                daemon=True,
+            ).start()
+
+    def _check_thorsync_attached(self, armed_at: float) -> None:
+        """Warn at once when ThorSync did not record the take's ThorImage
+        capture (its box in ThorImage unticked), so the next one is not lost too.
+        """
+        from octacam.plugins.twophoton.matching import thorsync_coverage
+
+        if self._watching.wait(THORSYNC_ATTACHED_CHECK_DELAY_S):
+            return
+        source = self._source_dir()
+        coverage = thorsync_coverage(source) if source else None
+        if coverage is None or coverage.start_time < armed_at - CAPTURE_BEFORE_ARM_S:
+            return
+        if coverage.sync is not None:
+            self.thorsync_missing = None
+            self._push_state()
+            return
+        message = thorsync_missing_message(coverage.capture.name)
+        self.thorsync_missing = {"capture": coverage.capture.name, "message": message}
+        self.thorsync_remind = True
+        self._push_state()
+        if self.controller is not None:
+            self.controller.event("warning", message)
+        else:
+            log.warning("twophoton: %s", message)
 
     def take_info(self) -> dict:
         """The take's 2P facts for `process`: whether it was armed (the
@@ -707,12 +782,10 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
     ) -> list[tuple[str, str]]:
         """The 2P checks: a share to pair takes with, reachable, and ThorSync
         set to record as long as a take can run (it silently stops at its own
-        acquisition duration: real 2026-10-14, 320 s against 394 s takes).
+        acquisition duration: real 2026-10-14, 320 s against 394 s takes), and
+        that ThorSync recorded ThorImage's last capture at all.
         """
-        from octacam.config import duration_to_seconds
-        from octacam.plugins.twophoton.matching import latest_thorimage_plan
         from octacam.plugins.twophoton.settings import settings_for
-        from octacam.plugins.twophoton.signals import latest_thorsync_limit
 
         config_file = config_dir / "octacam_config.toml" if config_dir else None
         settings = settings_for(config, config_file)
@@ -731,16 +804,29 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
                 ("warn", f"twophoton: the 2P share {source} is not reachable"),
             ]
         checks = [*moved, ("ok", f"twophoton: 2P share {source}")]
+        attached = thorsync_attached_check(source)
+        return [
+            *checks,
+            *cls._thorsync_limit_checks(options, config, source),
+            *([attached] if attached else []),
+        ]
+
+    @staticmethod
+    def _thorsync_limit_checks(
+        options: dict, config, source: Path
+    ) -> list[tuple[str, str]]:
+        """Whether ThorSync's duration limit covers the longest take."""
+        from octacam.config import duration_to_seconds
+        from octacam.plugins.twophoton.matching import latest_thorimage_plan
+        from octacam.plugins.twophoton.signals import latest_thorsync_limit
+
         latest = latest_thorsync_limit(source)
         if latest is None:
-            return [
-                *checks,
-                ("info", f"ThorSync duration: no SyncData folder under {source}"),
-            ]
+            return [("info", f"ThorSync duration: no SyncData folder under {source}")]
         folder, limit = latest
         label = f"{folder.parent.name}/{folder.name}"
         if not limit:
-            return [*checks, ("info", f"ThorSync duration: not readable from {label}")]
+            return [("info", f"ThorSync duration: not readable from {label}")]
         take_source = None
         if not _as_bool(options.get("match_thorimage"), DEFAULT_MATCH_THORIMAGE):
             record = config.record
@@ -755,11 +841,9 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
             )
         if limit < longest:
             return [
-                *checks,
                 ("warn", thorsync_limit_message(label, limit, longest, take_source)),
             ]
         return [
-            *checks,
             (
                 "ok",
                 f"ThorSync duration {limit:g} s (from {label}) covers the longest take",

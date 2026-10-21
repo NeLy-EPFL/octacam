@@ -298,6 +298,14 @@ class TwoPhotonSteps(ProcessSteps):
                 if not ctx.options.dry_run:
                     write_pending(folder, takes[folder], dest, target.source_root, mode)
                 continue
+            if not any(m.folder.kind == "sync" for m in matches):
+                log.warning(
+                    "2P: no ThorSync recording for %s (ThorImage %s) \N{EM DASH} "
+                    "was ThorSync ticked in ThorImage? No AirFlow; paired by "
+                    "time and aligned on the trigger board's clock instead",
+                    folder,
+                    ", ".join(m.folder.path.name for m in matches),
+                )
             paired = finish_pairing(folder, dest, matches, target.source_root, mode)
             failed += paired.failed
             if paired.complete:

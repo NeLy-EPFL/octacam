@@ -140,6 +140,13 @@ async function main() {
       }
       return params;
     },
+    // A plugin tab's confirmStart() (a reminder before the take) may cancel it.
+    confirmPlugins: async () => {
+      for (const tab of pluginTabs.values()) {
+        if (tab.confirmStart && !(await tab.confirmStart())) return false;
+      }
+      return true;
+    },
     notify,
   });
   record.setManagedAvailable(!!system.managed_trigger_available);

@@ -1166,3 +1166,114 @@ def test_identify_asks_again_after_the_mega_s_boot(monkeypatch):
     monkeypatch.setattr(link, "_write", write)
     assert link.identify(timeout=0.05) == "2PHOTON 2 deadbeef"
     assert len(queries) == 2
+
+
+# ---------------------------------------------------------------------------
+# ThorSync attached: ThorImage's ThorSync box is easy to forget
+# ---------------------------------------------------------------------------
+
+
+def _capture(share, name, u_time, *, sync_at=None):
+    """A ThorImage capture started at *u_time*, recorded by a ThorSync episode
+    starting at *sync_at* (None: none).
+    """
+    import os
+
+    folder = share / "PAM7xCI80" / name
+    folder.mkdir(parents=True)
+    (folder / "Experiment.xml").write_text(
+        f'<?xml version="1.0"?><ThorImageExperiment><Date uTime="{u_time}" />'
+        "</ThorImageExperiment>"
+    )
+    if sync_at is not None:
+        sync = share / "PAM7xCI80" / f"SyncData{name}"
+        sync.mkdir()
+        for f in ("ThorRealTimeDataSettings.xml", "Episode001.h5"):
+            (sync / f).write_bytes(b"x")
+            os.utime(sync / f, (sync_at, sync_at))
+    return folder
+
+
+def test_a_capture_thorsync_missed_is_a_ready_warning(tmp_path):
+    now = 1_800_000_000.0
+    _capture(tmp_path, "Fly3_Streaming_005", now - 600)
+    status, message = twophoton.thorsync_attached_check(tmp_path) or ("", "")
+    assert status == "warn"
+    assert "ThorSync did not record ThorImage's last capture" in message
+    assert "PAM7xCI80/Fly3_Streaming_005" in message
+    assert "tick the ThorSync box" in message
+
+
+def test_a_recorded_capture_is_ok(tmp_path):
+    now = 1_800_000_000.0
+    _capture(tmp_path, "Fly1_Streaming", now - 600, sync_at=now - 603)
+    assert twophoton.thorsync_attached_check(tmp_path) == (
+        "ok",
+        "ThorSync recorded ThorImage's last capture (PAM7xCI80/Fly1_Streaming)",
+    )
+
+
+def test_the_gui_is_asked_to_remind_before_the_session_s_first_armed_take():
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    assert plugin.status()["thorsync_remind"] is True
+    plugin.on_recording_start(None)  # not armed: not a 2P take
+    assert plugin.status()["thorsync_remind"] is True
+    plugin.on_recording_start({"fps": 100, "match_thorimage": True})
+    assert plugin.status()["thorsync_remind"] is False
+
+
+def test_a_take_thorsync_did_not_record_warns_right_after_it(tmp_path, monkeypatch):
+    import time
+
+    monkeypatch.setattr(twophoton, "THORSYNC_ATTACHED_CHECK_DELAY_S", 0.0)
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    spy = _attach(plugin, tmp_path)
+    share = tmp_path / "share"
+    _capture(share, "Fly1_Old", time.time() - 3600, sync_at=time.time() - 3600)
+    plugin.source = str(share)
+    plugin.on_recording_start({"fps": 100, "match_thorimage": True})
+    _capture(share, "Fly1_Streaming", time.time() + 2)  # ThorSync unticked
+    plugin.on_recording_stop(aborted=False)
+    wait_until(lambda: spy.events)
+    ((level, message),) = spy.events
+    assert level == "warning"
+    assert "ThorSync did not record ThorImage's last capture (Fly1_Streaming)" in (
+        message
+    )
+    # The GUI shows it in a popup and reminds again before the next take.
+    status = plugin.status()
+    assert status["thorsync_missing"]["capture"] == "Fly1_Streaming"
+    assert status["thorsync_missing"]["message"] == message
+    assert status["thorsync_remind"] is True
+
+    # The next take's capture is recorded: the warning clears.
+    spy.events.clear()
+    plugin.on_recording_start({"fps": 100, "match_thorimage": True})
+    _capture(share, "Fly1_Streaming_001", time.time() + 2, sync_at=time.time())
+    plugin.on_recording_stop(aborted=False)
+    wait_until(lambda: plugin.status()["thorsync_missing"] is None)
+    assert spy.events == []
+    assert plugin.status()["thorsync_remind"] is False
+
+
+def test_no_attached_warning_for_an_unarmed_take_or_an_older_capture(
+    tmp_path, monkeypatch
+):
+    import time
+
+    monkeypatch.setattr(twophoton, "THORSYNC_ATTACHED_CHECK_DELAY_S", 0.0)
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    spy = _attach(plugin, tmp_path)
+    share = tmp_path / "share"
+    # ThorImage's newest capture predates this take: not this take's problem.
+    _capture(share, "Fly1_Old", time.time() - 3600)
+    plugin.source = str(share)
+    plugin.on_recording_start({"fps": 100, "match_thorimage": True})
+    plugin.on_recording_stop(aborted=False)
+    time.sleep(0.3)
+    assert spy.events == []
+    plugin.on_recording_start(None)
+    _capture(share, "Fly1_Streaming", time.time())
+    plugin.on_recording_stop(aborted=False)
+    time.sleep(0.3)
+    assert spy.events == []

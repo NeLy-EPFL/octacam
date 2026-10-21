@@ -201,6 +201,52 @@ def latest_thorimage_plan(source_root: Path) -> tuple[Path, float] | None:
     return None
 
 
+# ThorImage starts ThorSync (its "ThorSync" checkbox) a few seconds before its
+# capture; an episode starting later than this after the capture is another one.
+_SYNC_LATE_START_S = 30.0
+
+
+@dataclass(frozen=True)
+class ThorSyncCoverage:
+    """Whether ThorSync recorded ThorImage's newest capture."""
+
+    capture: Path
+    start_time: float  # the capture's start, unix seconds
+    sync: Path | None  # the SyncData folder that recorded it; None: nothing did
+
+
+def thorsync_coverage(source_root: Path) -> ThorSyncCoverage | None:
+    """Whether a ThorSync episode under *source_root* recorded ThorImage's newest
+    capture: one that started by the capture's start (plus a margin) and was
+    still writing when it began. Unticking ThorImage's ThorSync box records the
+    2P images alone (real 2026-10-20: a whole day, no AirFlow, no timing
+    check). None when there is no capture or the share can't be listed.
+    """
+    try:
+        xmls = [
+            x for x in source_root.glob(f"*/*/{EXPERIMENT_XML_FILENAME}") if x.is_file()
+        ]
+        newest = max(xmls, key=lambda x: x.stat().st_mtime, default=None)
+        if newest is None:
+            return None
+        start = _thorimage_start_time(newest) or newest.parent.stat().st_mtime
+        syncs = [
+            f
+            for d in source_root.glob(f"*/{SYNC_FOLDER_PREFIX}*")
+            if (f := classify_twophoton_folder(d)) is not None and f.kind == "sync"
+        ]
+    except OSError:
+        return None
+    for sync in sorted(syncs, key=lambda f: f.start_time, reverse=True):
+        if sync.start_time > start + _SYNC_LATE_START_S:
+            continue
+        if sync.start_time < start - _LONGEST_ACQUISITION_S:
+            break
+        if sync.start_time >= start - _SYNC_LATE_START_S or last_write(sync) >= start:
+            return ThorSyncCoverage(newest.parent, start, sync.path)
+    return ThorSyncCoverage(newest.parent, start, None)
+
+
 def thorimage_timepoints(experiment_xml: Path) -> int | None:
     """Parse ``<Timelapse timepoints="...">`` from a ThorImage ``Experiment.xml``
     -- the acquisition's own recorded frame count, for cross-checking against a

@@ -23,6 +23,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   deleted, 2P-only ones too (the share's account needs delete rights);
   `octacam twophoton verify --delete` clears a backlog of verified ones.
   Settings are the plugin's options (`source`, ...); see the 2-photon guide.
+- **ThorSync reminder** (`twophoton`): ThorImage records ThorSync only with
+  its ThorSync box ticked. The GUI's first armed take after launch asks about
+  it, and a take ThorSync did not record is announced in a popup right after
+  it (the next take asks again), then flagged by the Ready? strip, `octacam
+  doctor` and `octacam process`.
 - **A take ThorSync did not record is still aligned** (`twophoton`): on the
   trigger board's clock (`twophoton_board_sync.json`; every 2P frame within
   one camera frame of ThorSync, checked on real takes), so its synced video

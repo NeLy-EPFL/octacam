@@ -24,6 +24,7 @@ from octacam.plugins.twophoton.matching import (
     match_take_to_twophoton,
     match_takes_to_twophoton_batch,
     render_twophoton_manifest,
+    thorsync_coverage,
 )
 
 
@@ -1201,3 +1202,47 @@ def test_a_stopped_early_stream_may_scan_two_frames_it_never_saved(tmp_path):
     for t in range(94, 3001):
         (tmp_path / f"ChanA_001_001_001_{t:04d}.tif").unlink()
     assert thorimage_frameout_tolerance(xml) == 2
+
+
+# --- thorsync_coverage ---------------------------------------------------------
+
+
+def test_thorsync_coverage_finds_the_episode_that_recorded_the_capture(tmp_path):
+    # ThorImage starts ThorSync a few seconds before its capture.
+    _make_sync_folder(tmp_path, "PAM7xCI80", "SyncData184", mtime=995.0)
+    _make_image_folder(
+        tmp_path, "PAM7xCI80", "Fly1_Streaming", u_time=1000.0, last_frame_mtime=1400
+    )
+    coverage = thorsync_coverage(tmp_path)
+    assert coverage is not None
+    assert coverage.capture.name == "Fly1_Streaming"
+    assert coverage.sync is not None and coverage.sync.name == "SyncData184"
+
+
+def test_thorsync_coverage_accepts_an_episode_started_by_hand_long_before(tmp_path):
+    sync = _make_sync_folder(tmp_path, "PAM7xCI80", "SyncData184", mtime=100.0)
+    os.utime(sync / "Episode001.h5", (1300.0, 1300.0))  # still growing at 1000
+    _make_image_folder(
+        tmp_path, "PAM7xCI80", "Fly1_Streaming", u_time=1000.0, last_frame_mtime=1400
+    )
+    coverage = thorsync_coverage(tmp_path)
+    assert coverage is not None and coverage.sync == sync
+
+
+def test_thorsync_coverage_reports_a_capture_thorsync_never_recorded(tmp_path):
+    # Real 2026-10-20: ThorImage's ThorSync box unticked for a whole day.
+    _make_sync_folder(tmp_path, "PAM7xCI80", "SyncData184", mtime=100.0)  # ended
+    _make_sync_folder(tmp_path, "PAM7xCI80", "SyncData185", mtime=2000.0)  # later
+    _make_image_folder(
+        tmp_path, "PAM7xCI80", "Fly1_Streaming", u_time=1000.0, last_frame_mtime=1400
+    )
+    coverage = thorsync_coverage(tmp_path)
+    assert coverage is not None
+    assert coverage.capture.name == "Fly1_Streaming"
+    assert coverage.sync is None
+
+
+def test_thorsync_coverage_is_none_without_a_capture(tmp_path):
+    _make_sync_folder(tmp_path, "PAM7xCI80", "SyncData184", mtime=100.0)
+    assert thorsync_coverage(tmp_path) is None
+    assert thorsync_coverage(tmp_path / "missing") is None
