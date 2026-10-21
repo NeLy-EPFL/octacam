@@ -130,7 +130,8 @@ goes. Picking a user (the Record tab's **User**, or `--user MD` on `gui` and
 `record`) replaces `[transfer].directory` with theirs, gives each plugin their
 own folders (a sub-table named after the plugin), brings back the last folder
 name they recorded under, and notes them in each recording's summary. The last
-user is remembered on this machine.
+user is remembered on this machine; `octacam record` without `--user` records
+as them, and warns so, naming where the data goes.
 
 ```toml
 [users.MD]

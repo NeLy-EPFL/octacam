@@ -19,7 +19,9 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   2P share). The Record tab picks the user from a list and adds a new one in a
   dialog that suggests and checks their folders (also `octacam users
   list|add`, and `--user` on `gui` and `record`); each user gets their last
-  folder name back, and summaries name who recorded.
+  folder name back, and summaries name who recorded. `record` without
+  `--user` warns that it records as the last user and says where the data
+  goes.
 - **Experiment / Fly / Take fields with Next fly** in the Record tab, and a
   **Ready?** strip saying what to fix before recording (cameras, boards, disk,
   destination, and each plugin's own checks).

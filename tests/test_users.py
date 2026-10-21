@@ -242,3 +242,31 @@ def test_saving_the_rig_config_keeps_its_users(rig):
     config = parse_config(find_config_file(config_dir))
     assert sorted(config.users) == ["MA", "MD"]
     assert config.users["MA"].plugins == {"twophoton": {"source": "/share/MA"}}
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_headless_record_says_who_it_records_as(rig, monkeypatch, caplog, explicit):
+    # Without --user it records as the last GUI user: a different person at
+    # the keyboard must see whose folders the data goes to.
+    import typer
+
+    import octacam.cli.record as record_cli
+
+    config_dir, nas, _ = rig
+    users.save_memory(config_dir, users.UserMemory(last_user="MD"))
+
+    def no_rig(*args, **kwargs):
+        raise typer.Exit(3)
+
+    monkeypatch.setattr(record_cli, "open_rig", no_rig)
+    monkeypatch.setattr("octacam.cli._setup_logging", lambda: None)
+    caplog.set_level(logging.INFO, logger="octacam")
+    argv = ["record", str(config_dir)] + (["--user", "MD"] if explicit else [])
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 3, result.output
+    (said,) = [r for r in caplog.records if "Recording as MD" in r.getMessage()]
+    assert said.levelno == (logging.INFO if explicit else logging.WARNING)
+    message = said.getMessage()
+    assert "Matthias Durrieu" in message
+    assert f"transfer to {nas / 'MD' / 'BallPushing_Imaging'}" in message
+    assert ("the last user on this machine" in message) is not explicit
