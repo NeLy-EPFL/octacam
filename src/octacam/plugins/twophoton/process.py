@@ -166,13 +166,18 @@ class TwoPhotonSteps(ProcessSteps):
         # periods to a stopped-early one.
         from octacam.plugins.twophoton.board_sync import write_board_syncs
 
-        write_board_syncs(
+        no_thorsync = write_board_syncs(
             sorted(
                 {d for f in target.folders if (d := ctx.dests.get(f)) is not None}
                 | {r.dest for r in self._renders if r.settings is settings}
             ),
             dry_run=options.dry_run,
         )
+        # Their AirFlow channel is missing too: airflow_control's logged commands.
+        if no_thorsync and (log_dir := settings.airflow_log_dir) is not None:
+            from octacam.plugins.twophoton.airflow import attach_airflow_commands
+
+            attach_airflow_commands(no_thorsync, log_dir, dry_run=options.dry_run)
 
         days = {
             target.dest_root / dest.relative_to(target.dest_root).parts[0]

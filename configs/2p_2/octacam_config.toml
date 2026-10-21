@@ -96,6 +96,7 @@ name = "twophoton"
 device = "/dev/arduinoCams"
 source = "/mnt/windows_share/MD"  # ThorImage/ThorSync experiments (2P processing)
 settle_s = 300
+airflow_logs = "~/airflow_control_logs"  # air commands, for a take without ThorSync
 
 [[visualization]]
 name = "grid.mp4"

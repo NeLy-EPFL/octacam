@@ -671,6 +671,7 @@ $ octacam twophoton board-sync [OPTIONS] {paths}...
 **Options**:
 
 * `-r, --reference <directory>`: More takes (or folders above them) to measure this rig's scan timing on, for takes whose board sent no report (before 2026-10-14): ones with ThorSync or a board report, other days too.
+* `--airflow-logs <directory>`: airflow_control's log folder: each take aligned here also gets the air commands logged during it (its missing AirFlow channel).
 * `--dry-run`: List what would be done, change nothing.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.

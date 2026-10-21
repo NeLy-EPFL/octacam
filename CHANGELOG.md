@@ -34,6 +34,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   is rendered. `octacam twophoton board-sync` backfills transferred takes,
   older ones too (before the board's report: from ThorImage's frames and the
   rig's scan timing measured on `--reference` takes).
+- **Air commands stand in for ThorSync's AirFlow** (`twophoton`): with the
+  plugin option `airflow_logs` (airflow_control's log folder), a take paired
+  without ThorSync gets the air commands logged during it
+  (`airflow_commands.jsonl`), which reproduce the AirFlow sensor's on/off on
+  99.9 % of camera frames. `board-sync --airflow-logs` backfills.
 - **2-photon firmware**: the first camera pulse of a run is always half a
   period after ThorSync's edge (it was half or a whole one, depending on the
   previous run), so a take without ThorSync starts within ~0.1 ms instead of

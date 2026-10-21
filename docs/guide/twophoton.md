@@ -29,6 +29,7 @@ checksum = true
 | --- | --- | --- |
 | `source` | `""` | The share's root: its experiment folders hold the `SyncData*` and ThorImage folders. Empty: no 2P processing. |
 | `match_thorimage` | `true` | A take ends when ThorImage stops (the Record tab's **Synced with ThorImage**). |
+| `airflow_logs` | `""` | airflow_control's log folder (e.g. `~/airflow_control_logs`): a take without ThorSync gets the air commands logged during it. |
 | `stop_idle_ms` | `2000` | The ThorSync input quiet this long means ThorImage stopped (at least 200). |
 | `max_duration_s` | `3600` | A synced take's safety limit. |
 | `match_window_s` | `5` | Pairing by start time: a take and a 2P folder starting this close. |
@@ -132,7 +133,11 @@ and metadata are transferred:
    where ThorSync would put it (checked against ThorSync on real takes); a
    capture stopped early in ThorImage borrows the 2P frame period of the
    day's completed captures. The synced video and scapepp use it in place of
-   ThorSync. AirFlow and the other ThorSync channels are lost.
+   ThorSync. The other ThorSync channels are lost; AirFlow is stood in for
+   when `airflow_logs` names airflow_control's log folder: the air commands it
+   logged during the take go beside it (`octacam_recording/airflow_commands.jsonl`;
+   they give the AirFlow sensor's on/off on 99.9 % of camera frames, checked
+   against ThorSync).
 2. **Sweep** the share for settled 2P data no take claims, filed under its
    fly when ThorImage's name tells which, else in the generic bucket.
 3. **Rewrite** the touched days' `2p_reconciliation.md`.
@@ -191,7 +196,7 @@ are read the same way.
 | `octacam twophoton reconcile DAYS_OR_FLIES -c <rig>` | Renumber flies (`--all`: every fly, and group the generic bucket into new flies). |
 | `octacam twophoton reassemble -c <rig> [FOLDERS]` | Stack ThorImage folders still holding per-frame TIFFs, then delete the frames. |
 | `octacam twophoton render PATHS` | Render (or re-render with `--force`) synced videos and Z-stack MIPs. |
-| `octacam twophoton board-sync PATHS` | Align takes transferred without ThorSync on the trigger board's clock (give a whole day: its completed captures time the stopped-early ones). A take from before the board's report (2026-10-14) needs `--reference` takes with ThorSync or a report (any day) to measure the rig's scan timing. |
+| `octacam twophoton board-sync PATHS` | Align takes transferred without ThorSync on the trigger board's clock (give a whole day: its completed captures time the stopped-early ones). A take from before the board's report (2026-10-14) needs `--reference` takes with ThorSync or a report (any day) to measure the rig's scan timing; `--airflow-logs` also attaches airflow_control's air commands. |
 
 Each takes `--dry-run` (but `verify`, which changes nothing anyway).
 

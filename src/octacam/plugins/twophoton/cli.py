@@ -446,6 +446,16 @@ def board_sync(
             "2026-10-14): ones with ThorSync or a board report, other days too.",
         ),
     ] = None,
+    airflow_logs: Annotated[
+        Path | None,
+        typer.Option(
+            "--airflow-logs",
+            exists=True,
+            file_okay=False,
+            help="airflow_control's log folder: each take aligned here also gets "
+            "the air commands logged during it (its missing AirFlow channel).",
+        ),
+    ] = None,
     dry_run: DryRun = False,
     verbose: Verbose = False,
 ) -> None:
@@ -467,6 +477,10 @@ def board_sync(
     written = write_board_syncs(
         takes, references=takes_under(reference or []), dry_run=dry_run
     )
+    if airflow_logs is not None and written:
+        from octacam.plugins.twophoton.airflow import attach_airflow_commands
+
+        attach_airflow_commands(written, airflow_logs, dry_run=dry_run)
     log.info(
         "board-sync: %d of %d take(s) aligned on the board's clock%s",
         len(written),

@@ -53,6 +53,10 @@ class TwoPhotonSettings(BaseModel):
     Renders (last): `render_synced_video` (behavior + 2P side by side, with the
     two channels' colors and FastZ projection below) and `render_zstack_mip`
     (each anatomical Z-stack's max projections).
+
+    `airflow_logs`: airflow_control's log folder; a take paired without ThorSync
+    gets the air commands logged during it, in place of ThorSync's AirFlow
+    channel (`airflow`).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -71,10 +75,17 @@ class TwoPhotonSettings(BaseModel):
     synced_red_channel: str = "ChanB"
     synced_fastz_projection: Literal["mean", "max"] = "mean"
     render_zstack_mip: bool = True
+    airflow_logs: str = ""
 
     @property
     def source_root(self) -> Path | None:
         return Path(resolve_dir_template(self.source)) if self.source else None
+
+    @property
+    def airflow_log_dir(self) -> Path | None:
+        if not self.airflow_logs:
+            return None
+        return Path(resolve_dir_template(self.airflow_logs)).expanduser()
 
 
 def _plugin_options(config: OctacamConfig) -> dict | None:
