@@ -34,6 +34,10 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   is rendered. `octacam twophoton board-sync` backfills transferred takes,
   older ones too (before the board's report: from ThorImage's frames and the
   rig's scan timing measured on `--reference` takes).
+- **2-photon firmware**: the first camera pulse of a run is always half a
+  period after ThorSync's edge (it was half or a whole one, depending on the
+  previous run), so a take without ThorSync starts within ~0.1 ms instead of
+  2.5 ms. Reflash with `octacam flash` (an older board still works).
 - **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
   its cells down; with its own faster `ffmpeg_params` a grid builds several
   times faster (see Configuration).

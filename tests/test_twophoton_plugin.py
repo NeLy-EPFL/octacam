@@ -7,6 +7,7 @@ import threading
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 import serial
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -847,6 +848,7 @@ def test_match_arm_sends_the_ceiling_and_idle_timeout():
         "armed": True,
         "match_thorimage": True,
         "stop_idle_ms": plugin.stop_idle_ms,
+        "firmware": None,  # the fake board sent no banner
     }
 
 
@@ -1022,8 +1024,27 @@ def test_the_take_info_lands_in_the_take_folder(tmp_path):
         "armed": True,
         "match_thorimage": True,
         "stop_idle_ms": 2000,
+        "firmware": None,
         "stop": report,
     }
+
+
+@pytest.mark.parametrize(
+    ("state", "phase"),
+    [("CURRENT", "half_period"), ("OUTDATED", None)],
+)
+def test_a_current_board_notes_where_its_camera_pulses_start(state, phase):
+    # The 2026-10-21 build starts a run's camera pulses half a period in; an
+    # older one carried its pin toggle over (board_sync reads this).
+    from octacam import firmware as fw
+
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    plugin.banner = "2PHOTON 2 abc123"
+    plugin.firmware_check = fw.FirmwareCheck(fw.FirmwareState[state], "", "abc123")
+    plugin.on_recording_start({"fps": 100})
+    info = plugin.take_info()
+    assert info["firmware"] == "2PHOTON 2 abc123"
+    assert info.get("camera_phase") == phase
 
 
 def test_an_unarmed_take_is_recorded_as_such(tmp_path):

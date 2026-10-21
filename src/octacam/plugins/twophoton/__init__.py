@@ -751,10 +751,19 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         """The take's 2P facts for `process`: whether it was armed (the
         operator's intent, not the handshake: it says whether to look for its 2P
         data at all), synced with ThorImage, and the board's STOP report (absent
-        when octacam ended the run: a manual stop or abort), and the wait
-        after ThorImage stopped it was armed with.
+        when octacam ended the run: a manual stop or abort), the wait
+        after ThorImage stopped it was armed with, and the board's firmware
+        (whose build fixes where the camera pulses start, see board_sync).
         """
         info: dict = {"armed": self._take_armed, "match_thorimage": self._take_synced}
+        if self._take_armed:
+            info["firmware"] = self.banner
+            # The current sketch starts each run's camera pulses half a period
+            # after ThorSync's edge; an older build, or an unknown one, may
+            # start them a whole period after (board_sync).
+            check = self.firmware_check
+            if check is not None and check.state is fw.FirmwareState.CURRENT:
+                info["camera_phase"] = "half_period"
         if self._take_synced:
             info["stop_idle_ms"] = self.stop_idle_ms
         if self._stop_report is not None:

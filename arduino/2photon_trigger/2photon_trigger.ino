@@ -88,11 +88,16 @@ static bool     g_last_trigger_high = false;
 
 // ---- Timer1 helpers (CTC mode, /8 prescaler) -------------------------------
 
+// The camera/sync pin level the ISR toggles. Reset by every timer1_start, so a
+// run's first rising edge always comes one half period after its start edge: a
+// level carried over from the previous run's parity made it a whole period
+// half the time (octacam's ThorSync-free alignment relies on the phase).
+static volatile bool g_cam_level = false;
+
 ISR(TIMER1_COMPA_vect) {
-  static bool level = false;
-  level = !level;
-  digitalWrite(kCameraPin, level);
-  digitalWrite(kSyncPin,   level);
+  g_cam_level = !g_cam_level;
+  digitalWrite(kCameraPin, g_cam_level);
+  digitalWrite(kSyncPin,   g_cam_level);
 }
 
 // Timer1 prescaler options, finest first. A fixed /8 prescaler overflowed the
@@ -126,6 +131,7 @@ static void timer1_start(const uint16_t fps) {
     }
   }
   cli();
+  g_cam_level = false;
   TCCR1A = 0;
   TCCR1B = 0;
   TCNT1  = 0;

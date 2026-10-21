@@ -18,6 +18,13 @@ input looked like (rising edges, HIGH time), so the first real take shows
 which one it is: about one edge per 2P frame = `FrameOut`, a single edge HIGH
 for the whole run = `CaptureOn`.
 
+The first camera pulse rises half a camera period after the start edge (5 ms
+at 100 fps): every run resets the pin toggle. Builds before 2026-10-21 carried
+it over from the previous run, so their first pulse came half or a whole
+period in (the "~0.1–11 ms" above). octacam aligns a take ThorSync did not
+record on this phase, the run's `STOP` report and the camera pulse period
+(`board_sync.py`), so keep the three as they are or update it with them.
+
 ## Hardware wiring
 
 | Signal         | Arduino Mega pin | Notes                                    |
