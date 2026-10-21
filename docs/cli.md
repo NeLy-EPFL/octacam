@@ -252,7 +252,7 @@ $ octacam process [OPTIONS] [paths]...
 * `--force`: Re-transcode and rebuild grids even when the output already exists. By default existing transcode/grid outputs are skipped (as the transfer step skips files already at the destination).
 * `-c, --config <directory>`: Fallback config dir for recordings that lack an embedded octacam_config.toml (older recordings). Normally not needed.
 * `-d, --delete-source`: Delete each source .mkv/.raw once it transcodes successfully. The recording's summary, timestamps and config snapshot are kept.
-* `--delete-after-transfer`: Remove each local recording once every file of it is on the [transfer] destination, content-verified (after its grids are built from it). Default: the config's [transfer].delete_after_transfer.
+* `--delete-after-transfer`: Remove each local recording once every file in it is accounted for at the [transfer] destination (after its grids are built from it): each copy content-verified, and a .mkv/.raw capture once its transcoded mp4 is there (captures are not copied). A folder with any other file missing there is kept. Default: the config's [transfer].delete_after_transfer.
 * `--no-delete-after-transfer`: Keep the local recordings even when the config's [transfer].delete_after_transfer is set.
 * `--progress-style <octacam|ffmpeg>`: How to show transcode progress. octacam (default): an octacam-style bar. ffmpeg: stream ffmpeg's own output verbatim.  [default: octacam]
 * `--dry-run`: List what each step would do (files to transcode, grids to build, files to transfer) without running ffmpeg, copying, or deleting anything. Work that is already done is only counted.

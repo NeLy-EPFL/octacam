@@ -1672,9 +1672,8 @@ def test_jobs_banner_shows_running_step_then_pause_then_end(page):
     assert "paused (building a grid video, 3 of 16 done)" in text
     assert "resumes when you close octacam" in text
     assert page.evaluate("window.__jobs.busyMessage()") is None
-    assert page.evaluate("window.__notes") == [
-        ["info", "Background processing paused — it resumes when you close octacam."]
-    ]
+    paused = "Background processing paused \u2014 it resumes when you close octacam."
+    assert page.evaluate("window.__notes") == [["info", paused]]
 
     _apply_jobs(page, [], [{"job_id": "j1", "state": "done", "error": None}])
     assert prop(page, "#jobs-banner", "e => e.classList.contains('hidden')") is True
@@ -1746,7 +1745,8 @@ def test_record_start_does_not_ask_when_no_job_is_busy(page):
 def test_jobs_notice_counts_warnings_and_reports_them_at_the_end(page):
     _jobs_notice(page)
     _apply_jobs(page, [{**RUNNING_JOB, "warning_count": 2}])
-    assert "⚠ 2 warnings so far" in prop(page, "#jobs-banner", "e => e.textContent")
+    banner = prop(page, "#jobs-banner", "e => e.textContent")
+    assert "\u26a0 2 warnings so far" in banner
     _apply_jobs(
         page,
         [],
@@ -1765,7 +1765,7 @@ def test_jobs_notice_counts_warnings_and_reports_them_at_the_end(page):
     level, message = page.evaluate("window.__notes")[-1]
     assert level == "warning"
     assert message.startswith(
-        "Background processing finished with 2 warnings — first: WARNING: ThorSync"
+        "Background processing finished with 2 warnings \u2014 first: WARNING: ThorSync"
     )
     assert "octacam jobs attach j1" in message
 

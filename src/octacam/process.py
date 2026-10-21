@@ -38,7 +38,7 @@ from octacam.recording_format import (
     walk_folders,
 )
 from octacam.transcode import transcode_file
-from octacam.transfer import transfer_folder
+from octacam.transfer import file_digest, transfer_folder
 
 if TYPE_CHECKING:
     from octacam.cli.process import FileProgressBar
@@ -212,6 +212,8 @@ def run(
         dests: dict[Path, Path | None] = {}
         # Each folder's failed copies: a folder with any keeps its local copy.
         failed_by_folder: dict[Path, int] = {}
+        # Each folder's files this run verified at its destination.
+        verified_by_folder: dict[Path, set[Path]] = {}
         if options.transfer:
             failed, dests = transfer_outputs(
                 done.outputs,
@@ -222,6 +224,7 @@ def run(
                 bar,
                 resolve_dest=resolve_dest,
                 failed_by_folder=failed_by_folder,
+                verified_by_folder=verified_by_folder,
             )
             transfer_failed += failed
         for plugin_steps, plugin_folders in steps:
@@ -248,12 +251,18 @@ def run(
                 label="Transfer (grids)",
                 dests=dests,  # as the plugins' steps left them
                 failed_by_folder=failed_by_folder,
+                verified_by_folder=verified_by_folder,
             )
             transfer_failed += failed
         if options.transfer:
             # After the grids, which are built from the local videos.
             delete_transferred(
-                dests, failed_by_folder, done.failed_folders, options, configs
+                dests,
+                failed_by_folder,
+                verified_by_folder,
+                done.failed_folders,
+                options,
+                configs,
             )
         for plugin_steps, plugin_folders in steps:
             transfer_failed += plugin_steps.render(
@@ -508,6 +517,7 @@ def transfer_outputs(
     dests: dict[Path, Path | None] | None = None,
     resolve_dest: Callable[[Path, Path], Path] | None = None,
     failed_by_folder: dict[Path, int] | None = None,
+    verified_by_folder: dict[Path, set[Path]] | None = None,
 ) -> tuple[int, dict[Path, Path | None]]:
     """Copy each folder's outputs, grids and (with *metadata*) metadata to its
     `[transfer]` destination, under its summary's `relative_directory`; return
@@ -515,8 +525,13 @@ def transfer_outputs(
     transferred). *dests* gives the destinations instead (an earlier pass's);
     *resolve_dest* may move a computed one (`ProcessSteps.transfer_dest`).
     *label* names the pass in its log line; *failed_by_folder* adds up each
-    folder's failures. A folder to be deleted afterwards (`deletes_local`) is
-    content-verified, already-present files included.
+    folder's failures and *verified_by_folder* collects the local files that
+    are now at the destination. A folder to be deleted afterwards
+    (`deletes_local`) is content-verified, already-present files included.
+
+    A destination that holds a different recording (its summary has another
+    start time: a take name reused) is never written over: the folder counts
+    as failed and is not transferred.
     """
     copied = skipped = failed = 0
     given = dests
@@ -547,6 +562,20 @@ def transfer_outputs(
                     )
                     if resolve_dest is not None:
                         dest = resolve_dest(folder, dest)
+                other = _other_recording(folder, dest)
+                if other is not None:
+                    log.error(
+                        "Not transferring %s: %s already holds a different "
+                        "recording (%s); move one of them, then re-run",
+                        folder,
+                        dest,
+                        other,
+                    )
+                    failed += 1
+                    if failed_by_folder is not None:
+                        failed_by_folder[folder] = failed_by_folder.get(folder, 0) + 1
+                    reporter.item_done()
+                    continue
                 result_dests[folder] = dest
                 deleting = deletes_local(folder, options, configs)
                 result = transfer_folder(
@@ -565,6 +594,12 @@ def transfer_outputs(
                 if failed_by_folder is not None and result.failed:
                     failed_by_folder[folder] = failed_by_folder.get(folder, 0) + len(
                         result.failed
+                    )
+                if verified_by_folder is not None:
+                    # A result names each file by its path relative to the
+                    # folder (`transfer._target`).
+                    verified_by_folder.setdefault(folder, set()).update(
+                        folder / name for name in result.copied + result.skipped
                     )
             reporter.item_done()
     if options.dry_run:
@@ -593,21 +628,32 @@ def deletes_local(
 def delete_transferred(
     dests: dict[Path, Path | None],
     failed_by_folder: dict[Path, int],
+    verified_by_folder: dict[Path, set[Path]],
     transcode_failed: set[Path],
     options: ProcessOptions,
     configs: dict[Path, OctacamConfig],
 ) -> None:
-    """Remove each local recording `deletes_local` names whose every file is
-    content-verified at its destination: none failed to transcode, transfer or
-    in a plugin's data step. A dry run lists them.
+    """Remove each local recording `deletes_local` names once every file in
+    it is accounted for at its destination (`unaccounted_files`), and nothing
+    failed to transcode, transfer or in a plugin's data step. A destination
+    that is the folder itself (or inside it, or around it) is never trusted.
+    A dry run lists what it would remove.
     """
     for folder, dest in dests.items():
         if dest is None or not deletes_local(folder, options, configs):
             continue
-        if folder in transcode_failed:
+        if _overlapping(folder, dest):
+            reason = f"the destination {dest} is the recording itself"
+        elif folder in transcode_failed:
             reason = "a file failed to transcode"
         elif failed_by_folder.get(folder):
             reason = f"{failed_by_folder[folder]} file(s) failed to transfer"
+        elif missing := unaccounted_files(
+            folder, dest, verified_by_folder.get(folder, set())
+        ):
+            shown = ", ".join(p.as_posix() for p in missing[:5])
+            more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+            reason = f"{len(missing)} file(s) are not at {dest}: {shown}{more}"
         else:
             reason = None
         if reason is not None:
@@ -621,6 +667,74 @@ def delete_transferred(
                 log.error("Could not remove local %s: %s", folder, e)
             else:
                 log.info("Removed local %s (verified at %s)", folder, dest)
+
+
+# A recording's own captures: once its transcoded .mp4 is verified at the
+# destination, a capture is accounted for (the transfer never copies one).
+CAPTURE_SUFFIXES = (".mkv", ".raw")
+
+
+def unaccounted_files(folder: Path, dest: Path, verified: set[Path]) -> list[Path]:
+    """The files of *folder* (relative to it) a delete would lose: neither
+    verified at *dest* by this run's transfer (*verified*), nor a capture whose
+    transcoded `.mp4` is, nor already at the same place under *dest* with the
+    same content (a plugin's own copy). octacam's partial temps and a Mac's
+    `._` forks are not data.
+    """
+    missing: list[Path] = []
+    for path in sorted(p for p in folder.rglob("*") if p.is_file()):
+        name = path.name
+        if path in verified or is_partial(path) or name.startswith("._"):
+            continue
+        if name == ".DS_Store":
+            continue
+        if path.suffix in CAPTURE_SUFFIXES and path.with_suffix(".mp4") in verified:
+            continue
+        rel = path.relative_to(folder)
+        if not _same_content(path, dest / rel):
+            missing.append(rel)
+    return missing
+
+
+def _same_content(path: Path, other: Path) -> bool:
+    try:
+        if not other.is_file() or other.stat().st_size != path.stat().st_size:
+            return False
+        return file_digest(other) == file_digest(path)
+    except OSError:
+        return False
+
+
+def _overlapping(folder: Path, dest: Path) -> bool:
+    """Whether *dest* is *folder*, inside it or around it (a recording
+    processed where it already is, on the destination).
+    """
+    try:
+        if dest.exists() and folder.samefile(dest):
+            return True
+        a, b = folder.resolve(), dest.resolve()
+    except OSError:
+        return True  # unknowable: never trust it
+    return a == b or a.is_relative_to(b) or b.is_relative_to(a)
+
+
+def _start_of(summary: dict) -> object:
+    return summary.get("start_time_ns") or summary.get("start_time")
+
+
+def _other_recording(folder: Path, dest: Path) -> str | None:
+    """Why *dest* holds a different recording than *folder* (its summary
+    starts at another time), else None: the same recording, no recording
+    there yet, or no start time to compare.
+    """
+    if _overlapping(folder, dest) or not recording_summary_path(dest).is_file():
+        return None
+    mine, theirs = _read_summary(folder), _read_summary(dest)
+    start, other = _start_of(mine or {}), _start_of(theirs or {})
+    if start is None or other is None or start == other:
+        return None
+    started = (theirs or {}).get("start_time") or other
+    return f"started {started}"
 
 
 def is_stale(output: Path, source: Path) -> bool:

@@ -401,9 +401,12 @@ def process(
         bool,
         typer.Option(
             "--delete-after-transfer",
-            help="Remove each local recording once every file of it is on the "
-            "[transfer] destination, content-verified (after its grids are built "
-            "from it). Default: the config's [transfer].delete_after_transfer.",
+            help="Remove each local recording once every file in it is accounted "
+            "for at the [transfer] destination (after its grids are built from "
+            "it): each copy content-verified, and a .mkv/.raw capture once its "
+            "transcoded mp4 is there (captures are not copied). A folder with any "
+            "other file missing there is kept. Default: the config's "
+            "[transfer].delete_after_transfer.",
         ),
     ] = False,
     keep_local: Annotated[

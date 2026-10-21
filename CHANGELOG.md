@@ -79,11 +79,8 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   (`ProcessSteps.transfer_dest`, `ctx.dests`). A plugin can also add a command
   group (`octacam <name> ...`, from `plugins._COMMANDS`) and its own `octacam
   doctor` checks (`Plugin.doctor`).
-- **`[transfer].delete_after_transfer`** (and `process
-  --delete-after-transfer/--no-delete-after-transfer`) removes each local
-  recording once all of it is content-verified at the destination, after its
-  grids. `transfer.transfer_tree` copies a whole folder the same way, for a
-  plugin's acquisition data.
+- **`[transfer].delete_after_transfer`** (and `process --delete-after-transfer/--no-delete-after-transfer`) removes each local recording once every file in it is accounted for at the destination, after its grids: content-verified copies, and each capture once its mp4 is there. A folder with any other file missing there, or whose destination is the folder itself, is kept. `transfer.transfer_tree` copies a whole folder the same way, for a plugin's acquisition data.
+- **The transfer never writes over a different recording**: a destination whose summary started at another time (a take name reused) is left alone and the folder counts as failed.
 - **A plugin can end the take itself**: `Plugin.take_ceiling_s` returns a
   safety ceiling that replaces the set duration (deadline and pulse count),
   and `controller.finish_recording(name)` ends the take as *completed* (not an
