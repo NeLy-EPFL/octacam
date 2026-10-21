@@ -1092,6 +1092,14 @@ files already present (videos by size; the small metadata files by content,
 since an edited config is often the same size), so a killed copy simply
 resumes — at most the one in-progress file is redone. Set <code>checksum = false</code> for a faster size-only
 verify on trusted, fast links.</p>
+<p><strong>A destination holding another recording is never written over.</strong> When the destination folder already holds a recording that started at a different time (a take name reused, say after its first local copy was deleted), <code>process</code> leaves both alone, counts the folder as failed and names them; move one aside and re-run.</p>
+<p><strong>Deleting the local copy.</strong> With <code>delete_after_transfer = true</code> (or <code>--delete-after-transfer</code> for one run; <code>--no-delete-after-transfer</code> overrides the config), <code>process</code> removes each local recording folder once every file in it is accounted for at the destination: every copy is content-verified then, whatever <code>checksum</code> says, and files already there are compared by content, not size. The raw captures (<code>.mkv</code> / <code>.raw</code>) are never copied: each counts once its transcoded mp4 is verified there, so the capture is deleted with the folder. It runs after the grids, which are built from the local videos, and keeps the folder, naming the reason, when:</p>
+<ul>
+<li>a file failed to transcode or transfer, or the folder's plugin step failed;</li>
+<li>any other file in it is not at the destination with the same content (a camera never transcoded, a note of your own, a plugin's pending record);</li>
+<li>the destination is the folder itself, as when processing a recording that already sits on the destination.</li>
+</ul>
+<p><code>--dry-run</code> lists what it would remove.</p>
 <h2 id="selecting-recordings-from-the-cache">Selecting recordings from the cache<a class="headerlink" href="#selecting-recordings-from-the-cache" title="Permanent link">&para;</a></h2>
 <p>Instead of typing paths, let octacam remember where it recorded. Every finished
 recording (from the GUI or <code>octacam record</code>) is noted in a small cache under

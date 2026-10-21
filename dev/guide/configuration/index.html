@@ -1127,6 +1127,7 @@ disable transfer.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">[transfer]</span>
 <a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/mnt/store/matthias"</span><span class="w">    </span><span class="c1"># strftime %-codes expand here too</span>
 <a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="n">checksum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w">                      </span><span class="c1"># content-verify each copy (default)</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="n">delete_after_transfer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="w">        </span><span class="c1"># keep the local recording (default)</span>
 </code></pre></div>
 <table>
 <thead>
@@ -1146,6 +1147,11 @@ disable transfer.</p>
 <td><code>checksum</code></td>
 <td><code>true</code></td>
 <td>blake2b content-verify each copy. <code>false</code> = faster size-only verify.</td>
+</tr>
+<tr>
+<td><code>delete_after_transfer</code></td>
+<td><code>false</code></td>
+<td>Remove the local recording once every file in it is accounted for at the destination: content-verified copies, and each capture once its mp4 is there. See <a href="../processing/#transfer">Deleting the local copy</a>.</td>
 </tr>
 </tbody>
 </table>
