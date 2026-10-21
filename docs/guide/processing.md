@@ -140,6 +140,16 @@ since an edited config is often the same size), so a killed copy simply
 resumes — at most the one in-progress file is redone. Set `checksum = false` for a faster size-only
 verify on trusted, fast links.
 
+**A destination holding another recording is never written over.** When the destination folder already holds a recording that started at a different time (a take name reused, say after its first local copy was deleted), `process` leaves both alone, counts the folder as failed and names them; move one aside and re-run.
+
+**Deleting the local copy.** With `delete_after_transfer = true` (or `--delete-after-transfer` for one run; `--no-delete-after-transfer` overrides the config), `process` removes each local recording folder once every file in it is accounted for at the destination: every copy is content-verified then, whatever `checksum` says, and files already there are compared by content, not size. The raw captures (`.mkv` / `.raw`) are never copied: each counts once its transcoded mp4 is verified there, so the capture is deleted with the folder. It runs after the grids, which are built from the local videos, and keeps the folder, naming the reason, when:
+
+- a file failed to transcode or transfer, or the folder's plugin step failed;
+- any other file in it is not at the destination with the same content (a camera never transcoded, a note of your own, a plugin's pending record);
+- the destination is the folder itself, as when processing a recording that already sits on the destination.
+
+`--dry-run` lists what it would remove.
+
 ## Selecting recordings from the cache
 
 Instead of typing paths, let octacam remember where it recorded. Every finished

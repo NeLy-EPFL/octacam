@@ -112,12 +112,14 @@ disable transfer.
 [transfer]
 directory = "/mnt/store/matthias"    # strftime %-codes expand here too
 checksum = true                      # content-verify each copy (default)
+delete_after_transfer = false        # keep the local recording (default)
 ```
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `directory` | `""` | Destination base folder; recordings mirror into it under their relative directory. Blank disables transfer. |
 | `checksum` | `true` | blake2b content-verify each copy. `false` = faster size-only verify. |
+| `delete_after_transfer` | `false` | Remove the local recording once every file in it is accounted for at the destination: content-verified copies, and each capture once its mp4 is there. See [Deleting the local copy](processing.md#transfer). |
 
 See [Processing → Transfer](processing.md#transfer).
 

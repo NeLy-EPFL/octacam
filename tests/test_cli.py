@@ -2870,3 +2870,241 @@ def test_a_plugin_that_moves_a_take_steers_its_grids_and_a_rerun(tmp_path, monke
     assert result.exit_code == 0, result.output
     assert sorted(p.name for p in dest_root.iterdir()) == ["Recording1"]
     assert (renamed / "camera_LF.mp4").read_bytes() == b"re-encoded"
+
+
+def _deleting_recording(tmp_path, monkeypatch, delete_toml=True):
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    toml = _transfer_toml(dest_root)
+    if delete_toml:
+        toml += "delete_after_transfer = true\n"
+    _make_recording(folder, with_outputs=True, extra_toml=toml)
+    (folder / "grid.mp4").unlink()  # built by the run, from the local videos
+
+    def build_grid(source, *args, output, **kwargs):
+        assert (source / "camera_LF.mp4").is_file()  # still local
+        output.write_bytes(b"grid")
+        return output
+
+    monkeypatch.setattr("octacam.process.build_grid_video", build_grid)
+    _forbid(monkeypatch, "octacam.process.transcode_file")
+    return folder, dest_root / folder.name
+
+
+def test_delete_after_transfer_removes_the_local_copy_once_verified(
+    tmp_path, monkeypatch
+):
+    folder, dest = _deleting_recording(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert not folder.exists()
+    assert (dest / "camera_LF.mp4").read_bytes() == b"finished-transcode"
+    assert (dest / "grid.mp4").read_bytes() == b"grid"
+
+
+def test_delete_after_transfer_keeps_a_folder_with_a_failed_copy(tmp_path, monkeypatch):
+    folder, _dest = _deleting_recording(tmp_path, monkeypatch)
+    from octacam import process as process_mod
+
+    real = process_mod.transfer_folder
+
+    def failing(src, dest, files_only, **kwargs):
+        result = real(src, dest, files_only, **kwargs)
+        result.failed.append("camera_LF.mp4")
+        return result
+
+    monkeypatch.setattr("octacam.process.transfer_folder", failing)
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code != 0
+    assert (folder / "camera_LF.mp4").is_file()
+
+
+def test_delete_after_transfer_flag_overrides_the_config_and_dry_run_only_lists(
+    tmp_path, monkeypatch
+):
+    folder, _dest = _deleting_recording(tmp_path, monkeypatch, delete_toml=False)
+    result = runner.invoke(
+        app,
+        [
+            "process",
+            "--no-transcode",
+            "--delete-after-transfer",
+            "--dry-run",
+            str(folder),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (folder / "camera_LF.mp4").is_file()
+    result = runner.invoke(
+        app, ["process", "--no-transcode", "--delete-after-transfer", str(folder)]
+    )
+    assert result.exit_code == 0, result.output
+    assert not folder.exists()
+
+
+def test_no_delete_after_transfer_keeps_what_the_config_would_remove(
+    tmp_path, monkeypatch
+):
+    folder, _dest = _deleting_recording(tmp_path, monkeypatch)
+    result = runner.invoke(
+        app, ["process", "--no-transcode", "--no-delete-after-transfer", str(folder)]
+    )
+    assert result.exit_code == 0, result.output
+    assert (folder / "camera_LF.mp4").is_file()
+
+
+def _add_camera(folder, name, *, transcoded):
+    """Add a second camera to a `_make_recording` summary (its capture, and
+    its mp4 when *transcoded*).
+    """
+    from octacam.recording_format import RECORDING_SUMMARY_FILENAME
+
+    summary = folder / RECORDING_SUMMARY_FILENAME
+    data = json.loads(summary.read_text())
+    data["cameras"].append(dict(data["cameras"][0], name=name, file=f"{name}.mkv"))
+    summary.write_text(json.dumps(data))
+    (folder / f"{name}.mkv").write_bytes(b"source-bytes")
+    if transcoded:
+        (folder / f"{name}.mp4").write_bytes(b"finished-transcode")
+
+
+def test_delete_after_transfer_keeps_a_camera_never_transcoded(
+    tmp_path, monkeypatch, process_log
+):
+    # With --no-transcode the outputs are the mp4s present: a camera whose
+    # capture never got one is on the destination in no form.
+    folder, dest = _deleting_recording(tmp_path, monkeypatch)
+    _add_camera(folder, "camera_RF", transcoded=False)
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert (folder / "camera_RF.mkv").read_bytes() == b"source-bytes"
+    assert (dest / "camera_LF.mp4").is_file()
+    assert any(
+        "Keeping local" in m and "camera_RF.mkv" in m for m in process_log.messages
+    )
+
+
+def test_delete_after_transfer_keeps_a_file_that_is_not_at_the_destination(
+    tmp_path, monkeypatch, process_log
+):
+    folder, _dest = _deleting_recording(tmp_path, monkeypatch)
+    (folder / "notes.md").write_text("fly looked sleepy")
+    (folder / "extra").mkdir()
+    (folder / "extra" / "data.bin").write_bytes(b"x")
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert (folder / "notes.md").is_file() and (folder / "extra" / "data.bin").is_file()
+    (message,) = [m for m in process_log.messages if "Keeping local" in m]
+    assert "2 file(s)" in message and "notes.md" in message
+
+
+def test_delete_after_transfer_deletes_captures_once_their_mp4_is_there(
+    tmp_path, monkeypatch
+):
+    # The captures are never copied: each is accounted for by its verified mp4.
+    folder, dest = _deleting_recording(tmp_path, monkeypatch)
+    _add_camera(folder, "camera_RF", transcoded=True)
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert not folder.exists()
+    assert (dest / "camera_RF.mp4").is_file() and not (dest / "camera_RF.mkv").exists()
+
+
+def test_delete_after_transfer_never_removes_the_destination_itself(
+    tmp_path, monkeypatch, process_log
+):
+    # A recording processed where it already is on the destination (to rebuild
+    # its grids, say): every file "matches" itself.
+    folder = tmp_path / "rec"
+    toml = _transfer_toml(tmp_path) + "delete_after_transfer = true\n"
+    _make_recording(folder, with_outputs=True, extra_toml=toml)
+
+    def build_grid(*args, output, **kwargs):
+        output.write_bytes(b"grid")
+        return output
+
+    monkeypatch.setattr("octacam.process.build_grid_video", build_grid)
+    _forbid(monkeypatch, "octacam.process.transcode_file")
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert (folder / "camera_LF.mp4").is_file() and (folder / "camera_LF.mkv").is_file()
+    assert any(
+        "Keeping local" in m and "is the recording itself" in m
+        for m in process_log.messages
+    )
+
+
+def _set_start(folder, start_ns):
+    from octacam.recording_format import RECORDING_SUMMARY_FILENAME
+
+    summary = folder / RECORDING_SUMMARY_FILENAME
+    data = json.loads(summary.read_text())
+    data["start_time_ns"] = start_ns
+    summary.write_text(json.dumps(data))
+
+
+def test_transfer_never_writes_over_a_different_recording(
+    tmp_path, monkeypatch, process_log
+):
+    # A take name reused once the first take's local copy was deleted: the
+    # second take must not replace the first on the destination.
+    folder, dest = _deleting_recording(tmp_path, monkeypatch)
+    _set_start(folder, 1_000)
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert not folder.exists()
+
+    _make_recording(folder, with_outputs=True, extra_toml=_transfer_toml(dest.parent))
+    (folder / "camera_LF.mp4").write_bytes(b"the second take")
+    _set_start(folder, 2_000)
+    result = runner.invoke(
+        app, ["process", "--no-transcode", "--delete-after-transfer", str(folder)]
+    )
+    assert result.exit_code != 0
+    assert (dest / "camera_LF.mp4").read_bytes() == b"finished-transcode"
+    assert (folder / "camera_LF.mp4").read_bytes() == b"the second take"
+    assert any("different recording" in m for m in process_log.messages)
+
+
+def test_transfer_updates_the_same_recording_at_the_destination(tmp_path, monkeypatch):
+    # The same take re-transcoded (same start time) is copied over as before.
+    folder, dest = _deleting_recording(tmp_path, monkeypatch, delete_toml=False)
+    _set_start(folder, 1_000)
+    assert runner.invoke(app, ["process", "--no-transcode", str(folder)]).exit_code == 0
+    (folder / "camera_LF.mp4").write_bytes(b"re-encoded")
+    assert runner.invoke(app, ["process", "--no-transcode", str(folder)]).exit_code == 0
+    assert (dest / "camera_LF.mp4").read_bytes() == b"re-encoded"
+
+
+@pytest.mark.parametrize("copied", [True, False])
+def test_delete_after_transfer_counts_a_plugin_s_own_copy(
+    tmp_path, monkeypatch, copied
+):
+    # A plugin's data step may write a file into the recording after the
+    # metadata went (twophoton's match record, which it copies itself, or its
+    # pending record, which stays local until the 2P data settles).
+    from octacam import plugins as plugins_mod
+    from octacam.plugins.base import Plugin
+    from octacam.process import ProcessSteps
+
+    folder, _dest = _deleting_recording(tmp_path, monkeypatch)
+    toml = (folder / "octacam_config.toml").read_text()
+    (folder / "octacam_config.toml").write_text(toml + '[[plugins]]\nname = "spy"\n')
+
+    class SpySteps(ProcessSteps):
+        def after_transfer(self, ctx):
+            (take,) = ctx.folders
+            (take / "spy.json").write_text("{}")
+            if copied:
+                (ctx.dests[take] / "spy.json").write_text("{}")
+            return 0
+
+    class Spy(Plugin):
+        name = "spy"
+        process_steps = SpySteps
+
+    monkeypatch.setitem(plugins_mod._PLUGINS, "spy", "tests:unused")
+    monkeypatch.setattr(plugins_mod, "plugin_class", lambda name: Spy)
+    result = runner.invoke(app, ["process", "--no-transcode", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert folder.exists() is not copied

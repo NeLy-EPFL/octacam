@@ -25,6 +25,10 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   group (`octacam <name> ...`, from `plugins._COMMANDS`) and its own `octacam
   doctor` checks (`Plugin.doctor`).
 
+- **`[transfer].delete_after_transfer`** (and `process --delete-after-transfer/--no-delete-after-transfer`) removes each local recording once every file in it is accounted for at the destination, after its grids: content-verified copies, and each capture once its mp4 is there. A folder with any other file missing there, or whose destination is the folder itself, is kept. `transfer.transfer_tree` copies a whole folder the same way, for a plugin's acquisition data.
+
+- **The transfer never writes over a different recording**: a destination whose summary started at another time (a take name reused) is left alone and the folder counts as failed.
+
 - **The GUI shows background processing.** While a detached `octacam
   process` job runs, a strip along the bottom of the camera view says what it
   is doing and how long the current step has left; once that step is done the
@@ -184,6 +188,9 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **The transfer copies every file of a recording's `octacam_recording`
+  folder**, a plugin's own included (it copied only the files it knew by name,
+  so with a delete after transfer a plugin's facts were lost).
 - **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
   error, which made a request for a missing feature or command a 500; it is a
   clean "no such node" again.

@@ -75,7 +75,7 @@ class TransferResult:
     failed: list[str] = dataclasses.field(default_factory=list)
 
 
-def _file_digest(path: Path, on_chunk: Callable[[int], None] | None = None) -> str:
+def file_digest(path: Path, on_chunk: Callable[[int], None] | None = None) -> str:
     """blake2b hex digest of *path*; *on_chunk* gets the bytes read so far."""
     h = hashlib.blake2b()
     read = 0
@@ -195,7 +195,7 @@ def _copy_one(
                     )
 
                 on_chunk = _emit_verify
-            if _file_digest(tmp, on_chunk) != src_digest:
+            if file_digest(tmp, on_chunk) != src_digest:
                 tmp.unlink(missing_ok=True)
                 return False
         elif tmp.stat().st_size != size:
@@ -224,20 +224,25 @@ def _should_skip(src: Path, final: Path, *, by_content: bool) -> bool:
     if final.stat().st_size != src.stat().st_size:
         return False
     if by_content:
-        return _file_digest(final) == _file_digest(src)
+        return file_digest(final) == file_digest(src)
     return True
 
 
 def _metadata_files(folder: Path) -> list[Path]:
-    """The summary, timestamps, config snapshot and camera parameter files, from
-    `recording_info_dir` only: a folder recorded into
-    again carries the new take's metadata, not an older flat take's leftovers.
+    """The recording's metadata, from `recording_info_dir` only (a folder
+    recorded into again carries the new take's, not an older flat take's
+    leftovers): every file of its `octacam_recording` subfolder, plugins'
+    included (the twophoton plugin's twophoton.json); for an older flat
+    recording, the summary, timestamps, config snapshot and camera parameter
+    files beside its videos.
     """
     info = recording_info_dir(folder)
     names = [RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME, CONFIG_SNAPSHOT_FILENAME]
     files = [info / name for name in names]
     for ext in PARAM_FILE_EXTENSIONS:
         files.extend(sorted(info.glob(f"*.{ext}")))
+    if info != folder:  # the rest of the metadata folder too
+        files += sorted(p for p in info.iterdir() if p.is_file() and p not in files)
     # Hidden files (the "._name" forks a Mac leaves on a share) are not metadata.
     return [f for f in files if f.is_file() and not f.name.startswith(".")]
 
@@ -263,6 +268,7 @@ def transfer_folder(
     verify: bool = True,
     on_progress: TransferCallback | None = None,
     metadata: bool = True,
+    by_content: bool = False,
 ) -> TransferResult:
     """Copy *files_only* (the processed videos) and, with *metadata*, the
     recording's metadata from *folder* into *dest*.
@@ -270,12 +276,14 @@ def transfer_folder(
     *dry_run* touches nothing and reports a file already matching at *dest* as
     skipped, any other (even an output not produced yet) as copied. *verify*
     compares each copy's digest with the source's before the rename, else only
-    its size. *on_progress* gets a `TransferProgress` per chunk.
+    its size. *by_content* skips a file already at *dest* only when its digest
+    matches too (before deleting the source). *on_progress* gets a
+    `TransferProgress` per chunk.
     """
     candidates = list(files_only)
     meta_files = _metadata_files(folder) if metadata else []
     candidates += [f for f in meta_files if f not in candidates]
-    by_content = set(meta_files)
+    compared = set(candidates) if by_content else set(meta_files)
 
     result = TransferResult(dest=dest)
 
@@ -284,12 +292,12 @@ def transfer_folder(
         return result
     # (source, destination path, the name the result reports it by)
     plan = [
-        (f, *_target(folder, dest, f, metadata=f in by_content)) for f in candidates
+        (f, *_target(folder, dest, f, metadata=f in meta_files)) for f in candidates
     ]
 
     if dry_run:
         for f, target, label in plan:
-            if f.exists() and _should_skip(f, target, by_content=f in by_content):
+            if f.exists() and _should_skip(f, target, by_content=f in compared):
                 result.skipped.append(label)
             else:
                 log.info("[dry-run] transfer: %s \N{RIGHTWARDS ARROW} %s", f, target)
@@ -306,7 +314,7 @@ def transfer_folder(
     n = len(plan)
     for idx, (f, target, label) in enumerate(plan, 1):
         try:
-            if _should_skip(f, target, by_content=f in by_content):
+            if _should_skip(f, target, by_content=f in compared):
                 result.skipped.append(label)  # counted, not logged per file
                 continue
             # The metadata subfolder, when the recording has one.
@@ -323,4 +331,57 @@ def transfer_folder(
             log.error("Failed to transfer %s: %s", f, e)
             result.failed.append(label)
 
+    return result
+
+
+def transfer_tree(
+    src_dir: Path,
+    dest_dir: Path,
+    *,
+    dry_run: bool = False,
+    verify: bool = True,
+    by_content: bool = False,
+    on_progress: TransferCallback | None = None,
+    exclude: frozenset[Path] = frozenset(),
+) -> TransferResult:
+    """Copy every file under *src_dir* (but *exclude*) to the same relative
+    path under *dest_dir*, as `transfer_folder` copies one (atomic, verified,
+    skipped when already there): for a whole acquisition folder a plugin's
+    processing step transfers, such as a microscope's.
+    """
+    files = sorted(p for p in src_dir.rglob("*") if p.is_file() and p not in exclude)
+    result = TransferResult(dest=dest_dir)
+    if not files:
+        log.warning("Nothing to transfer from %s", src_dir)
+        return result
+    n = len(files)
+    for idx, f in enumerate(files, 1):
+        label = f.relative_to(src_dir).as_posix()
+        target = dest_dir / label
+        try:
+            if _should_skip(f, target, by_content=by_content):
+                result.skipped.append(label)
+            elif dry_run:
+                log.info("[dry-run] transfer: %s \N{RIGHTWARDS ARROW} %s", f, target)
+                result.copied.append(label)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if _copy_one(f, target, idx, n, verify=verify, on_progress=on_progress):
+                    result.copied.append(label)
+                else:
+                    log.error(
+                        "Transfer: %s failed verification \N{EM DASH} not copied",
+                        label,
+                    )
+                    result.failed.append(label)
+        except OSError as e:
+            log.error("Failed to transfer %s: %s", f, e)
+            result.failed.append(label)
+    if result.copied and not dry_run:
+        log.info(
+            "Transfer: %s \N{RIGHTWARDS ARROW} %s (%d file(s))",
+            src_dir.name,
+            dest_dir,
+            len(result.copied),
+        )
     return result
