@@ -366,6 +366,9 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         self.max_duration_s = max(1.0, float(max_duration_s))
         self.source = source
         self._configured_source = source  # the rig's, when the user sets none
+        # The chosen user's delete_share_data (None: they set none), carried
+        # into their recordings' snapshots for `octacam process`.
+        self._user_delete_share: bool | None = None
         # The take in progress (or the last one): its folder, whether it was
         # armed and synced with ThorImage, and the board's STOP report for it.
         self._take_dir: Path | None = None
@@ -408,8 +411,10 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
 
     def on_user(self, options: dict) -> None:
         """The chosen user's 2P share folder (else the rig's); the ThorSync
-        check then reads theirs.
+        check then reads theirs. Their delete_share_data goes with their takes.
         """
+        delete = options.get("delete_share_data")
+        self._user_delete_share = None if delete is None else _as_bool(delete, False)
         source = str(options.get("source") or self._configured_source)
         if source != self.source:
             self.source = source
@@ -419,11 +424,16 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
 
     def snapshot_options(self, params: dict | None) -> dict | None:
         """A recording made for a user keeps their share in its snapshot, so
-        `octacam process` looks for its 2P data there.
+        `octacam process` looks for its 2P data there, and their choice to
+        delete it once verified (delete_share_data: each person decides for
+        their own data).
         """
-        return (
-            {"source": self.source} if self.source != self._configured_source else None
-        )
+        options: dict = {}
+        if self.source != self._configured_source:
+            options["source"] = self.source
+        if self._user_delete_share is not None:
+            options["delete_share_data"] = self._user_delete_share
+        return options or None
 
     def busy_reason(self) -> str | None:
         if self.board_state in ("armed", "triggered"):

@@ -369,12 +369,21 @@ def write_source_marker(dest: Path, experiment: str) -> None:
     write_json(dest / TWOPHOTON_2P_ONLY_SOURCE_FILENAME, {"experiment": experiment})
 
 
-def remove_sources(paths: list[Path]) -> None:
-    """Delete verified share folders. A refused delete (the share's account
-    has no delete right: a `noperm` CIFS mount) is reported once for all.
+def remove_sources(paths: list[Path], root: Path | None) -> None:
+    """Delete verified share folders, only ones inside *root* (the user's 2P
+    folder on the share; None deletes nothing): another person's data is never
+    removed. A refused delete (the share's account has no delete right: a
+    `noperm` CIFS mount) is reported once for all.
     """
     denied: list[Path] = []
     for path in paths:
+        if not _inside(path, root):
+            log.warning(
+                "Not removing 2P source %s: it is outside the user's share folder %s",
+                path,
+                root,
+            )
+            continue
         try:
             shutil.rmtree(path)
             log.info("Removed 2P source %s (verified at the destination)", path)
@@ -393,6 +402,17 @@ def remove_sources(paths: list[Path]) -> None:
             ", ".join(p.name for p in denied),
             " ".join(experiments),
         )
+
+
+def _inside(path: Path, root: Path | None) -> bool:
+    """Whether *path* is strictly inside *root* (never *root* itself)."""
+    if root is None:
+        return False
+    try:
+        a, b = path.resolve(), root.resolve()
+    except OSError:
+        return False
+    return a != b and a.is_relative_to(b)
 
 
 def settled(matches: list[TwoPhotonMatch], settings: TwoPhotonSettings) -> bool:

@@ -44,6 +44,7 @@ checksum = true
 | `synced_green_channel`, `synced_red_channel` | `ChanA`, `ChanB` | The ThorImage channels shown green and red. |
 | `synced_fastz_projection` | `mean` | How a FastZ timepoint's planes are combined (`mean` or `max`). |
 | `render_zstack_mip` | `true` | Render each anatomical Z-stack's max projections. |
+| `delete_share_data` | `false` | With `delete_after_transfer`, delete your share folders once verified at the destination. Set it in your own `[users.<initials>.twophoton]`. |
 
 Each person keeps their own share folder as a user (see
 [Users](configuration.md#users)): `[users.MD.twophoton] source = ...`, set from
@@ -151,9 +152,13 @@ episode is read once (its capture windows are kept in octacam's cache), and a
 2P folder whose copy was verified is not compared again by a later run unless
 its files changed (`.octacam_verified.json` in the copy; `octacam twophoton
 verify` always compares afresh). With
-`[transfer].delete_after_transfer`, a share folder is deleted once its copy is
+`[transfer].delete_after_transfer` **and the user's own
+`delete_share_data = true`**, a share folder is deleted once its copy is
 verified: a paired take's, and 2P-only data the sweep files (a Z-stack, a
-test). The share's account needs delete rights on the 2P PC for that (on a
+test). Each person decides for their own data: set it in your
+`[users.<initials>.twophoton]` table (the recording's snapshot keeps it); a
+user who does not keeps their 2P data on the imaging PC, copied but not
+deleted. Nothing outside the user's `source` folder is ever deleted. The share's account needs delete rights on the 2P PC for that (on a
 `noperm` CIFS mount the Windows server alone decides); without them octacam
 says so once and keeps going. `octacam twophoton verify` tells which folders
 are safe to delete, and `octacam twophoton verify --delete` deletes exactly
@@ -190,7 +195,7 @@ are read the same way.
 
 | Command | What it does |
 | --- | --- |
-| `octacam twophoton verify [SHARE_FOLDERS] -c <rig>` | Which share folders are verifiably at the destination (read-only; a stacked channel is compared page by page). `--delete` deletes the ones verified. |
+| `octacam twophoton verify [SHARE_FOLDERS] -c <rig>` | Which share folders are verifiably at the destination (read-only; a stacked channel is compared page by page). `--delete` deletes the ones verified, inside the share folder only. `--user` uses a user's share folder and destination (also for `sweep`). |
 | `octacam twophoton sweep -c <rig>` | File the share's unclaimed 2P data, pair waiting takes. |
 | `octacam twophoton manifest -c <rig>` | Rewrite every day's `2p_reconciliation.md`. |
 | `octacam twophoton reconcile DAYS_OR_FLIES -c <rig>` | Renumber flies (`--all`: every fly, and group the generic bucket into new flies). |

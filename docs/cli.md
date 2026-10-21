@@ -544,7 +544,8 @@ $ octacam twophoton verify [OPTIONS] [paths]...
 **Options**:
 
 * `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
-* `--delete`: Delete the share folders found identical at the destination.
+* `--delete`: Delete the share folders found identical at the destination (only inside the share folder).
+* `-u, --user <str>`: A `[users.<initials>]` of the rig: their destination, share folder and 2P options (delete_share_data) instead of the rig's.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.
 
@@ -561,6 +562,7 @@ $ octacam twophoton sweep [OPTIONS]
 **Options**:
 
 * `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `-u, --user <str>`: A `[users.<initials>]` of the rig: their destination, share folder and 2P options (delete_share_data) instead of the rig's.
 * `--dry-run`: List what would be done, change nothing.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.

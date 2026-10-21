@@ -1159,6 +1159,18 @@ def test_a_user_s_share_is_used_and_kept_in_the_snapshot(tmp_path):
     assert plugin.snapshot_options(None) is None
 
 
+def test_a_user_s_choice_to_delete_their_share_data_goes_with_their_takes():
+    # Each person decides for their own 2P data (Matthias, 2026-10-21).
+    plugin = TwoPhotonPlugin(source="/share/rig")
+    plugin.on_user({"source": "/share/MD", "delete_share_data": True})
+    assert plugin.snapshot_options(None) == {
+        "source": "/share/MD",
+        "delete_share_data": True,
+    }
+    plugin.on_user({"source": "/share/XY"})  # someone who chose nothing
+    assert plugin.snapshot_options(None) == {"source": "/share/XY"}
+
+
 def test_doctor_checks_the_user_s_share(tmp_path):
     from octacam.config import OctacamConfig, PluginConfig
 

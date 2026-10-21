@@ -34,6 +34,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   is rendered. `octacam twophoton board-sync` backfills transferred takes,
   older ones too (before the board's report: from ThorImage's frames and the
   rig's scan timing measured on `--reference` takes).
+- **Each person decides whether their 2P data leaves the imaging PC**
+  (`twophoton`): share folders are deleted after a verified transfer only with
+  the user's own `delete_share_data = true` (in `[users.<initials>.twophoton]`,
+  carried by their recordings), and never outside their `source` folder.
+  `twophoton sweep`/`verify` take `--user`.
 - **Air commands stand in for ThorSync's AirFlow** (`twophoton`): with the
   plugin option `airflow_logs` (airflow_control's log folder), a take paired
   without ThorSync gets the air commands logged during it

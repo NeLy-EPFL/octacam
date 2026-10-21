@@ -211,7 +211,9 @@ def sweep(
         for f in folders
         if f.path.resolve() not in claimed and not _on_destination(f, index)
     ]
-    held = _pair_pending(source_root, unclaimed, settings, mode, result, index)
+    held = _pair_pending(
+        source_root, unclaimed, settings, mode, result, index, delete_sources
+    )
     unclaimed = [f for f in unclaimed if f.path.resolve() not in held]
     todo = [f for f in unclaimed if is_settled(f, settings.settle_s)]
     if not todo:
@@ -251,7 +253,7 @@ def sweep(
             if delete_sources and mode.verify and mode.by_content:
                 deletable.append(folder.path)
     if deletable:
-        remove_sources(deletable)
+        remove_sources(deletable, source_root)
     elif delete_sources and mode.dry_run and todo:
         log.info(
             "[dry-run] 2P sweep: would delete the %d share folder(s) once their "
@@ -287,6 +289,7 @@ def _pair_pending(
     mode: CopyMode,
     result: SweepResult,
     index: NasIndex,
+    delete_sources: bool = False,
 ) -> set[Path]:
     """Pair each pending take with the unclaimed folders that match it now,
     copying them into its destination. Returns the folders taken out of the
@@ -337,7 +340,8 @@ def _pair_pending(
         index.refresh_take(dest)
         if paired.complete:
             result.renders.append((dest, start_s(summary_of(item.folder))))
-            # The take's own choice, made when it was transferred.
-            if item.record.get("by_content") and not mode.dry_run:
-                remove_sources(paired.copied_ok)
+            # The take's own choice, made when it was transferred, and the
+            # user's to delete their share data.
+            if item.record.get("by_content") and delete_sources and not mode.dry_run:
+                remove_sources(paired.copied_ok, source_root)
     return taken

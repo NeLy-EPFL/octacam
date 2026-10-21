@@ -156,7 +156,7 @@ class TwoPhotonSteps(ProcessSteps):
                 settings,
                 mode,
                 claimed_this_run=frozenset(claimed),
-                delete_sources=any(deleting.values()),
+                delete_sources=any(deleting.values()) and settings.delete_share_data,
             )
             failed += swept.failed
             self._renders += [_Render(d, s, settings) for d, s in swept.renders]
@@ -317,8 +317,12 @@ class TwoPhotonSteps(ProcessSteps):
                 self._renders.append(
                     _Render(dest, start_s(summary_of(folder)), settings)
                 )
-                if deleting[folder] and not ctx.options.dry_run:
-                    remove_sources(paired.copied_ok)
+                if (
+                    deleting[folder]
+                    and settings.delete_share_data
+                    and not ctx.options.dry_run
+                ):
+                    remove_sources(paired.copied_ok, target.source_root)
         return failed, claimed
 
     # ------------------------------------------------------------ renders

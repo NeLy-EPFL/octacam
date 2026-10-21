@@ -610,7 +610,7 @@ def test_denied_2p_source_deletes_become_one_explicit_warning(
     monkeypatch.setattr(shutil, "rmtree", deny)
     srcs = [tmp_path / "PAM7xCI80" / n for n in ("SyncData167", "Fly1_Streaming_001")]
     with caplog.at_level(logging.INFO, logger="octacam"):
-        remove_sources(srcs)
+        remove_sources(srcs, tmp_path)
     errors = [r for r in caplog.records if r.levelname == "ERROR"]
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert errors == []
@@ -1079,9 +1079,32 @@ def test_twophoton_sweep_transfers_unmatched_folder(tmp_path):
 
 def test_twophoton_sweep_deletes_verified_sources_when_rig_deletes(tmp_path):
     # A rig that deletes after transfer clears the share of 2P-only data too,
-    # once its copy is verified.
+    # once its copy is verified, when the data's owner chose it.
     dest_root = tmp_path / "dest"
     source_root = tmp_path / "windows_share" / "MD"
+    folder = _make_sync_folder_2p(
+        source_root, "Tests", "SyncData001", mtime=time.time() - 10_000
+    )
+    config_dir = _rig_config(
+        tmp_path,
+        dest_root,
+        source_root,
+        settle_s=60,
+        delete_share_data=True,
+        transfer={"delete_after_transfer": True},
+    )
+    result = runner.invoke(app, ["twophoton", "sweep", "--config", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    (date_dir,) = list((dest_root / "2p_only" / "Tests").iterdir())
+    assert (date_dir / "SyncData001" / "Episode001.h5").exists()
+    assert not folder.exists()
+
+
+def test_share_data_is_kept_unless_its_owner_chose_to_delete_it(tmp_path):
+    # Matthias, 2026-10-21: another person's imaging data on the share is
+    # theirs to decide about; the rig's delete_after_transfer alone keeps it.
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "XY"
     folder = _make_sync_folder_2p(
         source_root, "Tests", "SyncData001", mtime=time.time() - 10_000
     )
@@ -1095,8 +1118,55 @@ def test_twophoton_sweep_deletes_verified_sources_when_rig_deletes(tmp_path):
     result = runner.invoke(app, ["twophoton", "sweep", "--config", str(config_dir)])
     assert result.exit_code == 0, result.output
     (date_dir,) = list((dest_root / "2p_only" / "Tests").iterdir())
-    assert (date_dir / "SyncData001" / "Episode001.h5").exists()
+    assert (date_dir / "SyncData001" / "Episode001.h5").exists()  # copied
+    assert folder.exists()  # but kept
+
+
+def test_a_user_s_own_table_decides_for_their_share_data(tmp_path):
+    # `--user MD`: their share folder, destination and delete_share_data.
+    dest_root = tmp_path / "dest"
+    mine = tmp_path / "windows_share" / "MD"
+    folder = _make_sync_folder_2p(
+        mine, "Tests", "SyncData001", mtime=time.time() - 10_000
+    )
+    config_dir = _rig_config(
+        tmp_path,
+        tmp_path / "rig-dest",
+        tmp_path / "windows_share" / "rig",
+        settle_s=60,
+        transfer={"delete_after_transfer": True},
+    )
+    toml = config_dir / "octacam_config.toml"
+    toml.write_text(
+        toml.read_text()
+        + f'[users.MD]\ntransfer_directory = "{dest_root.as_posix()}"\n'
+        + f'[users.MD.twophoton]\nsource = "{mine.as_posix()}"\n'
+        + "delete_share_data = true\n"
+    )
+    result = runner.invoke(
+        app, ["twophoton", "sweep", "--config", str(config_dir), "--user", "md"]
+    )
+    assert result.exit_code == 0, result.output
+    assert list((dest_root / "2p_only" / "Tests").iterdir())
     assert not folder.exists()
+
+
+def test_a_share_delete_never_leaves_the_user_s_folder(tmp_path, caplog):
+    from octacam.plugins.twophoton.copying import remove_sources
+
+    root = tmp_path / "windows_share" / "MD"
+    inside = root / "Exp" / "SyncData001"
+    outside = tmp_path / "windows_share" / "XY" / "Exp" / "SyncData002"
+    for d in (inside, outside):
+        d.mkdir(parents=True)
+    with caplog.at_level(logging.INFO, logger="octacam"):
+        remove_sources([inside, outside, root], root)
+        remove_sources([outside], None)
+    assert not inside.exists()
+    assert outside.exists() and root.exists()
+    refused = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(refused) == 3
+    assert all("outside the user's share folder" in m for m in refused)
 
 
 def test_twophoton_sweep_keeps_sources_without_delete_after_transfer(tmp_path):

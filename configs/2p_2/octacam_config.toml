@@ -120,3 +120,4 @@ transfer_directory = "/mnt/upramdya_data/MD/BallPushing_Imaging"
 
 [users.MD.twophoton]
 source = "/mnt/windows_share/MD"
+delete_share_data = true  # delete my share folders once verified on the NAS

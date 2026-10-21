@@ -54,6 +54,12 @@ class TwoPhotonSettings(BaseModel):
     two channels' colors and FastZ projection below) and `render_zstack_mip`
     (each anatomical Z-stack's max projections).
 
+    `delete_share_data`: with `[transfer].delete_after_transfer`, also delete
+    each share folder once its copy is verified at the destination (paired or
+    2P-only). Off unless set, and meant for a user's own `[users.<X>.twophoton]`
+    table: each person decides for their own 2P data, and nothing outside the
+    `source` folder is ever deleted.
+
     `airflow_logs`: airflow_control's log folder; a take paired without ThorSync
     gets the air commands logged during it, in place of ThorSync's AirFlow
     channel (`airflow`).
@@ -76,6 +82,7 @@ class TwoPhotonSettings(BaseModel):
     synced_fastz_projection: Literal["mean", "max"] = "mean"
     render_zstack_mip: bool = True
     airflow_logs: str = ""
+    delete_share_data: bool = False
 
     @property
     def source_root(self) -> Path | None:

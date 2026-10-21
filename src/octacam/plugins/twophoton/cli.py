@@ -41,19 +41,48 @@ DryRun = Annotated[
 ]
 
 
-def _rig(config_dir: Path) -> tuple[Path, TwoPhotonSettings]:
-    """The rig's destination root and 2P settings; exits naming what's missing."""
+UserOption = Annotated[
+    str | None,
+    typer.Option(
+        "--user",
+        "-u",
+        help="A `[users.<initials>]` of the rig: their destination, share folder "
+        "and 2P options (delete_share_data) instead of the rig's.",
+    ),
+]
+
+
+def _rig(config_dir: Path, user: str | None = None) -> tuple[Path, TwoPhotonSettings]:
+    """The rig's (or *user*'s) destination root and 2P settings; exits naming
+    what's missing.
+    """
     from octacam.config import load_config_dir, resolve_dir_template
-    from octacam.plugins.twophoton.settings import settings_for
+    from octacam.plugins.twophoton.settings import (
+        PLUGIN_NAME,
+        TwoPhotonSettings,
+        settings_for,
+    )
 
     config_dir = resolve_config_arg(config_dir)
     cfg = load_config_dir(config_dir)
-    if cfg.transfer is None or not cfg.transfer.directory:
+    profile = None
+    if user is not None:
+        profile = cfg.users.get(user.upper())
+        if profile is None:
+            sys.exit(f"no [users.{user.upper()}] in {config_dir}")
+    directory = (profile.transfer_directory if profile else "") or (
+        cfg.transfer.directory if cfg.transfer else ""
+    )
+    if not directory:
         sys.exit(f"no [transfer].directory in {config_dir}")
     settings = settings_for(cfg, config_dir / "octacam_config.toml")
-    if settings is None:
+    own = profile.plugins.get(PLUGIN_NAME, {}) if profile else {}
+    if own:  # the user's own 2P options win over the rig's
+        base = settings.model_dump() if settings else {}
+        settings = TwoPhotonSettings.model_validate({**base, **own})
+    if settings is None or not settings.source:
         sys.exit(f"the twophoton plugin has no `source` in {config_dir}")
-    return Path(resolve_dir_template(cfg.transfer.directory)), settings
+    return Path(resolve_dir_template(directory)), settings
 
 
 def _scan(settings: TwoPhotonSettings):
@@ -77,9 +106,11 @@ def verify(
         bool,
         typer.Option(
             "--delete",
-            help="Delete the share folders found identical at the destination.",
+            help="Delete the share folders found identical at the destination "
+            "(only inside the share folder).",
         ),
     ] = False,
+    user: UserOption = None,
     verbose: Verbose = False,
 ) -> None:
     """Which 2P folders on the share are verifiably at the destination, and so
@@ -91,7 +122,7 @@ def verify(
     from octacam.plugins.twophoton.verify import verify as run
     from octacam.plugins.twophoton.verify import within
 
-    dest_root, settings = _rig(config_dir)
+    dest_root, settings = _rig(config_dir, user)
     _source, folders = _scan(settings)
     if paths:
         folders = within(folders, paths)
@@ -102,7 +133,7 @@ def verify(
     if delete and report.safe_paths:
         from octacam.plugins.twophoton.copying import remove_sources
 
-        remove_sources(report.safe_paths)
+        remove_sources(report.safe_paths, settings.source_root)
     if report.mismatched:
         sys.exit(f"{report.mismatched} folder(s) failed verification")
 
@@ -111,6 +142,7 @@ def verify(
 @command
 def sweep(
     config_dir: ConfigDir,
+    user: UserOption = None,
     dry_run: DryRun = False,
     verbose: Verbose = False,
 ) -> None:
@@ -123,12 +155,14 @@ def sweep(
     from octacam.plugins.twophoton.nas import NasIndex
     from octacam.plugins.twophoton.sweep import sweep as run
 
-    dest_root, settings = _rig(config_dir)
+    dest_root, settings = _rig(config_dir, user)
     source, folders = _scan(settings)
     transfer = load_config_dir(resolve_config_arg(config_dir)).transfer
     checksum = bool(transfer and transfer.checksum)
-    # The rig's delete after transfer applies to the share's folders too.
+    # The rig's delete after transfer applies to the share's folders too, when
+    # their owner chose it (delete_share_data, in their user table).
     deleting = bool(transfer and transfer.delete_after_transfer)
+    delete_share = deleting and settings.delete_share_data
     result = run(
         source,
         folders,
@@ -140,7 +174,7 @@ def sweep(
             dry_run=dry_run,
             assemble=settings.assemble_tiff_stacks,
         ),
-        delete_sources=deleting,
+        delete_sources=delete_share,
     )
     if result.failed:
         sys.exit(f"{result.failed} file(s) failed to transfer")
