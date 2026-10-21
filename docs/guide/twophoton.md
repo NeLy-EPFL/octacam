@@ -112,6 +112,15 @@ and metadata are transferred:
    plane). A take whose 2P data is
    still being written waits (`twophoton_pending.json`) and is paired by a
    later run.
+
+   A take ThorSync did not record is aligned on the trigger board's clock
+   instead (`octacam_recording/twophoton_board_sync.json`): the board starts
+   the cameras on the first 2P frame and its end-of-run report counts the 2P
+   frames and times them. Every 2P frame lands within one camera frame of
+   where ThorSync would put it (checked against ThorSync on real takes); a
+   capture stopped early in ThorImage borrows the 2P frame period of the
+   day's completed captures. The synced video and scapepp use it in place of
+   ThorSync. AirFlow and the other ThorSync channels are lost.
 2. **Sweep** the share for settled 2P data no take claims, filed under its
    fly when ThorImage's name tells which, else in the generic bucket.
 3. **Rewrite** the touched days' `2p_reconciliation.md`.
@@ -170,6 +179,7 @@ are read the same way.
 | `octacam twophoton reconcile DAYS_OR_FLIES -c <rig>` | Renumber flies (`--all`: every fly, and group the generic bucket into new flies). |
 | `octacam twophoton reassemble -c <rig> [FOLDERS]` | Stack ThorImage folders still holding per-frame TIFFs, then delete the frames. |
 | `octacam twophoton render PATHS` | Render (or re-render with `--force`) synced videos and Z-stack MIPs. |
+| `octacam twophoton board-sync PATHS` | Align takes transferred without ThorSync on the trigger board's clock (give a whole day: its completed captures time the stopped-early ones). A take from before the board's report (2026-10-14) needs `--reference` takes with ThorSync or a report (any day) to measure the rig's scan timing. |
 
 Each takes `--dry-run` (but `verify`, which changes nothing anyway).
 

@@ -421,3 +421,55 @@ def render(
             skipped += 1
     if not dry_run:
         log.info("render: %d rendered or present, %d skipped or failed", done, skipped)
+
+
+@app.command("board-sync")
+@command
+def board_sync(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            help="Transferred takes, or any folder above them (searched).",
+        ),
+    ],
+    reference: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--reference",
+            "-r",
+            exists=True,
+            file_okay=False,
+            help="More takes (or folders above them) to measure this rig's scan "
+            "timing on, for takes whose board sent no report (before "
+            "2026-10-14): ones with ThorSync or a board report, other days too.",
+        ),
+    ] = None,
+    dry_run: DryRun = False,
+    verbose: Verbose = False,
+) -> None:
+    """Align each take under *paths* paired without ThorSync on the trigger
+    board's clock (twophoton_board_sync.json, read by the synced render): for
+    takes transferred before `octacam process` did it. Search a whole day, so
+    its completed takes lend their 2P period to the stopped-early ones.
+    """
+    from octacam.plugins.twophoton.board_sync import write_board_syncs
+    from octacam.plugins.twophoton.layout import MATCH_FILENAME
+    from octacam.recording_format import recording_folder
+
+    def takes_under(roots: list[Path]) -> list[Path]:
+        return sorted(
+            {recording_folder(m.parent) for p in roots for m in p.rglob(MATCH_FILENAME)}
+        )
+
+    takes = takes_under(paths)
+    written = write_board_syncs(
+        takes, references=takes_under(reference or []), dry_run=dry_run
+    )
+    log.info(
+        "board-sync: %d of %d take(s) aligned on the board's clock%s",
+        len(written),
+        len(takes),
+        " (dry run)" if dry_run else "",
+    )

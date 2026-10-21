@@ -88,7 +88,9 @@ def options_from_config(twophoton_cfg) -> SyncedRenderOptions | None:
 class SyncedInputs:
     behavior_video: Path
     image_dir: Path
-    sync_dir: Path
+    # None: no ThorSync recording; the take is aligned on `board` instead.
+    sync_dir: Path | None
+    board: dict | None = None
 
 
 def find_synced_inputs(take_dir: Path) -> SyncedInputs | str:
@@ -109,17 +111,23 @@ def find_synced_inputs(take_dir: Path) -> SyncedInputs | str:
     names = {
         m.get("kind"): Path(m.get("path", "")).name for m in record.get("matched", [])
     }
-    if "image" not in names or "sync" not in names:
-        return "needs both a matched ThorImage and a matched SyncData folder"
+    from octacam.plugins.twophoton.board_sync import read_board_sync
+
+    board = None if "sync" in names else read_board_sync(take_dir)
+    if "image" not in names or ("sync" not in names and board is None):
+        return (
+            "needs a matched ThorImage folder and a matched SyncData folder (or "
+            "the trigger board's timing)"
+        )
     image_dir = take_dir / TWOPHOTON_DIRNAME / names["image"]
-    sync_dir = take_dir / TWOPHOTON_DIRNAME / names["sync"]
+    sync_dir = take_dir / TWOPHOTON_DIRNAME / names["sync"] if board is None else None
     for d in (image_dir, sync_dir):
-        if not d.is_dir():
+        if d is not None and not d.is_dir():
             return f"missing {d}"
     behavior = behavior_video(take_dir)
     if behavior is None:
         return "no grid.mp4 and no camera video"
-    return SyncedInputs(behavior, image_dir, sync_dir)
+    return SyncedInputs(behavior, image_dir, sync_dir, board)
 
 
 def _is_saved_image(name: str) -> bool:
@@ -347,35 +355,50 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
     from octacam.plugins.twophoton.matching import LATE_STOP_S
     from octacam.plugins.twophoton.takes import stop_idle_s, stopped_early
 
-    segment = _pick_segment(
-        inputs.sync_dir,
-        frame_counts,
-        LATE_STOP_S if stopped_early(summary) else 0.0,
-        stop_idle_s(take_dir, summary),
-    )
-    if segment is None:
-        from octacam.plugins.twophoton.signals import describe_cut_off, episode_cut_off
+    if inputs.sync_dir is None:
+        from octacam.plugins.twophoton.board_sync import edge_times
 
-        cut = episode_cut_off(inputs.sync_dir)
-        if cut is not None:
-            log.warning(
-                "synced render: skipping %s -- %s",
-                take_dir,
-                describe_cut_off(inputs.sync_dir.name, cut),
+        assert inputs.board is not None
+        log.info(
+            "synced render: %s has no ThorSync recording -- aligned on the trigger "
+            "board's clock (within %.1f ms)",
+            take_dir,
+            inputs.board["start_uncertainty_ms"],
+        )
+        edges = edge_times(inputs.board)
+    else:
+        segment = _pick_segment(
+            inputs.sync_dir,
+            frame_counts,
+            LATE_STOP_S if stopped_early(summary) else 0.0,
+            stop_idle_s(take_dir, summary),
+        )
+        if segment is None:
+            from octacam.plugins.twophoton.signals import (
+                describe_cut_off,
+                episode_cut_off,
             )
-        else:
-            log.info(
-                "synced render: skipping %s (no CaptureOn segment in %s matches the "
-                "take's %s frames)",
-                take_dir,
-                inputs.sync_dir.name,
-                frame_counts[:1],
-            )
-        return None
-    edges = read_segment_edge_times(inputs.sync_dir, segment)
-    if edges is None or not edges[0] or not edges[1]:
-        log.info("synced render: skipping %s (no camera/FrameOut edges)", take_dir)
-        return None
+
+            cut = episode_cut_off(inputs.sync_dir)
+            if cut is not None:
+                log.warning(
+                    "synced render: skipping %s -- %s",
+                    take_dir,
+                    describe_cut_off(inputs.sync_dir.name, cut),
+                )
+            else:
+                log.info(
+                    "synced render: skipping %s (no CaptureOn segment in %s matches "
+                    "the take's %s frames)",
+                    take_dir,
+                    inputs.sync_dir.name,
+                    frame_counts[:1],
+                )
+            return None
+        edges = read_segment_edge_times(inputs.sync_dir, segment)
+        if edges is None or not edges[0] or not edges[1]:
+            log.info("synced render: skipping %s (no camera/FrameOut edges)", take_dir)
+            return None
     # A take stopped from octacam has a few pulses past its last frame.
     cam_times = np.asarray(edges[0][: max(frame_counts, default=len(edges[0]))])
     frameout_times = np.asarray(edges[1])

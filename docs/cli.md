@@ -525,6 +525,7 @@ $ octacam twophoton [OPTIONS] COMMAND [ARGS]...
 * `reconcile`: Renumber flies' sessions into one...
 * `reassemble`: Stack ThorImage folders still holding...
 * `render`: Render the synced behavior + 2P video...
+* `board-sync`: Align each take under *paths* paired...
 
 ### `octacam twophoton verify`
 
@@ -649,6 +650,27 @@ $ octacam twophoton render [OPTIONS] {paths}...
 * `--fps <float>`: Synced video frame rate.  [default: 25.0]
 * `--height <int>`: Synced video height (px).  [default: 720]
 * `--smooth <int>`: 2P box-blur radius (px, 0: off).  [default: 1]
+* `--dry-run`: List what would be done, change nothing.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton board-sync`
+
+Align each take under *paths* paired without ThorSync on the trigger board's clock (twophoton_board_sync.json, read by the synced render): for takes transferred before `octacam process` did it. Search a whole day, so its completed takes lend their 2P period to the stopped-early ones.
+
+**Usage**:
+
+```console
+$ octacam twophoton board-sync [OPTIONS] {paths}...
+```
+
+**Arguments**:
+
+* `paths...`: Transferred takes, or any folder above them (searched).  [required]
+
+**Options**:
+
+* `-r, --reference <directory>`: More takes (or folders above them) to measure this rig's scan timing on, for takes whose board sent no report (before 2026-10-14): ones with ThorSync or a board report, other days too.
 * `--dry-run`: List what would be done, change nothing.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.

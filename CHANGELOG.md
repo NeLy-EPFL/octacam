@@ -23,6 +23,12 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   deleted, 2P-only ones too (the share's account needs delete rights);
   `octacam twophoton verify --delete` clears a backlog of verified ones.
   Settings are the plugin's options (`source`, ...); see the 2-photon guide.
+- **A take ThorSync did not record is still aligned** (`twophoton`): on the
+  trigger board's clock (`twophoton_board_sync.json`; every 2P frame within
+  one camera frame of ThorSync, checked on real takes), so its synced video
+  is rendered. `octacam twophoton board-sync` backfills transferred takes,
+  older ones too (before the board's report: from ThorImage's frames and the
+  rig's scan timing measured on `--reference` takes).
 - **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
   its cells down; with its own faster `ffmpeg_params` a grid builds several
   times faster (see Configuration).
