@@ -158,6 +158,45 @@ def test_the_gui_lists_picks_and_adds_users(client, rig):
     assert "[users.MA]" in find_config_file(config_dir).read_text()
 
 
+def test_adding_a_user_keeps_the_sessions_set_overrides(rig):
+    from octacam.config import apply_overrides
+
+    config_dir, nas, _share = rig
+    config = apply_overrides(
+        parse_config(find_config_file(config_dir)), ["record.fps=42"]
+    )
+    controller = RecordingController(
+        CameraSystem.pending(),
+        RecordingSettings.from_config(config),
+        config_dir=config_dir,
+    )
+    with TestClient(create_app(controller, config)) as client:
+        added = client.post(
+            "/api/users", json={"initials": "MA", "transfer_directory": str(nas / "MA")}
+        )
+        assert added.status_code == 200, added.text
+        live = client.app.state.app_state.config
+        assert live.record.fps == 42  # `--set record.fps=42`, not the file's 100
+        assert sorted(live.users) == ["MA", "MD"]
+        assert live.users["MA"].transfer_directory == str(nas / "MA")
+    controller.close()
+
+
+def test_the_user_list_does_not_rescan_the_nas_every_call(client, monkeypatch):
+    # A hung CIFS mount would stall every listing.
+    scans = []
+    real = users.discover_initials
+    monkeypatch.setattr(
+        users, "discover_initials", lambda known: scans.append(1) or real(known)
+    )
+    assert client.get("/api/users").json()["discovered"] == ["GE", "MA"]
+    assert client.get("/api/users").json()["discovered"] == ["GE", "MA"]
+    assert len(scans) == 1
+    client.post("/api/users", json={"initials": "MA"})  # MA is set up now
+    assert client.get("/api/users").json()["discovered"] == ["GE"]
+    assert len(scans) == 2
+
+
 def test_each_user_gets_their_folder_name_back(client, rig):
     client.post("/api/users/select", json={"initials": "MD"})
     client.put("/api/settings", json={"relative_directory": "261016_MD/Fly3/002"})
@@ -242,3 +281,31 @@ def test_saving_the_rig_config_keeps_its_users(rig):
     config = parse_config(find_config_file(config_dir))
     assert sorted(config.users) == ["MA", "MD"]
     assert config.users["MA"].plugins == {"twophoton": {"source": "/share/MA"}}
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_headless_record_says_who_it_records_as(rig, monkeypatch, caplog, explicit):
+    # Without --user it records as the last GUI user: a different person at
+    # the keyboard must see whose folders the data goes to.
+    import typer
+
+    import octacam.cli.record as record_cli
+
+    config_dir, nas, _ = rig
+    users.save_memory(config_dir, users.UserMemory(last_user="MD"))
+
+    def no_rig(*args, **kwargs):
+        raise typer.Exit(3)
+
+    monkeypatch.setattr(record_cli, "open_rig", no_rig)
+    monkeypatch.setattr("octacam.cli._setup_logging", lambda: None)
+    caplog.set_level(logging.INFO, logger="octacam")
+    argv = ["record", str(config_dir)] + (["--user", "MD"] if explicit else [])
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 3, result.output
+    (said,) = [r for r in caplog.records if "Recording as MD" in r.getMessage()]
+    assert said.levelno == (logging.INFO if explicit else logging.WARNING)
+    message = said.getMessage()
+    assert "Matthias Durrieu" in message
+    assert f"transfer to {nas / 'MD' / 'BallPushing_Imaging'}" in message
+    assert ("the last user on this machine" in message) is not explicit

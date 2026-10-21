@@ -2104,6 +2104,25 @@ def test_next_fly_logic(page):
     ]
 
 
+def test_next_fly_bumps_the_fly_number_not_a_genotype_after_it(page):
+    page.goto(page.url)
+    flies = page.evaluate(
+        """async () => {
+            const m = await import('./js/record.js');
+            const next = (fly) => m.nextFly({experiment: 'E', fly, take: '3'}).fly;
+            return ['Fly1_GCaMP6s', 'Fly2_MDN3', 'R57C10_Fly03', 'P9_fly2',
+                    'Larva1_x2'].map(next);
+        }"""
+    )
+    assert flies == [
+        "Fly2_GCaMP6s",
+        "Fly3_MDN3",
+        "R57C10_Fly04",
+        "P9_fly3",
+        "Larva2_x2",
+    ]
+
+
 _USERS = {
     "users": [
         {

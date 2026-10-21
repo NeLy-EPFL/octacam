@@ -29,6 +29,28 @@ from octacam.cli.flash import preflight_firmware
 log = logging.getLogger("octacam")
 
 
+def _say_who_records(name: str, initials: str, settings, user: str | None) -> None:
+    """Log whose take this is and where its data goes: a warning when the user
+    is the last one remembered on this machine rather than `--user`, so a
+    different person at the keyboard notices before their data lands in
+    someone else's folders.
+    """
+    who = f"{initials} ({name})" if name else initials
+    where = (
+        f"saving to {settings.save_dir}, transfer to "
+        f"{settings.transfer_directory or '(none)'}"
+    )
+    if user:
+        log.info("Recording as %s: %s", who, where)
+    else:
+        log.warning(
+            "Recording as %s, the last user on this machine (pass --user to "
+            "record as someone else): %s",
+            who,
+            where,
+        )
+
+
 def _confirm_gate(question: str, *, force: bool, forced: str, headless: str) -> None:
     """Ask *question* on a terminal and exit 1 unless it is confirmed; under
     --force, or with no terminal to ask on, warn (*forced* / *headless*) and go on.
@@ -198,6 +220,8 @@ def record(
         # Bypasses the template; the summary's relative_directory falls back to
         # the folder name.
         settings = settings.with_save_dir(str(out))
+    if initials:
+        _say_who_records(config.users[initials].name, initials, settings, user)
 
     warn_if_transcoding()
 
