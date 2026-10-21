@@ -801,8 +801,15 @@ def test_plugin_ended_take_is_complete_and_bounded_by_its_ceiling(
     assert summary["completed"] is True and summary["aborted"] is False
     assert (summary["ended_by"], summary["duration_limit_s"]) == ("ender", 30.0)
     frames = max(c["frames"] for c in summary["cameras"])
-    assert summary["duration_s"] == pytest.approx(frames / 50.0, abs=0.001)
-    assert summary["duration_s"] > 0.5
+    # Padded to the triggers fired, never to the 30 s ceiling's 1500 (Tommy's
+    # review: 1490 fills): no fills, every camera on the same pulse, sync ok.
+    assert 25 < frames < 300
+    assert all(c["dropped"] == 0 for c in summary["cameras"])
+    assert len({c["frames"] for c in summary["cameras"]}) == 1
+    assert summary["pulse_train"]["count"] == frames
+    assert summary["sync"]["ok"], summary["sync"]
+    # From the frame timestamps: 50 fps, one interval per frame.
+    assert summary["duration_s"] == pytest.approx(frames / 50.0, rel=0.05)
     assert summary["first_frame_time_ns"] >= summary["start_time_ns"] > 0
 
 

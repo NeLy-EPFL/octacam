@@ -193,7 +193,18 @@ def _capped(indices: list[int]) -> list[int]:
 
 
 def _real_duration_s(settings: RecordingSettings, cameras: list[CameraStats]) -> float:
-    """A plugin-ended take's length: its most frames over the target fps."""
+    """A plugin-ended take's length: its longest camera's first-to-last frame
+    timestamps, one interval per frame (an external clock's rate may differ from
+    the target fps); its most frames over the target fps without timestamps.
+    """
+    spans = []
+    for camera in cameras:
+        stamps = [t for t in camera.timestamp_ns if t]
+        if len(stamps) >= 2:
+            n = len(stamps)
+            spans.append((max(stamps) - min(stamps)) / 1e9 * n / (n - 1))
+    if spans:
+        return round(max(spans), 3)
     frames = max((camera.frames for camera in cameras), default=0)
     return round(frames / settings.fps, 3) if settings.fps > 0 else 0.0
 

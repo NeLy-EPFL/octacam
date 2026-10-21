@@ -632,7 +632,11 @@ class Take:
                     take.arm_counting()
             if not self._stop.is_set():
                 if self.settings.trigger_source == "software":
-                    self.system.start_software_trigger(self.settings.duration_s)
+                    # A plugin's ceiling stands in for the duration (its finish
+                    # stops the train sooner).
+                    self.system.start_software_trigger(
+                        self.ceiling[1] if self.ceiling else self.settings.duration_s
+                    )
                 self.plugins.on_recording_start(self.plugin_params)
                 # Anchored after the arm returns: it can take seconds (a board's
                 # USB-reset recovery), which an earlier anchor cuts from the take.
@@ -716,6 +720,8 @@ class Take:
         """
         hardware = self.settings.trigger_source != "software"
         expected = len(self.recording)
+        # Only a stop ends this wait: a plugin's finish before the first frame
+        # (an external take whose trigger never came) leaves it to the operator.
         start = time.monotonic()
         armed_at: float | None = None
         warned = False
@@ -823,6 +829,22 @@ class Take:
         self.completed = not self._stop.is_set()
         self.hooks_done.wait(self.hooks_timeout_s)
 
+    def _emitted_pulses(self) -> int:
+        """The pulses a finished train emitted: the software trigger's sequence
+        (it numbers every trigger it fires), else the furthest any camera got
+        (a plugin finishes once its source stopped, so no pulse is in flight).
+        """
+        if self.clock.source == "software":
+            return max(
+                (
+                    camera.backend.trigger.next_index
+                    for camera in self.system.cameras
+                    if camera.name in self.recording
+                ),
+                default=0,
+            )
+        return max((take.tracker.next_pulse for take in self.camera_takes), default=0)
+
     def teardown(self) -> None:
         """Trigger off -> grab loops exit -> writers drain -> sync check ->
         summary, timestamps and the session-cache note.
@@ -830,7 +852,11 @@ class Take:
         self.system.stop_software_trigger()
         # A completed train pads every video to its pulse count (a camera that
         # missed the last pulses still ends on the last pulse); a stopped take
-        # ends where it was.
+        # ends where it was. A take a plugin finished ended before its ceiling's
+        # count: its train is the pulses emitted, which the summary and the sync
+        # check then go by too.
+        if self.completed and self.ended_by is not None and self.clock.fill:
+            self.clock = dataclasses.replace(self.clock, count=self._emitted_pulses())
         clock = self.clock
         self.system.stop(clock.count if self.completed and clock.fill else None)
         stats = [take.stats() for take in self.camera_takes]
