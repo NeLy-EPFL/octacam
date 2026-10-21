@@ -220,6 +220,13 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **No more false "started N pulse(s) late" on external-trigger rigs.** The
+  start check compared when each camera's first frames reached the host, and
+  six acA1920s on one USB bus deliver a pulse up to 2.4 periods apart: every
+  2-photon take read as out of sync (`sync.ok` False). A take a plugin ended
+  once its trigger stopped now proves the common start by frame count (every
+  camera spans the whole train), and a camera's latency is its fastest delivery
+  in its first second, not the median of its first 16 frames.
 - **Saving the rig config from the GUI kept only the tables it knew**: any
   other table in the file (now `[users]`) was dropped by the rewrite.
 - **The transfer copies every file of a recording's `octacam_recording`
