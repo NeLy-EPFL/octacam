@@ -21,14 +21,17 @@ export function splitRecording(relative) {
 }
 
 // The next fly: its number +1 (Fly2 -> Fly3, else "<fly>2"), the take's number
-// back to 1 at the same width (005 -> 001).
+// back to 1 at the same width (005 -> 001). The fly's number is the one right
+// after "Fly", else its first: a genotype after it stays (Fly1_GCaMP6s ->
+// Fly2_GCaMP6s, not Fly1_GCaMP7s).
 export function nextFly({ experiment, fly, take }) {
-  const bump = (text, to) =>
-    text.replace(/(\d+)(?!.*\d)/, (digits) =>
-      String(to(Number(digits))).padStart(digits.length, "0")
+  const bump = (text, pattern, to) =>
+    text.replace(pattern, (whole, head, digits) =>
+      head + String(to(Number(digits))).padStart(digits.length, "0")
     );
-  const nextFlyName = /\d/.test(fly) ? bump(fly, (n) => n + 1) : `${fly}2`;
-  const firstTake = /\d/.test(take) ? bump(take, () => 1) : take;
+  const flyNumber = /fly\d/i.test(fly) ? /(fly)(\d+)/i : /()(\d+)/;
+  const nextFlyName = /\d/.test(fly) ? bump(fly, flyNumber, (n) => n + 1) : `${fly}2`;
+  const firstTake = /\d/.test(take) ? bump(take, /()(\d+)(?!.*\d)/, () => 1) : take;
   return { experiment, fly: nextFlyName, take: firstTake };
 }
 
