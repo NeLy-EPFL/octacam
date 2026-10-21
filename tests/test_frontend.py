@@ -1643,3 +1643,165 @@ def test_a_plugin_can_replace_the_duration_with_a_checkbox(page):
     assert state["withdrawn"]["sync"] is False
     assert state["withdrawn"]["duration"] is True
     assert state["withdrawn"]["warning"] is None
+
+
+# --- background-processing notice (jobs.js) --------------------------------- #
+
+RUNNING_JOB = {
+    "job_id": "j1",
+    "state": "running",
+    "phase": "grid",
+    "paused": False,
+    "paused_reason": None,
+    "current_file": "003",
+    "files_done": 2,
+    "files_total": 16,
+    "item_percent": 40.0,
+    "eta_s": 600,
+}
+
+
+def _jobs_notice(page):
+    """Construct the real JobsNotice as window.__jobs; notifications land in
+    window.__notes as [level, message].
+    """
+    page.evaluate(
+        """async () => {
+            const m = await import('./js/jobs.js');
+            window.__notes = [];
+            window.__jobs = new m.JobsNotice({
+                notify: (level, message) => window.__notes.push([level, message]),
+            });
+        }"""
+    )
+
+
+def _apply_jobs(page, live, ended=()):
+    page.evaluate(
+        "(jobs) => window.__jobs.apply(jobs)",
+        {"live": list(live), "ended": list(ended)},
+    )
+
+
+def test_jobs_banner_shows_running_step_then_pause_then_end(page):
+    _jobs_notice(page)
+    _apply_jobs(page, [])
+    assert prop(page, "#jobs-banner", "e => e.classList.contains('hidden')") is True
+
+    _apply_jobs(page, [RUNNING_JOB])
+    text = prop(page, "#jobs-banner", "e => e.textContent")
+    assert prop(page, "#jobs-banner", "e => e.classList.contains('hidden')") is False
+    assert "building a grid video" in text
+    assert "003, 3 of 16, ~10 min left" in text
+    assert "pauses once this step is done" in text
+    assert page.evaluate("window.__jobs.busyMessage()").startswith(
+        "Background processing is still building a grid video (003, ~10 min left)"
+    )
+
+    paused = {
+        **RUNNING_JOB,
+        "paused": True,
+        "paused_reason": "capture-active",
+        "files_done": 3,
+    }
+    _apply_jobs(page, [paused])
+    text = prop(page, "#jobs-banner", "e => e.textContent")
+    assert "paused (building a grid video, 3 of 16 done)" in text
+    assert "resumes when you close octacam" in text
+    assert page.evaluate("window.__jobs.busyMessage()") is None
+    paused = "Background processing paused \u2014 it resumes when you close octacam."
+    assert page.evaluate("window.__notes") == [["info", paused]]
+
+    _apply_jobs(page, [], [{"job_id": "j1", "state": "done", "error": None}])
+    assert prop(page, "#jobs-banner", "e => e.classList.contains('hidden')") is True
+    assert page.evaluate("window.__notes")[-1] == [
+        "info",
+        "Background processing finished.",
+    ]
+    _apply_jobs(page, [], [{"job_id": "j1", "state": "done", "error": None}])
+    assert len(page.evaluate("window.__notes")) == 2  # announced once
+
+
+def test_jobs_already_paused_or_ended_at_page_load_are_not_announced(page):
+    _jobs_notice(page)
+    paused = {**RUNNING_JOB, "paused": True, "paused_reason": "capture-active"}
+    _apply_jobs(page, [paused], [{"job_id": "j0", "state": "failed", "error": "x"}])
+    assert page.evaluate("window.__notes") == []
+    assert "paused" in prop(page, "#jobs-banner", "e => e.textContent")
+
+
+def test_manual_pause_says_how_to_resume(page):
+    _jobs_notice(page)
+    _apply_jobs(page, [{**RUNNING_JOB, "paused": True, "paused_reason": "manual"}])
+    assert "octacam jobs resume" in prop(page, "#jobs-banner", "e => e.textContent")
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_record_start_asks_while_a_background_step_runs(page, confirmed):
+    page.evaluate(
+        """async (confirmed) => {
+            const m = await import('./js/record.js');
+            window.__calls = [];
+            window.__asked = null;
+            window.confirm = (msg) => { window.__asked = msg; return confirmed; };
+            window.fetch = async (url, opts) => {
+                window.__calls.push(url);
+                return { ok: true, status: 202, json: async () => ({}) };
+            };
+            window.__tab = new m.RecordTab({
+                formats: [], getPluginParams: () => ({}), notify: () => {},
+                backgroundJobWarning: () => 'still building a grid',
+            });
+            await window.__tab._start();
+        }""",
+        confirmed,
+    )
+    assert page.evaluate("window.__asked") == "still building a grid"
+    started = [u for u in page.evaluate("window.__calls") if "recording/start" in u]
+    assert bool(started) is confirmed
+
+
+def test_record_start_does_not_ask_when_no_job_is_busy(page):
+    page.evaluate(
+        """async () => {
+            const m = await import('./js/record.js');
+            window.__asked = false;
+            window.confirm = () => { window.__asked = true; return true; };
+            window.fetch = async () =>
+                ({ ok: true, status: 202, json: async () => ({}) });
+            window.__tab = new m.RecordTab({
+                formats: [], getPluginParams: () => ({}), notify: () => {},
+                backgroundJobWarning: () => null,
+            });
+            await window.__tab._start();
+        }"""
+    )
+    assert page.evaluate("window.__asked") is False
+
+
+def test_jobs_notice_counts_warnings_and_reports_them_at_the_end(page):
+    _jobs_notice(page)
+    _apply_jobs(page, [{**RUNNING_JOB, "warning_count": 2}])
+    banner = prop(page, "#jobs-banner", "e => e.textContent")
+    assert "\u26a0 2 warnings so far" in banner
+    _apply_jobs(
+        page,
+        [],
+        [
+            {
+                "job_id": "j1",
+                "state": "done",
+                "error": None,
+                "warning_count": 2,
+                "warnings": [
+                    "WARNING: ThorSync recording SyncData167 stopped at its 320 s limit"
+                ],
+            }
+        ],
+    )
+    level, message = page.evaluate("window.__notes")[-1]
+    assert level == "warning"
+    assert message.startswith(
+        "Background processing finished with 2 warnings \u2014 first: WARNING: ThorSync"
+    )
+    assert "octacam jobs attach j1" in message

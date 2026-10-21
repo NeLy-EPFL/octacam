@@ -17,6 +17,9 @@ from octacam.web.preview import parse_views
 from octacam.web.state import AppState
 
 TELEMETRY_INTERVAL_S = 0.5
+# How often the GUI re-reads detached `octacam process` jobs for its
+# background-processing notice (a few small status.json reads).
+JOBS_INTERVAL_S = 3.0
 
 
 async def telemetry_loop(hub: Hub, controller: RecordingController) -> None:
@@ -27,6 +30,18 @@ async def telemetry_loop(hub: Hub, controller: RecordingController) -> None:
             continue
         snapshot = await loop.run_in_executor(None, controller.snapshot)
         hub.broadcast("telemetry", snapshot)
+
+
+async def jobs_loop(state: AppState) -> None:
+    """Push the background-processing notice (`AppState.refresh_jobs`) to every
+    client whenever it changes.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        changed = await loop.run_in_executor(None, state.refresh_jobs)
+        if changed and state.hub.clients:
+            state.hub.broadcast("jobs", state.jobs)
+        await asyncio.sleep(JOBS_INTERVAL_S)
 
 
 def router(state: AppState) -> APIRouter:

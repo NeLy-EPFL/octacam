@@ -15,6 +15,7 @@ import { ShutdownDialog } from "./shutdown.js";
 import { DirPicker } from "./dirpicker.js";
 import { initShortcuts } from "./shortcuts.js";
 import { initUpdateBanner } from "./update.js";
+import { JobsNotice } from "./jobs.js";
 
 const byId = (id) => document.getElementById(id);
 
@@ -104,6 +105,9 @@ async function main() {
     addEvent(evt);
     record?.handleEvent(evt);
   };
+  // Background `octacam process` jobs: banner + pause/end announcements (jobs.js).
+  const jobsNotice = new JobsNotice({ notify });
+  jobsNotice.apply(system.jobs);
 
   const conn = new Connection({
     onOpen: () => {
@@ -120,6 +124,8 @@ async function main() {
   let pluginTabs = new Map();
   record = new RecordTab({
     formats: system.formats,
+    // "Record anyway?" while a background job is still mid-step (jobs.js).
+    backgroundJobWarning: () => jobsNotice.busyMessage(),
     // {name: start-params slice}, sent as the start request's plugin_params.
     getPluginParams: () => {
       const params = {};
@@ -195,6 +201,9 @@ async function main() {
     switch (msg.type) {
       case "system":
         applySystem(msg);
+        break;
+      case "jobs":
+        jobsNotice.apply(msg);
         break;
       case "state":
       case "telemetry":
@@ -323,6 +332,7 @@ async function main() {
   // Apply a /api/system descriptor (the WS handshake or the init's push).
   function applySystem(sys) {
     systemReady = Boolean(sys.ready);
+    if (sys.jobs) jobsNotice.apply(sys.jobs);
     initError = sys.init_error || null;
     showMissingCameras(sys);
     record.setManagedAvailable(!!sys.managed_trigger_available);

@@ -411,10 +411,16 @@ def test_two_visualizations_do_not_rebuild_each_other(tmp_path, monkeypatch):
     cfg = types.SimpleNamespace(
         visualization=[
             types.SimpleNamespace(
-                name="grid.mp4", layout=[["cam0", "cam1"]], ffmpeg_params=""
+                name="grid.mp4",
+                layout=[["cam0", "cam1"]],
+                ffmpeg_params="",
+                max_width=None,
             ),
             types.SimpleNamespace(
-                name="overview.mp4", layout=[["cam0", "cam1"]], ffmpeg_params=""
+                name="overview.mp4",
+                layout=[["cam0", "cam1"]],
+                ffmpeg_params="",
+                max_width=None,
             ),
         ],
         transcode=types.SimpleNamespace(ffmpeg_params=""),
@@ -457,7 +463,9 @@ def test_a_grid_older_than_its_source_is_still_rebuilt(tmp_path, monkeypatch):
 
     cfg = types.SimpleNamespace(
         visualization=[
-            types.SimpleNamespace(name="grid.mp4", layout=[["cam0"]], ffmpeg_params="")
+            types.SimpleNamespace(
+                name="grid.mp4", layout=[["cam0"]], ffmpeg_params="", max_width=None
+            )
         ],
         transcode=types.SimpleNamespace(ffmpeg_params=""),
         transfer=None,
@@ -476,3 +484,32 @@ def test_a_grid_older_than_its_source_is_still_rebuilt(tmp_path, monkeypatch):
         NullReporter(),
     )
     assert built == ["grid.mp4"]
+
+
+def test_grid_max_width_scales_the_cells_down(tmp_path):
+    # A quick-look grid: cells scaled so the whole grid fits max_width, kept
+    # even for yuv420p (QuickTime/Keynote).
+    _gray_mp4_sized(tmp_path, "a", 64, 48, 100)
+    _gray_mp4_sized(tmp_path, "b", 64, 48, 200)
+    out = build_grid_video(
+        tmp_path,
+        layout=[["a", "b"], ["", "a"]],
+        ffmpeg_params="-c:v libx264 -preset medium -crf 20",
+        max_width=66,
+    )
+    assert out is not None
+    dims = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height,pix_fmt", "-of", "csv=p=0:s=x", str(out)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()  # fmt: skip
+    # 2 cells of 32x24 (66/128 -> 33 -> 32); yuvj420p is full-range yuv420p
+    assert dims in ("64x48xyuv420p", "64x48xyuvj420p"), dims
+
+
+def test_visualization_max_width_is_read_from_the_config():
+    from octacam.config import VisualizationConfig
+
+    viz = VisualizationConfig(layout=[["a"]], max_width=1440)
+    assert viz.max_width == 1440
+    assert VisualizationConfig(layout=[["a"]]).max_width is None

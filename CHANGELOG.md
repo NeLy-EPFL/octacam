@@ -24,6 +24,34 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   plugin overriding the hook must accept the new keyword). Its tab can offer a
   checkbox in place of the Record tab's Duration (`setDurationSync` in a
   plugin tab's context).
+- **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
+  its cells down; with its own faster `ffmpeg_params` a grid builds several
+  times faster (see Configuration).
+
+- **`octacam process` transfers the data before building grids**, so a day's
+  videos are on the destination hours earlier; grids are built and transferred
+  after. **Plugins can add processing steps** (`Plugin.process_steps`, a
+  `process.ProcessSteps`): data steps right after the transfer, renders at the
+  very end. `process` never instantiates a plugin or touches its hardware.
+  A step that moves a transferred recording steers later copies
+  (`ProcessSteps.transfer_dest`, `ctx.dests`). A plugin can also add a command
+  group (`octacam <name> ...`, from `plugins._COMMANDS`) and its own `octacam
+  doctor` checks (`Plugin.doctor`).
+
+- **`[transfer].delete_after_transfer`** (and `process --delete-after-transfer/--no-delete-after-transfer`) removes each local recording once every file in it is accounted for at the destination, after its grids: content-verified copies, and each capture once its mp4 is there. A folder with any other file missing there, or whose destination is the folder itself, is kept. `transfer.transfer_tree` copies a whole folder the same way, for a plugin's acquisition data.
+
+- **The transfer never writes over a different recording**: a destination whose summary started at another time (a take name reused) is left alone and the folder counts as failed.
+
+- **The GUI shows background processing.** While a detached `octacam
+  process` job runs, a strip along the bottom of the camera view says what it
+  is doing and how long the current step has left; once that step is done the
+  job pauses until the GUI closes, as before, and the strip says so. The event
+  log (and, with **Notify me**, a desktop notification) records when it pauses
+  and ends, and Start recording asks first while a step is still running.
+- **Jobs count their warnings**: every warning or error a detached job logs is
+  kept in its status (`octacam jobs list` has a Warnings column, the GUI says
+  "finished with N warnings"), and the log ends with a summary of them. Jobs
+  also report grid progress and name items as `Fly1/003`.
 
 - **`--set KEY=VALUE` on `gui` and `record`** overrides any config key for one
   launch by its dotted path (`--set record.save_method=raw`), the same flag
@@ -180,6 +208,9 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   once its trigger stopped now proves the common start by frame count (every
   camera spans the whole train), and a camera's latency is its fastest delivery
   in its first second, not the median of its first 16 frames.
+- **The transfer copies every file of a recording's `octacam_recording`
+  folder**, a plugin's own included (it copied only the files it knew by name,
+  so with a delete after transfer a plugin's facts were lost).
 - **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
   error, which made a request for a missing feature or command a 500; it is a
   clean "no such node" again.

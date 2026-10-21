@@ -397,6 +397,26 @@ def process(
             "The recording's summary, timestamps and config snapshot are kept.",
         ),
     ] = False,
+    delete_after_transfer: Annotated[
+        bool,
+        typer.Option(
+            "--delete-after-transfer",
+            help="Remove each local recording once every file in it is accounted "
+            "for at the [transfer] destination (after its grids are built from "
+            "it): each copy content-verified, and a .mkv/.raw capture once its "
+            "transcoded mp4 is there (captures are not copied). A folder with any "
+            "other file missing there is kept. Default: the config's "
+            "[transfer].delete_after_transfer.",
+        ),
+    ] = False,
+    keep_local: Annotated[
+        bool,
+        typer.Option(
+            "--no-delete-after-transfer",
+            help="Keep the local recordings even when the config's "
+            "[transfer].delete_after_transfer is set.",
+        ),
+    ] = False,
     progress_style: Annotated[
         ProgressStyle,
         typer.Option(
@@ -454,6 +474,8 @@ def process(
     from octacam import process as pipeline
     from octacam import process_jobs
 
+    if delete_after_transfer and keep_local:
+        sys.exit("--delete-after-transfer and --no-delete-after-transfer conflict.")
     if no_transcode and no_grid and no_transfer:
         sys.exit("Nothing to do: --no-transcode, --no-grid and --no-transfer all set.")
     folders = _resolve_transcode_paths(list(paths or []), last, session_id, all_)
@@ -469,6 +491,9 @@ def process(
         # Resolved before a --detach re-exec, so the child is handed the same dir.
         config_dir=resolve_config_arg(config_dir) if config_dir is not None else None,
         raw_output=progress_style is ProgressStyle.ffmpeg,
+        delete_after_transfer=(
+            True if delete_after_transfer else False if keep_local else None
+        ),
     )
 
     # The detached child re-runs this command with --_job-dir, as the job's worker.
