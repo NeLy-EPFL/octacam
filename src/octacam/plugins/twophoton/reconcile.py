@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from octacam.plugins.twophoton.copying import write_source_marker
@@ -198,11 +199,15 @@ def _rename(source: Path, target: Path, what: str) -> bool:
 
 
 def reconcile(
-    sessions: dict[Path, list[Session]], root: Path, dry_run: bool
+    sessions: dict[Path, list[Session]],
+    root: Path,
+    dry_run: bool,
+    on_move: Callable[[Path, Path], object] | None = None,
 ) -> tuple[int, int, int]:
     """Renumber each fly's *sessions* chronologically. Returns (moved,
     unchanged, conflicts); a target held by a session that is not itself moving
-    is a conflict, logged, never overwritten.
+    is a conflict, logged, never overwritten. *on_move(source, target)* hears
+    each move made.
     """
     n_moved = n_unchanged = n_conflict = 0
     for fly_dir, entries in sorted(sessions.items()):
@@ -319,6 +324,8 @@ def reconcile(
             n_moved += 1
             log.info("reconcile: %s -> %s%s", source, target, what)
             done.append((source, target))
+            if on_move is not None:
+                on_move(source, target)
             prune_empty_dirs(source.parent, root)
         _append_log(fly_dir, root, done)
     return n_moved, n_unchanged, n_conflict
@@ -327,7 +334,7 @@ def reconcile(
 def reconcile_flies(index: NasIndex, fly_dirs: set[Path], dry_run: bool) -> None:
     """Renumber *fly_dirs* (the flies a run touched, or named by hand)."""
     moved, unchanged, conflicts = reconcile(
-        fly_sessions(index, fly_dirs), index.root, dry_run
+        fly_sessions(index, fly_dirs), index.root, dry_run, on_move=index.relocate
     )
     if moved or conflicts:
         log.info(

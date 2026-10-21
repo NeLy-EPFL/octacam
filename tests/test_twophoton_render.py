@@ -38,6 +38,8 @@ def _make_take(
     behavior_frames: int = 40,
     average: int = 1,
     flat: bool = False,
+    declared: int | None = None,
+    unsaved_scans: int = 0,
 ) -> Path:
     # flat: develop's layout (grid at the root, metadata in octacam_recording/);
     # else the rig's first NAS layout (Renderings/grid.mp4, flat metadata).
@@ -85,7 +87,7 @@ def _make_take(
         f'averageMode="{int(average > 1)}" averageNum="{average}" />'
         f'<ZStage steps="{planes}" enable="{int(fastz)}" />'
         f'<Streaming enable="1" zFastEnable="{int(fastz)}" flybackFrames="1" />'
-        f'<Timelapse timepoints="{timepoints}" /></ThorImageExperiment>'
+        f'<Timelapse timepoints="{declared or timepoints}" /></ThorImageExperiment>'
     )
     rng = np.random.default_rng(0)
     for chan in ("ChanA", "ChanB"):
@@ -107,7 +109,8 @@ def _make_take(
     frameout = np.zeros((total, 1), np.uint32)
     for e in _edges(150, behavior_frames, 50):  # 20 Hz behavior
         cameras[e] = 1
-    for e in _edges(150, timepoints * per_volume, 2000 // (timepoints * per_volume)):
+    scans = timepoints * per_volume + unsaved_scans
+    for e in _edges(150, scans, 2000 // scans):
         frameout[e] = 1
     with h5py.File(sync / "Episode001.h5", "w") as f:
         di = f.create_group("DI")
@@ -248,3 +251,29 @@ def test_failed_render_leaves_no_partial_file(tmp_path, monkeypatch):
     assert started["encode"]
     names = sorted(p.name for p in (take / "Renderings").glob("*.mp4"))
     assert names == ["grid.mp4"]  # no synced_2p.mp4, no synced_2p.partial.mp4
+
+
+def test_a_capture_stopped_early_may_scan_a_frame_it_never_saved(tmp_path, caplog):
+    # 2026-10-16: four takes stopped in ThorImage each had one FrameOut edge
+    # more than saved frames (1142 for 1141, ...), and each logged a warning.
+    take = _make_take(tmp_path, planes=1, timepoints=10, declared=50, unsaved_scans=1)
+    with caplog.at_level("INFO", logger="octacam"):
+        out = render_synced_video(take, SyncedRenderOptions(fps=10, height=64))
+    assert out is not None
+    assert not [r for r in caplog.records if r.levelname == "WARNING"], caplog.text
+    assert "1 FrameOut edge(s) past its 10 saved frame(s)" in caplog.text
+    # A full capture with an edge too many is still worth a warning.
+    take = _make_take(tmp_path / "full", planes=1, timepoints=10, unsaved_scans=1)
+    caplog.clear()
+    with caplog.at_level("INFO", logger="octacam"):
+        render_synced_video(take, SyncedRenderOptions(fps=10, height=64))
+    assert "11 FrameOut edges but 10 frames" in caplog.text
+
+
+def test_a_capture_discarded_in_thorimage_says_so(tmp_path, caplog):
+    take = _make_take(tmp_path, planes=1, timepoints=10)
+    for tif in (take / "2P" / "Fly1_Streaming").glob("*.tif"):
+        tif.unlink()
+    with caplog.at_level("INFO", logger="octacam"):
+        assert render_synced_video(take, SyncedRenderOptions(fps=10, height=64)) is None
+    assert "ThorImage saved no images" in caplog.text

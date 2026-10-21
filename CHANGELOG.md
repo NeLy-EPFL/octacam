@@ -227,6 +227,12 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   once its trigger stopped now proves the common start by frame count (every
   camera spans the whole train), and a camera's latency is its fastest delivery
   in its first second, not the median of its first 16 frames.
+- **2-photon processing says less, and only what matters**: one or two
+  FrameOut edges past the last saved frame of a capture stopped early is
+  expected (logged, no longer a warning); a capture discarded in ThorImage is
+  marked "no images saved" in the day's manifest; the manifest is written after
+  the renumbering, so it names `RecordingN_*` takes and lists only what is
+  still on the share.
 - **Saving the rig config from the GUI kept only the tables it knew**: any
   other table in the file (now `[users]`) was dropped by the rewrite.
 - **The transfer copies every file of a recording's `octacam_recording`

@@ -167,19 +167,6 @@ class TwoPhotonSteps(ProcessSteps):
             if (dest := ctx.dests.get(f)) is not None
             and dest.is_relative_to(target.dest_root)
         }
-        if settings.write_manifest:
-            from octacam.plugins.twophoton.manifest import rebuild_manifests
-
-            names = fly_names(index) if settings.attribute_unclaimed_to_fly else {}
-            rebuild_manifests(
-                index,
-                target.source_root,
-                scan,
-                names,
-                dry_run=options.dry_run,
-                days=days,
-            )
-
         fly_dirs = {dest.parent for f in target.folders if (dest := ctx.dests.get(f))}
         if settings.reconcile_recordings:
             from octacam.plugins.twophoton.reconcile import reconcile_flies
@@ -191,6 +178,26 @@ class TwoPhotonSteps(ProcessSteps):
                     ctx.dests[folder] = current_take_dest(
                         dest, start_s(summary_of(folder))
                     )
+
+        if settings.write_manifest:
+            # After the sweep and the reconcile: the takes under their final
+            # names, and only what is still on the share.
+            from octacam.plugins.twophoton.manifest import rebuild_manifests
+
+            names = fly_names(index) if settings.attribute_unclaimed_to_fly else {}
+            remaining = (
+                [f for f in scan if options.dry_run or f.path.exists()]
+                if scan is not None
+                else None
+            )
+            rebuild_manifests(
+                index,
+                target.source_root,
+                remaining,
+                names,
+                dry_run=options.dry_run,
+                days=days,
+            )
         for fly_dir in fly_dirs:
             self._flies.setdefault(fly_dir, settings)
         return failed

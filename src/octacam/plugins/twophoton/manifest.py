@@ -40,10 +40,27 @@ def _takes_by_day(index: NasIndex) -> dict[Path, list[dict]]:
                 "start_time": start,
                 "duration_s": duration_s,
                 "armed": bool(take.info.get("armed", False)),
-                "matches": take.match.get("matched", []),
+                "matches": [
+                    _with_images(take.path, m) for m in take.match.get("matched", [])
+                ],
             }
         )
     return by_day
+
+
+def _with_images(take: Path, match: dict) -> dict:
+    """*match*, flagged `no_images` when it is a ThorImage folder whose copy in
+    the take holds no saved image (a capture discarded in ThorImage).
+    """
+    from octacam.plugins.twophoton.layout import TWOPHOTON_DIRNAME
+    from octacam.plugins.twophoton.render import saved_images
+
+    if match.get("kind") != "image" or not match.get("path"):
+        return match
+    copy = take / TWOPHOTON_DIRNAME / Path(match["path"]).name
+    if not copy.is_dir() or saved_images(copy):
+        return match
+    return {**match, "no_images": True}
 
 
 def rebuild_manifests(

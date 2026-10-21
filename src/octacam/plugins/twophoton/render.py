@@ -122,6 +122,24 @@ def find_synced_inputs(take_dir: Path) -> SyncedInputs | str:
     return SyncedInputs(behavior, image_dir, sync_dir)
 
 
+def _is_saved_image(name: str) -> bool:
+    stem, _, suffix = name.lower().rpartition(".")
+    if suffix in ("tif", "tiff"):
+        return not stem.endswith("_preview")
+    return suffix == "raw" and stem.startswith("image")
+
+
+def saved_images(image_dir: Path) -> bool:
+    """Whether ThorImage saved any image into *image_dir* (raw, per-frame or
+    assembled TIFFs; not its previews): a capture discarded in ThorImage keeps
+    only its Experiment.xml and ROI files.
+    """
+    try:
+        return any(_is_saved_image(p.name) for p in image_dir.iterdir())
+    except OSError:
+        return False
+
+
 def channel_stacks(image_dir: Path) -> dict[str, list[Path]]:
     """``{channel: [stack, ...]}`` -- one stack for a plain stream, one per Z
     plane (sorted) for FastZ. Ignores ThorImage's ``*_Preview.tif``.
@@ -296,6 +314,8 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
     from octacam.plugins.twophoton.matching import (
         EXPERIMENT_XML_FILENAME,
         thorimage_frame_average,
+        thorimage_frameout_tolerance,
+        thorimage_timepoints,
     )
     from octacam.plugins.twophoton.signals import read_segment_edge_times
     from octacam.recording_format import read_summary
@@ -362,7 +382,13 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
 
     stacks = channel_stacks(inputs.image_dir)
     if not stacks:
-        log.info("synced render: skipping %s (no assembled ChanX.tif stacks)", take_dir)
+        log.info(
+            "synced render: skipping %s (%s)",
+            take_dir,
+            "no assembled ChanX.tif stacks"
+            if saved_images(inputs.image_dir)
+            else "ThorImage saved no images: a capture discarded in ThorImage?",
+        )
         return None
     reader = _TwoPhotonReader(stacks, opts.fastz_projection)
     try:
@@ -375,7 +401,19 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
         if n_vol == 0:
             log.info("synced render: skipping %s (no complete 2P volume)", take_dir)
             return None
-        if len(frameout_times) != reader.n_frames * per_volume:
+        unsaved = len(frameout_times) - reader.n_frames * per_volume
+        if 0 < unsaved <= thorimage_frameout_tolerance(xml) and (
+            reader.n_frames < (thorimage_timepoints(xml) or 0)
+        ):
+            # Stopped early, ThorImage scans a frame or two it never saves.
+            log.info(
+                "synced render: %s -- %d FrameOut edge(s) past its %d saved "
+                "frame(s), as a capture stopped early leaves",
+                take_dir,
+                unsaved,
+                reader.n_frames,
+            )
+        elif unsaved:
             log.warning(
                 "synced render: %s has %d FrameOut edges but %d frames x %d per volume "
                 "-- aligning the first %d",
@@ -557,8 +595,10 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
         finally:
             with contextlib.suppress(OSError):
                 encode.stdin.close()
-            decode.stdout.close()
+            # Killed before its pipe closes: a decoder still writing the frames
+            # past the render's end would print "Broken pipe" errors.
             decode.kill()
+            decode.stdout.close()
             decode.wait()
             ok = encode.wait() == 0 and ok
             if not ok:

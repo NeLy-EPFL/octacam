@@ -130,6 +130,21 @@ class NasIndex:
                             path / TWOPHOTON_DIRNAME / Path(entry["path"]).name
                         )
 
+    def relocate(self, source: Path, target: Path) -> None:
+        """Follow a folder the reconcile moved, with everything under it."""
+
+        def moved(path: Path) -> Path:
+            return (
+                target / path.relative_to(source)
+                if path.is_relative_to(source)
+                else path
+            )
+
+        for take in self.takes:
+            take.path = moved(take.path)
+        self.twophoton_dirs = [moved(leaf) for leaf in self.twophoton_dirs]
+        self.source_markers = {moved(k): v for k, v in self.source_markers.items()}
+
     # ------------------------------------------------------------ queries
 
     def matched_sources(self, source_root: Path) -> set[Path]:

@@ -885,9 +885,11 @@ def render_twophoton_manifest(
             f"Start {DELTA} is what decided the match (octacam is triggered "
             "directly by the 2P acquisition's own start, so a real pair's start "
             f"should agree to within a couple of seconds). End {DELTA} is "
-            "informational only, never used to accept or reject a match -- it "
-            "differs when octacam and the 2P side stopped independently (a take "
-            "not synced with ThorImage)."
+            "informational only, never used to accept or reject a match: the 2P "
+            "folder's last file write against the take's end, so it also counts "
+            "ThorImage/ThorSync still writing after the capture (minutes after a "
+            "long one), and it differs when octacam and the 2P side stopped "
+            "independently (a take not synced with ThorImage)."
         ),
         "",
         (
@@ -915,6 +917,8 @@ def render_twophoton_manifest(
                 else " |  |  | "
             )
             flag = " (ambiguous)" if m.get("ambiguous") else ""
+            if m.get("no_images"):
+                flag += " (no images saved)"
             cut = m.get("thorsync_cut_off")
             if cut:
                 flag += " (!) cut off"

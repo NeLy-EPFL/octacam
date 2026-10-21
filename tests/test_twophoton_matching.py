@@ -712,6 +712,31 @@ def test_render_twophoton_manifest_flags_ambiguous_match():
     assert "(ambiguous)" in text
 
 
+def test_manifest_says_when_thorimage_saved_no_images(tmp_path):
+    # 2026-10-16 Fly1/008 and /010: captures discarded in ThorImage keep only
+    # Experiment.xml and the ROI files; their row says so.
+    from octacam.plugins.twophoton.manifest import _with_images
+
+    take = tmp_path / "Recording9_Synced_Streaming"
+    copy = take / "2P" / "Fly1_Streaming_006"
+    copy.mkdir(parents=True)
+    for name in ("Experiment.xml", "ROIs.xaml", "ROIMask.raw", "ChanA_Preview.tif"):
+        (copy / name).write_bytes(b"x")
+    match = {
+        "path": "exp/Fly1_Streaming_006",
+        "kind": "image",
+        "gap_s": 3.6,
+        "confidence": "timestamp",
+    }
+    flagged = _with_images(take, match)
+    text = render_twophoton_manifest(
+        "day", [_take("Fly1/008", 1000.0, 20.0, matches=[flagged])], [], True
+    )
+    assert "Fly1_Streaming_006 (no images saved)" in text
+    (copy / "ChanA.tif").write_bytes(b"x")
+    assert "no_images" not in _with_images(take, match)
+
+
 def test_render_twophoton_manifest_lists_unclaimed_folders():
     unclaimed = [
         TwoPhotonFolder(

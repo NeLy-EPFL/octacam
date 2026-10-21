@@ -194,6 +194,10 @@ def test_takes_are_renumbered_and_the_grids_follow(tmp_path, monkeypatch):
     assert (fly / "Recording1_Synced" / "2P" / "SyncData102").is_dir()
     assert (fly / "Recording2_Beh" / "grid.mp4").is_file()
     assert "Recording1_Synced" in (fly / "reconciliation_log.md").read_text()
+    # The day's manifest is written after the renumbering: final names only.
+    manifest = (dest_root / "261014_Exp" / "2p_reconciliation.md").read_text()
+    assert "Fly1/Recording1_Synced |" in manifest, manifest
+    assert "Fly1/001" not in manifest and "Fly1/002" not in manifest, manifest
 
     # A re-run copies into the renamed folders, never re-creating 001/002.
     result = runner.invoke(app, ["process", "--no-transcode", str(first), str(second)])
