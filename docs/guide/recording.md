@@ -111,7 +111,7 @@ Per camera the summary reports:
 | `writer_skipped`, `writer_skipped_pulse_indices` | Writer-refused frames that were skipped, not filled, because the writer could not keep up at all (see above). |
 | `extra_frames` | Frames discarded because they belong to no pulse of the train. |
 | `stream` | The camera SDK's own transport counters over the recording (lost, incomplete, … frames). A missed pulse with none of these is a trigger the camera never exposed, not a transport loss. |
-| `start_offset_pulses` | 0 when this camera's first frame is the same pulse as the others' (checked from when each camera's first frames arrived; positive = started that many pulses late). Only cameras with the same model, frame size, pixel format and exposure are compared — their frames take equally long to arrive — and `sync.notes` says which were not. |
+| `start_offset_pulses` | 0 when this camera's first frame is the same pulse as the others' (checked from when each camera's first frames arrived; positive = started that many pulses late). Only cameras with the same model, frame size, pixel format and exposure are compared — their frames take equally long to arrive — and `sync.notes` says which were not. On an external trigger whose source stopped before the take ended (a 2-photon take synced with ThorImage), equal frame counts settle it instead, for every camera. |
 
 On an **external** trigger (a source octacam does not drive) the train's length
 is unknown and it may be irregular by design, so missed pulses are **reported,

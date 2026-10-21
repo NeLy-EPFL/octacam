@@ -728,7 +728,8 @@ class RecordingController:
     def finish_recording(self, by: str) -> None:
         """End the current recording as complete, for the plugin `by` that set
         its end (`Plugin.take_ceiling_s`); unlike `stop_recording`, not an
-        early stop.
+        early stop. Call it once the plugin's trigger source has stopped: the
+        sync check then reads equal frame spans as proof of a common start.
         """
         with self._lock:
             if not self.recording_active:

@@ -19,8 +19,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
-import numpy as np
-
 from octacam import config_writer, session_cache
 from octacam.cameras import CameraSystem
 from octacam.cameras.take import CameraStats, CameraTake
@@ -228,12 +226,19 @@ def _unlike_profiles_note(groups: dict[DeliveryProfile | str, list[str]]) -> str
     )
 
 
+# The start check's arrival window: a camera's first second of frames (at
+# least ARRIVAL_MIN_FRAMES), whose fastest delivery is its latency.
+ARRIVAL_WINDOW_NS = 1_000_000_000
+ARRIVAL_MIN_FRAMES = 16
+
+
 def check_sync(
     stats: list[CameraStats],
     recording: list[str],
     clock: PulseClock,
     profiles: dict[str, DeliveryProfile | None],
     completed: bool,
+    train_ended: bool = False,
 ) -> dict:
     """Whether frame k is the same trigger pulse in every camera, and why not.
 
@@ -248,7 +253,16 @@ def check_sync(
     comparable only between cameras of one delivery profile (a 2048^2 GS3 lands
     ~4.5 ms after an acA1920): those deliver a pulse within ~0.5 ms of each
     other, so a pulse late is a whole period. Across profiles a note says the
-    start was not checked.
+    start was not checked. Delivery only ever lags (a stall, a burst after a
+    backlog), so a camera's latency is the floor of its first second of frames.
+
+    `train_ended`: every pulse of an unfilled (external) train was emitted
+    before the grabs stopped, as when a plugin ended the take once its source
+    stopped (`controller.finish_recording`). Each camera then spans the
+    pulses from its first frame to the train's last, so equal spans prove
+    every camera started on the same pulse, whatever the arrivals say: six
+    acA1920s sharing a USB bus deliver one pulse up to 2.4 periods apart at
+    100 fps (2026-10-16), equal frame counts throughout.
     """
     warnings: list[str] = []
     notes: list[str] = []
@@ -358,6 +372,7 @@ def check_sync(
             "start_offsets": offsets,
         }
     delays: dict[str, float] = {}
+    window = max(ARRIVAL_MIN_FRAMES, int(ARRIVAL_WINDOW_NS // period)) if period else 0
     for camera in cams:
         rows = [
             (arrival, pulse)
@@ -365,11 +380,20 @@ def check_sync(
                 camera.arrival_ns, camera.pulse_index, strict=False
             )
             if arrival
-        ][:16]
+        ][:window]
         if period and len(rows) >= 4:
             delays[camera.name] = float(
-                np.median([arrival - pulse * period for arrival, pulse in rows])
+                min(arrival - pulse * period for arrival, pulse in rows)
             )
+    spans = {c.name: c.pulse_index[-1] + 1 for c in cams if c.pulse_index}
+    aligned = (
+        train_ended
+        and not clock.fill
+        and len(spans) == len(cams) > 1
+        and len(set(spans.values())) == 1
+    )
+    if aligned:
+        offsets = dict.fromkeys(spans, 0)
     # Group the cameras by delivery profile; one whose profile could not be read
     # is a group of its own, under its name, and compared with none.
     groups: dict[DeliveryProfile | str, list[str]] = {}
@@ -379,7 +403,7 @@ def check_sync(
             key = profile if profile is not None else camera.name
             groups.setdefault(key, []).append(camera.name)
     for members in groups.values():
-        if len(members) < 2:
+        if len(members) < 2 or aligned:
             continue
         earliest = min(delays[name] for name in members)
         for name in members:
@@ -402,7 +426,13 @@ def check_sync(
                         f"frame i shows the moment of the other cameras' frame "
                         f"i+{nearest} (it missed the train's first pulse(s))"
                     )
-    if len(groups) > 1:
+    if aligned:
+        notes.append(
+            f"Every camera spans the train's {next(iter(spans.values()))} pulses, "
+            "so each started on its first pulse (checked by frame count, not by "
+            "when the first frames reached the host)"
+        )
+    elif len(groups) > 1:
         notes.append(_unlike_profiles_note(groups))
     return {"ok": ok, "warnings": warnings, "notes": notes, "start_offsets": offsets}
 
@@ -831,7 +861,13 @@ class Take:
         self.system.stop(clock.count if self.completed and clock.fill else None)
         stats = [take.stats() for take in self.camera_takes]
         self.sync = check_sync(
-            stats, self.recording, clock, self.profiles, bool(self.completed)
+            stats,
+            self.recording,
+            clock,
+            self.profiles,
+            bool(self.completed),
+            # A plugin ends the take once its source stopped pulsing.
+            train_ended=bool(self.completed) and self.ended_by is not None,
         )
         for message in self.sync["warnings"]:
             self._event("warning", message)

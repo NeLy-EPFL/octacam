@@ -288,8 +288,14 @@ catching trailing pulses. Rules that are easy to break:
   **between cameras with the same delivery profile** (backend, DeviceModelName,
   W×H, pixel format, exposure in whole µs; read at recording start, off the lock,
   never at teardown); across profiles an informational `sync.notes` entry is
-  written. `sync.ok` is also False when a recording camera captured no frame or
-  skipped writer frames.
+  written. A camera's arrival latency is the **floor** of its first second of
+  frames (delivery only ever lags). Arrival is still weak evidence: six
+  acA1920s on one USB bus deliver a pulse up to 2.4 periods apart at 100 fps, so
+  every 2P take read "started N late". When the train is known to have ended
+  before the grabs stopped (`train_ended`: a plugin called `finish_recording`
+  once its source stopped) on an unfilled clock, **equal frame spans** prove the
+  common start for every camera and the arrivals are not compared. `sync.ok` is
+  also False when a recording camera captured no frame or skipped writer frames.
 
 The writer queue depth is `record.writer_queue_size` (default 64), tunable per
 rig to absorb transient encoder stalls. Summary schema 4 reports, per camera,

@@ -173,6 +173,13 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **No more false "started N pulse(s) late" on external-trigger rigs.** The
+  start check compared when each camera's first frames reached the host, and
+  six acA1920s on one USB bus deliver a pulse up to 2.4 periods apart: every
+  2-photon take read as out of sync (`sync.ok` False). A take a plugin ended
+  once its trigger stopped now proves the common start by frame count (every
+  camera spans the whole train), and a camera's latency is its fastest delivery
+  in its first second, not the median of its first 16 frames.
 - **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
   error, which made a request for a missing feature or command a 500; it is a
   clean "no such node" again.

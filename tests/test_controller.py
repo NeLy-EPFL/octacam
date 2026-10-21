@@ -165,6 +165,62 @@ def test_check_sync_still_catches_a_like_camera_a_pulse_late():
     assert "[b0]" in note and "[f0, f1]" in note, note
 
 
+def _check_external(cameras, profiles, *, train_ended):
+    clock = PulseClock(PERIOD_125_FPS, None, "external", fill=False)
+    return check_sync(
+        cameras,
+        [c.name for c in cameras],
+        clock,
+        profiles,
+        completed=True,
+        train_ended=train_ended,
+    )
+
+
+def test_check_sync_trusts_equal_spans_of_an_ended_external_train():
+    # The 2P rig (2026-10-16): six acA1920s on one USB bus, a board that stops
+    # before the take ends. First frames arrived up to 2.4 periods apart, read
+    # as "started N pulse(s) late" on every take, yet every camera recorded
+    # every pulse. Equal spans prove the common start, the 960x480 one included.
+    cams = [
+        _sync_camera("b0", 6_700_000, frames=32),
+        _sync_camera("b1", 6_700_000 + 19_000_000, frames=32),
+        _sync_camera("b2", 6_700_000 + 4_500_000, frames=32),
+        _sync_camera("f0", 12_700_000, frames=32),
+    ]
+    profiles = {"b0": BASLER, "b1": BASLER, "b2": BASLER, "f0": GS3}
+    sync = _check_external(cams, profiles, train_ended=True)
+    assert sync["ok"] and sync["warnings"] == [], sync
+    assert sync["start_offsets"] == {"b0": 0, "b1": 0, "b2": 0, "f0": 0}
+    (note,) = sync["notes"]
+    assert "32 pulses" in note and "frame count" in note, note
+    # Not known to have ended (an octacam Stop): the arrivals still decide.
+    sync = _check_external(cams, profiles, train_ended=False)
+    assert not sync["ok"]
+    assert sync["start_offsets"]["b1"] is None
+
+
+def test_check_sync_unequal_spans_fall_back_to_arrival():
+    # A camera that missed the train's first pulse spans one pulse fewer.
+    cams = [
+        _sync_camera("f0", 12_700_000, frames=32),
+        _sync_camera("f1", 12_600_000, frames=31, started_late=1),
+    ]
+    sync = _check_external(cams, {"f0": GS3, "f1": GS3}, train_ended=True)
+    assert not sync["ok"]
+    assert sync["start_offsets"] == {"f0": 0, "f1": 1}
+
+
+def test_check_sync_latency_is_the_floor_of_the_first_second():
+    # A grab stall at the start delivers a burst late; the camera's latency is
+    # its fastest delivery, not its median over the first frames.
+    late = _sync_camera("f1", 12_600_000, frames=200)
+    late.arrival_ns[:12] = [late.arrival_ns[11] + 50_000 * k for k in range(12)]
+    cams = [_sync_camera("f0", 12_700_000, frames=200), late]
+    sync = _check(cams, {"f0": GS3, "f1": GS3})
+    assert sync["start_offsets"] == {"f0": 0, "f1": 0}, sync
+
+
 def test_check_sync_compares_a_camera_without_a_profile_with_none():
     cams = [_sync_camera("f0", 12_700_000), _sync_camera("f1", 0, started_late=1)]
     sync = _check(cams, {"f0": GS3, "f1": None})
