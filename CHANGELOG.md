@@ -202,7 +202,8 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   folder**, a plugin's own included (it copied only the files it knew by name,
   so with a delete after transfer a plugin's facts were lost).
 - **Saving the rig config from the GUI kept only the tables it knew**: any
-  other table in the file (now `[users]`) was dropped by the rewrite.
+  other table (now `[users]`), array of tables or top-level key in the file
+  was dropped by the rewrite.
 - **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
   error, which made a request for a missing feature or command a 500; it is a
   clean "no such node" again.

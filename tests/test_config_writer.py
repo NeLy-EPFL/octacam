@@ -154,6 +154,40 @@ def test_visualization_and_transfer_sections_roundtrip():
     assert tomllib.loads(cw._dumps(doc)) == doc
 
 
+def test_a_gui_save_keeps_what_it_does_not_know(tmp_path):
+    # A save rewrites the whole file from its parsed copy: unknown top-level
+    # keys (a date, a list), unknown tables and arrays of tables must survive.
+    text = """backend = "auto"
+rig_name = "2P"
+commissioned = 2026-10-16
+tags = ["imaging", 2]
+
+[record]
+fps = 100
+
+[users.MD]
+name = "Matthias"
+
+[users.MD.twophoton]
+source = "/share/MD"
+
+[[cameras]]
+name = "camera_F"
+serial_number = "123"
+
+[[stage_presets]]
+name = "home"
+xyz = [0.0, 0.0, 1.5]
+
+[[stage_presets]]
+name = "ball"
+xyz = [1.0, 2.0, 0.5]
+"""
+    (tmp_path / "octacam_config.toml").write_text(text)
+    cw.write_config(tmp_path, cw.load_raw_config(tmp_path))
+    assert cw.load_raw_config(tmp_path) == tomllib.loads(text)
+
+
 @pytest.mark.parametrize("name", ["", "  ", ".", "..", "a/b", "a\\b", "/abs", "x/../y"])
 def test_new_config_dir_rejects_unsafe_names(tmp_path, name):
     with pytest.raises(ValueError, match="^Invalid config name: "):
