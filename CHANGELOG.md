@@ -11,6 +11,10 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **A plugin tab can hold a recording start**: an optional async
+  `confirmStart()` on the tab runs when Start is pressed, and returning false
+  cancels the start (for a reminder the operator must acknowledge, such as
+  twophoton's "is ThorSync ticked in ThorImage?").
 - **2-photon rigs** (`twophoton` plugin): a take synced with ThorImage ends
   when ThorImage stops (the Record tab's **Synced with ThorImage**; firmware
   protocol v2, reflash with `octacam flash`), the GUI warns when ThorSync is set

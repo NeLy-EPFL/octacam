@@ -9,6 +9,8 @@
 // `label` and `title`, then calls setConnected, applyStatus (a /api/system
 // plugin status: the init's push, which is also the only sign that the cameras
 // opened), applyState (a "<name>_state" WebSocket message) and getStartParams.
+// A tab may also define async confirmStart(): false cancels a recording start
+// (a reminder the operator must acknowledge first).
 
 import { el, request } from "/js/util.js";
 
