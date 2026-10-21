@@ -37,7 +37,8 @@ class NewUserRequest(StrictModel):
 
 
 # Checks touching the share or the NAS are cached briefly: the strip refreshes
-# often, and a hung mount must not hold every request.
+# often, and a hung mount must not hold every request. The NAS folders not set
+# up as users yet (a scandir of every user's transfer root) are cached as long.
 READY_CACHE_S = 20.0
 
 
@@ -45,6 +46,7 @@ def router(state: AppState) -> APIRouter:
     api = APIRouter()
     controller = state.controller
     ready_cache: dict[str, tuple[float, list[dict]]] = {}
+    discovered_cache: dict[str, tuple[float, list[str]]] = {}
 
     def user_options() -> dict[str, dict[str, str]]:
         return {
@@ -52,6 +54,14 @@ def router(state: AppState) -> APIRouter:
             for p in controller.plugins.plugins
             if p.user_options
         }
+
+    def discovered() -> list[str]:
+        hit = discovered_cache.get("")
+        if hit and time.monotonic() - hit[0] < READY_CACHE_S:
+            return hit[1]
+        found = users_mod.discover_initials(state.config.users)
+        discovered_cache[""] = (time.monotonic(), found)
+        return found
 
     def listing() -> dict:
         settings = controller.get_settings()
@@ -66,7 +76,7 @@ def router(state: AppState) -> APIRouter:
                 for initials, user in sorted(state.config.users.items())
             ],
             "active": settings.user,
-            "discovered": users_mod.discover_initials(state.config.users),
+            "discovered": discovered(),
             "user_options": user_options(),
         }
 
@@ -138,7 +148,7 @@ def router(state: AppState) -> APIRouter:
             for plugin, options in payload.plugins.items()
         }
         try:
-            state.config = users_mod.add_user(
+            written = users_mod.add_user(
                 state.config_dir,
                 payload.initials,
                 name=payload.name.strip(),
@@ -147,6 +157,17 @@ def router(state: AppState) -> APIRouter:
             )
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
+        # Into the live config, not the file as parsed: that would drop the
+        # session's `--set` overrides.
+        state.config = state.config.model_copy(
+            update={
+                "users": {
+                    **state.config.users,
+                    payload.initials: written.users[payload.initials],
+                }
+            }
+        )
+        discovered_cache.clear()  # they are set up now
         # A later Save of the camera settings rewrites the file from this
         # copy: it must hold the new user too.
         from octacam.config_writer import load_raw_config
