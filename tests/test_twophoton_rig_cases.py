@@ -875,7 +875,7 @@ def test_process_transfers_data_before_rendering_and_reruns_into_renamed_take(
     # behind them. Order: behavior + 2P data, the RecordingN rename, the
     # grids, then the synced render; a re-run writes into the renamed take.
     pytest.importorskip("tifffile")
-    from octacam.plugins.twophoton import process as tp_process
+    from octacam.plugins.twophoton import copying as tp_copying
     from octacam.plugins.twophoton import render as tp_render
 
     dest_root = tmp_path / "dest"
@@ -883,7 +883,7 @@ def test_process_transfers_data_before_rendering_and_reruns_into_renamed_take(
     folder = _ordered_take(tmp_path, dest_root, source_root, 1_000_000.0)
     old_take = dest_root / "day1" / "Fly1" / "001"
     events = []
-    real_finish = tp_process.finish_pairing
+    real_finish = tp_copying.finish_pairing
 
     def finish(*args, **kwargs):
         events.append("2p")
@@ -897,7 +897,8 @@ def test_process_transfers_data_before_rendering_and_reruns_into_renamed_take(
     def fake_render(take_dir, options=None, **_kwargs):
         events.append(("render", take_dir.name))
 
-    monkeypatch.setattr(tp_process, "finish_pairing", finish)
+    # The process step imports it when it runs (the plugin stays light).
+    monkeypatch.setattr(tp_copying, "finish_pairing", finish)
     monkeypatch.setattr("octacam.process.build_grid_video", fake_grid)
     monkeypatch.setattr(tp_render, "render_synced_video", fake_render)
 

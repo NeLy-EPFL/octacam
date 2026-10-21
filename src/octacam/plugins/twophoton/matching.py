@@ -1,38 +1,38 @@
 """Discover, settle-check, and pair ThorSync/ThorImage folders with octacam takes.
 
 Investigation against a real 2-photon rig found the legacy shell script's
-assumption -- a sibling ``2p``/``behData`` folder pair at an identical relative
+assumption -- a sibling `2p`/`behData` folder pair at an identical relative
 path -- no longer holds: ThorSync/ThorImage write flat, auto-incrementing
-folders (``SyncData102``, ``Fly1_004``, ...) directly under an experiment
+folders (`SyncData102`, `Fly1_004`, ...) directly under an experiment
 folder on the Windows share, completely decoupled from octacam's own
-``<date>_/<Fly>/<take>`` naming. A take is paired with its 2P counterpart by
-the ThorSync DAQ signals when a ``SyncData`` folder exists (the camera pulse
-count equals the take's frame count -- see ``twophoton_signals``), else by
-start time (within ``match_window_s``).
+`<date>_/<Fly>/<take>` naming. A take is paired with its 2P counterpart by
+the ThorSync DAQ signals when a `SyncData` folder exists (the camera pulse
+count equals the take's frame count -- see `signals`), else by
+start time (within `match_window_s`).
 
 Two folder kinds are recognized, distinguished structurally rather than by a
 fixed naming scheme (ThorImage's own folder name is operator-chosen and
-varies: ``Fly1``, ``Fly1_001``, ``Test1_005``, ...):
+varies: `Fly1`, `Fly1_001`, `Test1_005`, ...):
 
-* **ThorSync** -- a folder named ``SyncData<N>`` holding ``Episode001.h5`` (the
-  analog/digital trace) + ``ThorRealTimeDataSettings.xml`` (a settings
+* **ThorSync** -- a folder named `SyncData<N>` holding `Episode001.h5` (the
+  analog/digital trace) + `ThorRealTimeDataSettings.xml` (a settings
   snapshot written once at start). Its own directory mtime is a decent start
   proxy: only those two files are ever created in it, so nothing bumps the
   directory's mtime again after the initial write.
-* **ThorImage** -- any folder containing an ``Experiment.xml``. Its directory
-  mtime is *not* a usable start proxy (thousands of per-frame ``.tif`` files
-  keep bumping it throughout the whole capture); ``Experiment.xml``'s own
-  ``<Date uTime="...">`` attribute (a Unix timestamp) is used instead, with
+* **ThorImage** -- any folder containing an `Experiment.xml`. Its directory
+  mtime is *not* a usable start proxy (thousands of per-frame `.tif` files
+  keep bumping it throughout the whole capture); `Experiment.xml`'s own
+  `<Date uTime="...">` attribute (a Unix timestamp) is used instead, with
   the directory mtime as a last-resort fallback if that's unparseable.
 
 Neither folder type has a definitive "acquisition complete" marker beyond
-mtime quiescence -- this module's ``is_settled`` is a direct port of the old
-script's ``find_last_file_access_time`` idea.
+mtime quiescence -- this module's `is_settled` is a direct port of the old
+script's `find_last_file_access_time` idea.
 
 This module never touches ThorSync/ThorImage source files' *content*, is
-config-agnostic (callers resolve any ``%``-templated source path before
+config-agnostic (callers resolve any `%`-templated source path before
 calling in), and does not perform any file transfer itself -- see
-``transfer.transfer_tree`` for that.
+`transfer.transfer_tree` for that.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ class TwoPhotonMatch:
     ambiguous: bool  # more than one same-kind candidate also overlapped
     # "verified": confirmed by reading the actual DAQ signal (edge count
     # matches the take's own recorded frame count / ThorImage's own
-    # timepoints) -- see twophoton_signals.py. "timestamp": the coarse
+    # timepoints) -- see `signals`. "timestamp": the coarse
     # time-window heuristic only (match_take_to_twophoton), because
     # verification wasn't attempted, wasn't possible (no h5py, no SyncData
     # folder for this session), or found no matching edge count.
@@ -111,7 +111,7 @@ class TakeInfo:
     """One behavior take, as much as the matcher needs to know about it."""
 
     folder: Path  # the local recording folder (used only as a dict key)
-    # unix seconds: the take's first frame (cli._take_match_start_s), not the
+    # unix seconds: the take's first frame (`takes.match_start_s`), not the
     # moment Start was pressed -- octacam is armed before ThorImage starts.
     start_time: float
     duration_s: float
@@ -128,7 +128,7 @@ DELTA = "\N{GREEK CAPITAL LETTER DELTA}"
 
 
 def _thorimage_start_time(experiment_xml: Path) -> float | None:
-    """Parse ``<Date uTime="...">`` from a ThorImage ``Experiment.xml``, or
+    """Parse `<Date uTime="...">` from a ThorImage `Experiment.xml`, or
     None if the file is missing, unparseable, or lacks that attribute.
     """
     try:
@@ -150,7 +150,7 @@ def _thorimage_start_time(experiment_xml: Path) -> float | None:
 def thorimage_planned_duration_s(experiment_xml: Path) -> float | None:
     """How long a streaming ThorImage acquisition is set to run, if not stopped
     early: declared timepoints x scans per timepoint (FastZ planes + flyback,
-    frame averaging) / ``LSM frameRate`` (real: 3000 x 1 / 7.7 Hz = 390 s for
+    frame averaging) / `LSM frameRate` (real: 3000 x 1 / 7.7 Hz = 390 s for
     394 s takes). None for a single-timepoint capture (Z-stack) or when a
     field is missing.
     """
@@ -183,7 +183,7 @@ def thorimage_declared_frameout_edges(experiment_xml: Path) -> int | None:
 
 
 def latest_thorimage_plan(source_root: Path) -> tuple[Path, float] | None:
-    """``(newest streaming ThorImage folder, its planned duration)`` under
+    """`(newest streaming ThorImage folder, its planned duration)` under
     *source_root*'s experiment folders -- what ThorImage is set to record next,
     as far as the share tells. None when there is none.
     """
@@ -248,9 +248,9 @@ def thorsync_coverage(source_root: Path) -> ThorSyncCoverage | None:
 
 
 def thorimage_timepoints(experiment_xml: Path) -> int | None:
-    """Parse ``<Timelapse timepoints="...">`` from a ThorImage ``Experiment.xml``
+    """Parse `<Timelapse timepoints="...">` from a ThorImage `Experiment.xml`
     -- the acquisition's own recorded frame count, for cross-checking against a
-    verified segment's ``FrameOut`` edge count. None if missing/unparseable.
+    verified segment's `FrameOut` edge count. None if missing/unparseable.
     """
     try:
         root = ET.parse(experiment_xml).getroot()
@@ -269,17 +269,17 @@ def thorimage_timepoints(experiment_xml: Path) -> int | None:
 
 
 def thorimage_expected_frameout_edges(experiment_xml: Path) -> int | None:
-    """How many ``FrameOut`` edges ThorSync should record for this ThorImage
+    """How many `FrameOut` edges ThorSync should record for this ThorImage
     acquisition -- what a verified segment's edge count is compared against.
 
-    ``FrameOut`` pulses once per *scan*: per timepoint that is 1 for a plain
+    `FrameOut` pulses once per *scan*: per timepoint that is 1 for a plain
     stream, every Z plane plus the piezo's flyback frame(s) for FastZ
-    (confirmed 2026-10-07, ``AllPPL1xCI80``: 500 timepoints x (5 + 1) = 3000
-    edges), times ``averageNum`` with frame averaging (2026-10-14 Fly4/003:
+    (confirmed 2026-10-07, `AllPPL1xCI80`: 500 timepoints x (5 + 1) = 3000
+    edges), times `averageNum` with frame averaging (2026-10-14 Fly4/003:
     476 frames x 4 ~ 1906 edges). Counted over the timepoints actually
     recorded -- fewer than declared when the capture was stopped early (since
     octacam stops with ThorImage, a real take). Z-stacks (one timepoint) are
-    matched by :func:`thorimage_zstack_signature` instead. None if
+    matched by `thorimage_zstack_signature` instead. None if
     missing/unparseable.
     """
     timepoints = thorimage_timepoints(experiment_xml)
@@ -296,7 +296,7 @@ def thorimage_expected_frameout_edges(experiment_xml: Path) -> int | None:
 
 
 def _fastz_geometry(experiment_xml: Path) -> tuple[int, int] | None:
-    """``(planes, flyback frames)`` for a FastZ (``Streaming zFastEnable``)
+    """`(planes, flyback frames)` for a FastZ (`Streaming zFastEnable`)
     capture, else None.
     """
     try:
@@ -320,8 +320,8 @@ def _fastz_geometry(experiment_xml: Path) -> tuple[int, int] | None:
 
 
 def thorimage_frame_average(experiment_xml: Path) -> int:
-    """Scans averaged into each saved frame: ``LSM averageNum`` when
-    ``averageMode="1"``, else 1. ``FrameOut`` pulses once per *scan*, so an
+    """Scans averaged into each saved frame: `LSM averageNum` when
+    `averageMode="1"`, else 1. `FrameOut` pulses once per *scan*, so an
     averaged capture records N edges per saved frame -- real 2026-10-14
     Fly4/003 (rolling average left on, N=4): 1906 edges for 476 frames. A
     Z-stack shows the same N edges per slice (thorimage_zstack_signature).
@@ -339,7 +339,7 @@ def thorimage_frame_average(experiment_xml: Path) -> int:
 
 
 def thorimage_frameout_tolerance(experiment_xml: Path) -> int:
-    """Allowed ``|FrameOut edges - expected|`` for this capture: an averaged
+    """Allowed `|FrameOut edges - expected|` for this capture: an averaged
     capture stopped early can end mid-group, leaving up to N-1 scans that
     never became a saved frame, plus the ones being scanned at the stop --
     for FastZ, whole volumes' scans.
@@ -415,17 +415,17 @@ def _timepoints_recorded(folder: Path, declared: int, planes: int = 1) -> int:
 
 
 def twophoton_identity(folder: Path) -> tuple[str, str]:
-    """``(name, fingerprint)`` identifying one ThorImage/ThorSync acquisition
+    """`(name, fingerprint)` identifying one ThorImage/ThorSync acquisition
     across copies -- what NAS-side dedup compares, never the bare name.
 
-    ThorImage reuses folder names per experiment (``Fly1_Zstack`` exists in
-    many experiments) and ThorSync's ``SyncData<N>`` numbering repeats across
-    experiment subfolders (real data, 2026-10-07: ``Test/SyncData135`` and
-    ``AllPPL1xCI80/SyncData135`` the same day) -- a name-only check silently
+    ThorImage reuses folder names per experiment (`Fly1_Zstack` exists in
+    many experiments) and ThorSync's `SyncData<N>` numbering repeats across
+    experiment subfolders (real data, 2026-10-07: `Test/SyncData135` and
+    `AllPPL1xCI80/SyncData135` the same day) -- a name-only check silently
     skipped a new day's Z-stacks forever because an older experiment had
-    same-named folders. The fingerprint survives a copy: ``Experiment.xml``'s
-    ``<Date uTime>`` (the acquisition's own start, unique per capture) for an
-    image folder, the ``Episode*.h5`` byte size for a sync folder, ``""`` when
+    same-named folders. The fingerprint survives a copy: `Experiment.xml`'s
+    `<Date uTime>` (the acquisition's own start, unique per capture) for an
+    image folder, the `Episode*.h5` byte size for a sync folder, `""` when
     neither is readable (falls back to name-only, the old behavior).
     """
     start = _thorimage_start_time(folder / EXPERIMENT_XML_FILENAME)
@@ -441,15 +441,15 @@ def twophoton_identity(folder: Path) -> tuple[str, str]:
 
 
 def thorimage_zstack_signature(experiment_xml: Path) -> tuple[int, int] | None:
-    """``(slices, frameout_edges_per_slice)`` ThorSync records for a
+    """`(slices, frameout_edges_per_slice)` ThorSync records for a
     step-and-shoot Z-stack, or None if this isn't one.
 
-    A Z-stack's ThorSync episode has one ``CaptureOn`` segment *per slice*,
-    each carrying one ``FrameOut`` edge per averaged frame -- confirmed on real
-    data (2026-10-07, ``AllPPL1xCI80``): ``ZStage steps="201"`` with
-    ``LSM averageMode="1" averageNum="4"`` recorded 201 segments x 4 edges;
-    with ``averageMode="0"`` 201 x 1. Comparing a single segment against
-    ``timepoints`` (1) -- the streaming rule -- left every averaged Z-stack's
+    A Z-stack's ThorSync episode has one `CaptureOn` segment *per slice*,
+    each carrying one `FrameOut` edge per averaged frame -- confirmed on real
+    data (2026-10-07, `AllPPL1xCI80`): `ZStage steps="201"` with
+    `LSM averageMode="1" averageNum="4"` recorded 201 segments x 4 edges;
+    with `averageMode="0"` 201 x 1. Comparing a single segment against
+    `timepoints` (1) -- the streaming rule -- left every averaged Z-stack's
     SyncData unattributable.
 
     Slices are the ones recorded: a stack stopped early has fewer, as many
@@ -480,13 +480,13 @@ def thorimage_zstack_signature(experiment_xml: Path) -> tuple[int, int] | None:
 
 
 def _folder_last_mtime(folder: Path) -> float:
-    """Max ``st_mtime`` across every file under *folder*, recursively.
+    """Max `st_mtime` across every file under *folder*, recursively.
 
-    Mirrors ``move_files.sh``'s ``find_last_file_access_time``. Only files'
+    Mirrors `move_files.sh`'s `find_last_file_access_time`. Only files'
     own mtimes are considered, not directory mtimes: a directory's mtime only
     updates when an entry is added/removed, which understates a file that
     keeps growing without any new directory entries (e.g. ThorSync's
-    ``Episode001.h5``, appended to for minutes after its one creation).
+    `Episode001.h5`, appended to for minutes after its one creation).
     Falls back to the folder's own mtime only if it somehow contains no files
     (shouldn't happen -- discovery already requires at least one).
     """
@@ -504,12 +504,12 @@ def _folder_last_mtime(folder: Path) -> float:
 
 
 def classify_twophoton_folder(candidate: Path) -> TwoPhotonFolder | None:
-    """Classify exactly one folder as a ThorSync/ThorImage take, or ``None``
+    """Classify exactly one folder as a ThorSync/ThorImage take, or `None`
     if it's neither shape. The per-candidate half of
-    :func:`discover_twophoton_folders`'s scan, pulled out so a caller that
+    `discover_twophoton_folders`'s scan, pulled out so a caller that
     already knows the exact folder to classify (e.g. `cli.py`'s
     reconciliation pass, working directly on an already-transferred
-    ``2P_only/<name>`` or ``2p_only/<experiment>/<date>/<name>`` entry) can
+    `2P_only/<name>` or `2p_only/<experiment>/<date>/<name>` entry) can
     classify it directly instead of re-deriving it from a two-level scan of
     some ancestor directory.
     """
@@ -535,7 +535,7 @@ def classify_twophoton_folder(candidate: Path) -> TwoPhotonFolder | None:
 
 def discover_twophoton_folders(source_root: Path) -> list[TwoPhotonFolder]:
     """Find ThorSync/ThorImage take folders one level under each experiment
-    folder in *source_root* (e.g. ``source_root/MB247_CI63/SyncData102``).
+    folder in *source_root* (e.g. `source_root/MB247_CI63/SyncData102`).
 
     *source_root* itself does not exist or isn't a directory -> returns an
     empty list rather than raising (the share may not be mounted yet).
@@ -582,9 +582,9 @@ def is_settled(
     module docstring) -- this is the best available signal, same idea as the
     legacy script's delay-based check. One exception: ThorImage writes no
     TIFF until the capture ends, so mid-acquisition its folder holds only an
-    ``Experiment.xml`` written at the start -- quiet for the whole capture.
+    `Experiment.xml` written at the start -- quiet for the whole capture.
     Such a folder only counts as settled after
-    ``_EMPTY_IMAGE_FOLDER_SETTLE_S`` (an aborted, empty capture still gets
+    `_EMPTY_IMAGE_FOLDER_SETTLE_S` (an aborted, empty capture still gets
     transferred, later), so a sweep running during a long take never copies
     it half-written and then skips the complete one as "already present".
     """
@@ -607,7 +607,7 @@ def _start_gap_seconds(take_start: float, candidate: TwoPhotonFolder) -> float:
     start diffs of 0.5-9.6s (one 36s outlier on a session's very first
     pairing), regardless of `end`/duration. Since 2026-10-14 a synced take
     also stops with ThorImage, but a fixed-duration one still ends
-    independently, so the end never decides. See :func:`_end_gap_seconds`
+    independently, so the end never decides. See `_end_gap_seconds`
     for that (informational-only) side.
     """
     return abs(candidate.start_time - take_start)
@@ -619,7 +619,7 @@ def _end_gap_seconds(take_end: float, candidate: TwoPhotonFolder) -> float:
     ended -- ThorImage writes its TIFFs after the capture). Purely
     informational: a fixed-duration take stops independently of ThorImage,
     so this can differ by a lot and must never gate a match -- see
-    :func:`_start_gap_seconds` for the one criterion that does.
+    `_start_gap_seconds` for the one criterion that does.
     """
     return last_write(candidate) - take_end
 
@@ -627,13 +627,13 @@ def _end_gap_seconds(take_end: float, candidate: TwoPhotonFolder) -> float:
 def _overlaps(
     take_start: float, take_end: float, candidate: TwoPhotonFolder, window_s: float
 ) -> bool:
-    """Whether *candidate*'s ``[start_time, last_mtime]`` window overlaps
-    ``[take_start, take_end]``, each padded by *window_s* -- a loose "is this
+    """Whether *candidate*'s `[start_time, last_mtime]` window overlaps
+    `[take_start, take_end]`, each padded by *window_s* -- a loose "is this
     even worth investigating" pre-filter, used only to bound which
-    ``SyncData`` folders get opened for signal verification (deliberately
+    `SyncData` folders get opened for signal verification (deliberately
     generous: verification itself, not timing shape, is what confirms or
     rejects the candidate -- see match_takes_to_twophoton_batch). Not used for
-    the timestamp-only decision itself; see :func:`_start_gap_seconds` for
+    the timestamp-only decision itself; see `_start_gap_seconds` for
     that.
     """
     if candidate.start_time > take_end + window_s:
@@ -652,7 +652,7 @@ def match_take_to_twophoton(
     """Match a behavior take's time window against discovered 2P folders.
 
     A candidate matches only when its **start** lands within *match_window_s*
-    of the take's own start (see :func:`_start_gap_seconds`) -- octacam is
+    of the take's own start (see `_start_gap_seconds`) -- octacam is
     triggered directly by the 2P acquisition's own start (via ThorSync), so a
     genuine pair's start should differ by at most a couple of seconds, not
     "somewhere within a loose window". This is *more* selective than the old
@@ -663,17 +663,17 @@ def match_take_to_twophoton(
     without needing to compare duration at all. End time and duration are
     **not** part of this decision -- a fixed-duration take stops independently
     of ThorImage, so they can differ and are only carried informationally
-    (:func:`_end_gap_seconds`, ``TwoPhotonMatch.end_gap_s``).
+    (`_end_gap_seconds`, `TwoPhotonMatch.end_gap_s`).
 
-    Returns 0-2 matches -- at most one per kind (``sync``/``image``); never
+    Returns 0-2 matches -- at most one per kind (`sync`/`image`); never
     forces a pairing that isn't there. When more than one same-kind candidate
     matches, the best-aligned (smallest start gap) wins and the match is
-    flagged ``ambiguous=True`` so the caller can log/audit rather than
+    flagged `ambiguous=True` so the caller can log/audit rather than
     silently trust it (real 2P sessions were found where ThorSync/ThorImage
     are *not* always started 1:1 with each other or with a single take).
 
     This is the timestamp-only fallback -- see
-    :func:`match_takes_to_twophoton_batch` for the verified/no-double-booking
+    `match_takes_to_twophoton_batch` for the verified/no-double-booking
     matcher `octacam process` actually drives.
     """
     take_end = take_start + take_duration_s
@@ -720,33 +720,33 @@ def match_takes_to_twophoton_batch(
     verify_window_s: float,
     verify_with_signals: bool,
 ) -> dict[Path, list[TwoPhotonMatch]]:
-    """Match a whole batch of takes (sharing one ``[transfer.twophoton]``
-    source) against discovered 2P folders, processed in chronological order
-    so the same folder is never double-booked across two different takes.
+    """Match a whole batch of takes (sharing one 2P share) against discovered
+    2P folders, processed in chronological order so the same folder is never
+    double-booked across two different takes.
 
     Two tiers, tried per take in this order:
 
-    1. **Verified** (``confidence="verified"``): for each not-yet-claimed
-       ``sync``-kind candidate whose window overlaps the take within the
+    1. **Verified** (`confidence="verified"`): for each not-yet-claimed
+       `sync`-kind candidate whose window overlaps the take within the
        (wider) *verify_window_s*, read its actual DAQ signal
-       (``twophoton_signals.read_capture_segments``) and look for a segment
-       whose ``Cameras`` edge count matches this take's own recorded
+       (`signals.read_capture_segments`) and look for a segment
+       whose `Cameras` edge count matches this take's own recorded
        per-camera frame count. An exact/near match is decisive -- used even if
        its coarse timestamp gap exceeds *match_window_s* -- and claims that
-       *segment* specifically (not the whole folder), so a ``SyncData`` folder
+       *segment* specifically (not the whole folder), so a `SyncData` folder
        spanning multiple takes can still verify-match a different segment
        against a different take. Within that same verified segment, an
-       ``image``-kind candidate whose own ``Experiment.xml`` ``timepoints``
-       matches the segment's ``FrameOut`` edge count is the transitively
+       `image`-kind candidate whose own `Experiment.xml` `timepoints`
+       matches the segment's `FrameOut` edge count is the transitively
        verified image match.
-    2. **Timestamp** (``confidence="timestamp"``): whatever tier 1 didn't
-       resolve falls back to :func:`match_take_to_twophoton`, run only
+    2. **Timestamp** (`confidence="timestamp"`): whatever tier 1 didn't
+       resolve falls back to `match_take_to_twophoton`, run only
        against the pool of folders no earlier take in this batch has already
        claimed -- this is what actually removes the double-booking that a
        real test found producing most `ambiguous` flags, using nothing but
        timestamps already available today.
 
-    *verify_with_signals* off (or ``h5py`` unavailable, or no ``SyncData``
+    *verify_with_signals* off (or `h5py` unavailable, or no `SyncData`
     folder for this session at all -- the common no-ThorSync case) skips
     straight to tier 2 for every take.
     """
@@ -885,30 +885,30 @@ def render_twophoton_manifest(
     attributed: dict[Path, str] | None = None,
     cut_offs: dict[str, str] | None = None,
 ) -> str:
-    """Render a human-readable ``2p_reconciliation.md`` for one day/session
+    """Render a human-readable `2p_reconciliation.md` for one day/session
     destination folder: every behavior take transferred that day against its
     matched 2P folder(s) (or "unmatched"), plus every 2P folder discovered on
     the share that day no take claimed -- the single legible file this feature
-    replaces per-take ``twophoton_match.json`` digging with. Pure/deterministic
+    replaces per-take `twophoton_match.json` digging with. Pure/deterministic
     (no filesystem access) so it's cheap to unit test in isolation from the
     disk-scanning caller.
 
-    *takes* -- one dict per take: ``{"name": str, "start_time": float,
-    "duration_s": float, "armed": bool, "matches": list[dict]}``, where each
-    match dict has :func:`build_match_record`'s per-entry shape (``path``,
-    ``kind``, ``gap_s``, ``end_gap_s``, ``ambiguous``, ``confidence``).
+    *takes* -- one dict per take: `{"name": str, "start_time": float,
+    "duration_s": float, "armed": bool, "matches": list[dict]}`, where each
+    match dict has `build_match_record`'s per-entry shape (`path`,
+    `kind`, `gap_s`, `end_gap_s`, `ambiguous`, `confidence`).
     *unclaimed* is every still-live 2P folder that day no take's
-    ``twophoton_match.json`` references. *source_reachable* -- False when the
-    live rescan of ``[transfer.twophoton].source`` couldn't happen (share
+    `twophoton_match.json` references. *source_reachable* -- False when the
+    live rescan of the share (the plugin's `source`) couldn't happen (share
     unmounted), in which case the unclaimed-folder section is replaced by a
     note instead of silently claiming there's nothing unclaimed. *attributed*
-    -- ``{folder.path: fly_folder_name}`` for whichever unclaimed folders the
+    -- `{folder.path: fly_folder_name}` for whichever unclaimed folders the
     caller has decided belong to a specific fly (same decision the sweep
     itself makes, shown here purely as a preview -- see
-    ``cli._attribute_unclaimed_folder``); absent entries default to the
-    generic bucket. *cut_offs* -- ``{folder name: message}`` for unclaimed
+    `cli._attribute_unclaimed_folder`); absent entries default to the
+    generic bucket. *cut_offs* -- `{folder name: message}` for unclaimed
     ThorSync folders whose recording was cut off; a matched one carries its
-    own ``thorsync_cut_off`` in the match entry. Both are listed up front
+    own `thorsync_cut_off` in the match entry. Both are listed up front
     under **Warnings**.
     """
 
@@ -983,7 +983,7 @@ def render_twophoton_manifest(
         lines += [
             "",
             (
-                "`[transfer.twophoton].source` wasn't reachable when this file "
+                "the 2P share (the plugin's `source`) wasn't reachable when this file "
                 "was generated -- this section couldn't be checked."
             ),
         ]
@@ -1026,10 +1026,10 @@ def build_match_record(matches: list[TwoPhotonMatch], source_root: Path) -> dict
     """A JSON-able record of what was matched, for auditability.
 
     Paths are recorded relative to *source_root* (not absolute) so the record
-    stays portable and doesn't leak the share's local mount point. ``gap_s``
+    stays portable and doesn't leak the share's local mount point. `gap_s`
     is the start-time gap that decided the match (or ranked it, for a
-    verified match); ``end_gap_s`` is informational only -- see
-    ``TwoPhotonMatch``.
+    verified match); `end_gap_s` is informational only -- see
+    `TwoPhotonMatch`.
     """
     return {
         "matched": [
@@ -1050,17 +1050,17 @@ _RECORDING_NUMBER_SUFFIX_RE = re.compile(r"_\d+$")
 
 
 def _thorimage_base_name(name: str) -> str:
-    """Strip a trailing ``_<digits>`` recording-number suffix, e.g.
-    ``"Fly1_004"`` -> ``"Fly1"``; ``"Fly1"`` (no ``_<digits>`` at the end,
+    """Strip a trailing `_<digits>` recording-number suffix, e.g.
+    `"Fly1_004"` -> `"Fly1"`; `"Fly1"` (no `_<digits>` at the end,
     just a bare trailing digit that's part of the fly label itself) is
-    unchanged, as is ``"Fly1_Zstack"`` (no digit suffix at all).
+    unchanged, as is `"Fly1_Zstack"` (no digit suffix at all).
 
     Used only to derive a fly's *known* ThorImage prefix from its already-
     claimed matches -- an unclaimed candidate is compared against that prefix
-    with a direct ``startswith`` check (see ``cli._attribute_unclaimed_folder``),
+    with a direct `startswith` check (see `cli._attribute_unclaimed_folder`),
     not by computing its own base name, so a same-session folder like
-    ``Fly1_Zstack_000`` still correctly matches a known ``Fly1`` prefix even
-    though its own base name would be ``Fly1_Zstack``.
+    `Fly1_Zstack_000` still correctly matches a known `Fly1` prefix even
+    though its own base name would be `Fly1_Zstack`.
     """
     return _RECORDING_NUMBER_SUFFIX_RE.sub("", name)
 
@@ -1069,18 +1069,18 @@ _FLY_PREFIX_RE = re.compile(r"^(Fly\d+)(?:_|$)")
 
 
 def _fly_prefix(name: str) -> str | None:
-    """The leading ``Fly<N>`` token in *name*, or ``None`` if it doesn't start
+    """The leading `Fly<N>` token in *name*, or `None` if it doesn't start
     with one.
 
-    ``_thorimage_base_name`` only strips a trailing ``_<digits>`` suffix, so
+    `_thorimage_base_name` only strips a trailing `_<digits>` suffix, so
     it can't unify two folders for the same fly-session when the modality
     word is appended directly to the fly name itself with no digit to strip
     at all (confirmed on real data: a fly-session's own folders can be
-    ``Fly1_Streaming``, ``Fly1_Streaming_000``, ``Fly1_Zstack``,
-    ``Fly1_FastZ_Test``, ``Fly1_ZT_Test`` -- an open-ended, unenumerable set of
+    `Fly1_Streaming`, `Fly1_Streaming_000`, `Fly1_Zstack`,
+    `Fly1_FastZ_Test`, `Fly1_ZT_Test` -- an open-ended, unenumerable set of
     modality vocabulary, not a suffix pattern). This extracts the fly
     identity itself instead of trying to strip every possible modality word,
-    for use as a coarser fallback signal alongside ``_thorimage_base_name``'s
+    for use as a coarser fallback signal alongside `_thorimage_base_name`'s
     more precise (modality-preserving) prefix check.
     """
     m = _FLY_PREFIX_RE.match(name)
@@ -1090,20 +1090,20 @@ def _fly_prefix(name: str) -> str | None:
 def _thorimage_group_key(name: str) -> str:
     """The key used to group same-fly ThorImage folders when there's no
     *existing* claimed fly to attribute against at all (see
-    ``cli._promote_generic_2p_only_flies``) -- the leading ``Fly<N>`` token
+    `cli._promote_generic_2p_only_flies`) -- the leading `Fly<N>` token
     when present, else the plain trailing-recording-number-stripped base
     name.
 
-    A real bug found building this: grouping by ``_thorimage_base_name``
+    A real bug found building this: grouping by `_thorimage_base_name`
     alone can't unify a brand-new fly's *own first-ever* batch when it mixes
-    modality words with no shared digit suffix to strip (e.g. ``Fly1_Zstack``
-    and ``Fly1_004`` -- the same fly, but ``_thorimage_base_name`` gives
-    ``"Fly1_Zstack"`` and ``"Fly1"``, two different keys) -- confirmed via a
+    modality words with no shared digit suffix to strip (e.g. `Fly1_Zstack`
+    and `Fly1_004` -- the same fly, but `_thorimage_base_name` gives
+    `"Fly1_Zstack"` and `"Fly1"`, two different keys) -- confirmed via a
     real promotion run that split one such batch into two separate new Fly
-    folders. ``_fly_prefix`` already exists as exactly this coarser,
-    modality-agnostic signal elsewhere (``_attribute_unclaimed_folder``'s own
+    folders. `_fly_prefix` already exists as exactly this coarser,
+    modality-agnostic signal elsewhere (`_attribute_unclaimed_folder`'s own
     fallback), so grouping prefers it first and only falls back to
-    ``_thorimage_base_name`` for a name with no ``Fly<N>`` token at all (a
+    `_thorimage_base_name` for a name with no `Fly<N>` token at all (a
     sync-correlated or otherwise non-Fly-prefixed name).
     """
     return _fly_prefix(name) or _thorimage_base_name(name)
@@ -1111,18 +1111,18 @@ def _thorimage_group_key(name: str) -> str:
 
 def _thorimage_detail(name: str) -> str:
     """The modality/detail word(s) in a ThorImage folder name, beyond the fly
-    number and any trailing recording-number suffix -- e.g. ``"Zstack"`` for
-    ``"Fly1_Zstack"`` or ``"Fly1_Zstack_000"``, ``"FastZ_Test"`` for
-    ``"Fly1_FastZ_Test"``, and ``""`` for a plain ``"Fly1"``/``"Fly1_004"``
+    number and any trailing recording-number suffix -- e.g. `"Zstack"` for
+    `"Fly1_Zstack"` or `"Fly1_Zstack_000"`, `"FastZ_Test"` for
+    `"Fly1_FastZ_Test"`, and `""` for a plain `"Fly1"`/`"Fly1_004"`
     (no detail beyond the fly/recording number) or for a name with no leading
-    ``Fly<N>`` token at all (e.g. a ``SyncData102`` folder, which carries no
+    `Fly<N>` token at all (e.g. a `SyncData102` folder, which carries no
     fly-identifying name to extract a detail from).
 
     Used to fold a matched 2P folder's own detail into the reconciled
-    ``RecordingN_2P``/``RecordingN_Synced`` directory name (see
-    ``cli._reconcile_sessions``), so the surface-level name hints at what's
-    inside without opening it -- e.g. ``Recording1_2P_Zstack`` instead of a
-    bare ``Recording1_2P``.
+    `RecordingN_2P`/`RecordingN_Synced` directory name (see
+    `cli._reconcile_sessions`), so the surface-level name hints at what's
+    inside without opening it -- e.g. `Recording1_2P_Zstack` instead of a
+    bare `Recording1_2P`.
     """
     base = _thorimage_base_name(name)
     m = _FLY_PREFIX_RE.match(base)
@@ -1140,17 +1140,17 @@ def correlate_sync_folder_to_image(
     """Find which discovered ThorImage folder *sync_folder* actually paired
     with, purely from the recorded DAQ signal -- no octacam take involved.
 
-    A ``SyncData*`` folder's ``FrameOut`` edge count (per ``CaptureOn``
-    segment) is checked against every candidate's own ``Experiment.xml
-    <Timelapse timepoints="...">`` (scaled for FastZ, see
-    :func:`thorimage_expected_frameout_edges`), within *window_s* of the
+    A `SyncData*` folder's `FrameOut` edge count (per `CaptureOn`
+    segment) is checked against every candidate's own `Experiment.xml
+    <Timelapse timepoints="...">` (scaled for FastZ, see
+    `thorimage_expected_frameout_edges`), within *window_s* of the
     sync folder's own start; an
     exact/near match is decisive, the same signal already used to confirm a
-    behavior-take pairing transitively (see ``match_takes_to_twophoton_batch``)
-    -- this is that same check with no take in the loop, for a ``SyncData``
+    behavior-take pairing transitively (see `match_takes_to_twophoton_batch`)
+    -- this is that same check with no take in the loop, for a `SyncData`
     folder that never matched any take at all (e.g. a same-fly Z-stack ThorSync
     happened to be running for). Returns the best (lowest edge-count diff)
-    candidate within *tolerance*, or ``None`` (no h5py, no segments, or
+    candidate within *tolerance*, or `None` (no h5py, no segments, or
     nothing within tolerance) -- never raises.
     """
     segments = read_capture_segments(sync_folder.path)

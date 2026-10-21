@@ -1,11 +1,11 @@
 """Maximum-intensity projections of anatomical 2P Z-stacks.
 
-For every transferred ThorImage Z-stack (one timepoint, ``ZStage`` stepped,
-not streaming -- see :func:`is_zstack`), writes ``zstack_mip_green.png``,
-``zstack_mip_red.png`` and ``zstack_mip_dual.png`` (the same names the lab's
+For every transferred ThorImage Z-stack (one timepoint, `ZStage` stepped,
+not streaming -- see `is_zstack`), writes `zstack_mip_green.png`,
+`zstack_mip_red.png` and `zstack_mip_dual.png` (the same names the lab's
 earlier hand-made renders used) beside the recording: the
-``RecordingN_2P_<detail>/`` wrapper once reconciled (its ``Renderings/`` in the
-older layout), else the 2P folder's own ``Renderings/``.
+`RecordingN_2P_<detail>/` wrapper once reconciled (its `Renderings/` in the
+older layout), else the 2P folder's own `Renderings/`.
 
 Each slice is lightly box-blurred before the max (a raw MIP keeps the
 brightest *noise* pixel of every column, so an unsmoothed one is speckled),
@@ -13,9 +13,9 @@ then each channel is stretched between percentiles of its own MIP and the
 image is corrected to the physical um aspect. Channel -> color mapping is
 shared with the synced render (ChanA green, ChanB red by default).
 
-Reads the assembled ``ChanX.tif`` stacks one page at a time (constant
+Reads the assembled `ChanX.tif` stacks one page at a time (constant
 memory); a Z-stack whose per-frame TIFFs were never assembled is skipped.
-Best-effort: :func:`render_zstack_mips` logs and returns ``None`` instead of
+Best-effort: `render_zstack_mips` logs and returns `None` instead of
 raising.
 """
 
@@ -47,8 +47,8 @@ class MipOptions:
 
 
 def options_from_config(twophoton_cfg) -> MipOptions | None:
-    """MIP options from a ``[transfer.twophoton]`` config, or None when
-    ``render_zstack_mip`` is off.
+    """MIP options from the 2P settings (`settings`), or None when
+    `render_zstack_mip` is off.
     """
     if twophoton_cfg is None or not getattr(twophoton_cfg, "render_zstack_mip", True):
         return None
@@ -59,10 +59,10 @@ def options_from_config(twophoton_cfg) -> MipOptions | None:
 
 
 def is_zstack(image_dir: Path) -> bool:
-    """A step-and-shoot anatomical Z-stack: ``ZStage enable="1"`` with more
+    """A step-and-shoot anatomical Z-stack: `ZStage enable="1"` with more
     than one step, a single timepoint, and streaming off. Streaming and FastZ
-    captures also carry an enabled ``ZStage`` (real data: ``Fly1_Streaming``
-    has ``steps="201"``) -- the timepoint/streaming checks rule those out.
+    captures also carry an enabled `ZStage` (real data: `Fly1_Streaming`
+    has `steps="201"`) -- the timepoint/streaming checks rule those out.
     """
     from octacam.plugins.twophoton.matching import EXPERIMENT_XML_FILENAME
 
@@ -90,8 +90,8 @@ def is_zstack(image_dir: Path) -> bool:
 
 
 def mip_output_dir(image_dir: Path) -> Path:
-    """``<wrapper>`` (or its legacy ``Renderings/``) for ``<wrapper>/2P/<name>``,
-    else ``<image_dir>/Renderings`` -- never among the raw ThorImage files.
+    """`<wrapper>` (or its legacy `Renderings/`) for `<wrapper>/2P/<name>`,
+    else `<image_dir>/Renderings` -- never among the raw ThorImage files.
     """
     from octacam.plugins.twophoton.layout import (
         LEGACY_RENDERINGS_DIRNAME,
@@ -198,7 +198,7 @@ def _render(image_dir: Path, opts: MipOptions, force: bool) -> Path | None:
         with tifffile.TiffFile(path) as tif:
             mip = None
             for k in range(len(tif.pages)):
-                # One page at a time, never imread(): see twophoton_tiff.
+                # One page at a time, never imread(): see `tiff`.
                 img = tif.asarray(key=k).astype(np.float32)
                 if opts.smooth_px > 0:
                     img = _box_blur(img, opts.smooth_px)

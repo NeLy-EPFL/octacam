@@ -25,22 +25,9 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from octacam.config import resolve_dir_template
-from octacam.plugins.twophoton.copying import (
-    CopyMode,
-    finish_pairing,
-    remove_sources,
-    write_pending,
-)
-from octacam.plugins.twophoton.matching import (
-    TakeInfo,
-    TwoPhotonFolder,
-    discover_twophoton_folders,
-    is_settled,
-    match_takes_to_twophoton_batch,
-)
-from octacam.plugins.twophoton.nas import NasIndex
 from octacam.plugins.twophoton.settings import TwoPhotonSettings, settings_for
 from octacam.plugins.twophoton.takes import (
     current_take_dest,
@@ -53,6 +40,13 @@ from octacam.plugins.twophoton.takes import (
 )
 from octacam.process import ProcessContext, ProcessSteps, deletes_local
 from octacam.recording_format import CONFIG_SNAPSHOT_FILENAME, recording_info_dir
+
+if TYPE_CHECKING:
+    from octacam.plugins.twophoton.matching import TwoPhotonFolder
+
+# The pairing, copying and destination-walk modules (and numpy) load when a
+# step runs, not with the plugin: registering `octacam twophoton` imports this
+# package on every `octacam` call.
 
 log = logging.getLogger("octacam")
 
@@ -121,6 +115,10 @@ class TwoPhotonSteps(ProcessSteps):
         return list(targets.values())
 
     def _run_target(self, target: _Target, ctx: ProcessContext) -> int:
+        from octacam.plugins.twophoton.copying import CopyMode
+        from octacam.plugins.twophoton.matching import discover_twophoton_folders
+        from octacam.plugins.twophoton.nas import NasIndex
+
         settings = target.settings
         options = ctx.options
         deleting = {f: deletes_local(f, options, ctx.configs) for f in target.folders}
@@ -231,6 +229,18 @@ class TwoPhotonSteps(ProcessSteps):
         """Pair and copy each armed take's 2P data. Returns the failures and
         the share folders this run claimed (a dry run writes no record).
         """
+        from octacam.plugins.twophoton.copying import (
+            CopyMode,
+            finish_pairing,
+            remove_sources,
+            write_pending,
+        )
+        from octacam.plugins.twophoton.matching import (
+            TakeInfo,
+            is_settled,
+            match_takes_to_twophoton_batch,
+        )
+
         settings = target.settings
         takes: dict[Path, TakeInfo] = {}
         for folder in target.folders:

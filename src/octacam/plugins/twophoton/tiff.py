@@ -1,20 +1,20 @@
 """Assemble ThorImage's per-frame streaming-mode TIFFs into one OME-TIFF
 stack per channel.
 
-ThorImage writes one ``.tif`` file **per frame per channel** during
+ThorImage writes one `.tif` file **per frame per channel** during
 streaming-mode acquisition -- a 1500-timepoint, 2-channel recording produces
 3000 loose files (confirmed on real data:
-``ChanA_001_001_001_NNNN.tif``, NNNN = frame index). A real Z-stack
+`ChanA_001_001_001_NNNN.tif`, NNNN = frame index). A real Z-stack
 acquisition uses the same 4-numeric-group filename shape but varies a
 *different* group position (index 2, not 3) -- confirmed on real data too, so
 detection here finds which position actually varies per file set rather than
-assuming either layout. Neither ``<Streaming enable>`` nor
-``<CaptureMode mode>`` in ``Experiment.xml`` reliably distinguishes "already
+assuming either layout. Neither `<Streaming enable>` nor
+`<CaptureMode mode>` in `Experiment.xml` reliably distinguishes "already
 one file" from "needs assembly" -- every real recording inspected (streaming,
-Z-stack, and ``rawData="1"`` aborted test captures) writes per-frame files or
+Z-stack, and `rawData="1"` aborted test captures) writes per-frame files or
 none at all, never a native single stack -- so detection is disk-truth-driven:
-count each channel's actual files, cross-checked against ``Experiment.xml``'s
-own ``Timelapse/@timepoints`` (a T-axis stack) or ``ZStage/@steps`` (a
+count each channel's actual files, cross-checked against `Experiment.xml`'s
+own `Timelapse/@timepoints` (a T-axis stack) or `ZStage/@steps` (a
 Z-axis stack) as a sanity check, never as the trigger.
 
 One assembled file per channel, not one combined multi-channel file -- a
@@ -22,21 +22,21 @@ functional (e.g. GCaMP) and a purely structural/reference channel used only
 for motion-correction are analyzed by different pipeline stages that never
 need both loaded together, so combining them buys nothing and would require
 assuming per-timepoint correspondence between channels that can't be
-verified from ``Experiment.xml`` alone.
+verified from `Experiment.xml` alone.
 
-A "FastZ" acquisition (ThorImage's own ``zFastEnable`` -- recording several Z
+A "FastZ" acquisition (ThorImage's own `zFastEnable` -- recording several Z
 planes fast enough to sample a transient, e.g. seeing both a cell body and
 its axon at once) varies *two* of the 4 filename numeric groups
 simultaneously -- one per Z-plane, one per timepoint -- confirmed on real data
-(``ZStage steps="4"`` + ``Timelapse timepoints="50"``, 200 real files, every
+(`ZStage steps="4"` + `Timelapse timepoints="50"`, 200 real files, every
 Z-plane's own timepoint sequence contiguous). This still produces one file
 per (channel, Z-plane) -- every timepoint for that plane in one stack, not a
 single combined 4-D file -- rather than guess at an interleaving order for a
-true 4-D file; see :func:`_plan_fastz_channel`.
+true 4-D file; see `_plan_fastz_channel`.
 
 Everything here is best-effort and never raises (mirrors
-``twophoton_signals.py``'s shape): ``tifffile`` is an optional dependency
-(the ``twophoton`` extra), so a rig without it -- or a file set that can't be
+`signals`' shape): `tifffile` is an optional dependency
+(the `twophoton` extra), so a rig without it -- or a file set that can't be
 safely assembled -- simply falls back to a plain per-file copy, never a
 crashed transfer or lost frames.
 """
@@ -77,8 +77,8 @@ def tifffile_available() -> bool:
 
 
 def _thorimage_channel_names(experiment_xml: Path) -> list[str]:
-    """``<Wavelengths><Wavelength name="..."/></Wavelengths>`` names, in
-    document order, or ``[]`` if missing/unparseable.
+    """`<Wavelengths><Wavelength name="..."/></Wavelengths>` names, in
+    document order, or `[]` if missing/unparseable.
     """
     try:
         root = ET.parse(experiment_xml).getroot()
@@ -96,17 +96,17 @@ def _thorimage_channel_names(experiment_xml: Path) -> list[str]:
 
 
 def _thorimage_zstage_steps(experiment_xml: Path) -> int | None:
-    """``<ZStage steps="...">`` -- the Z-axis frame count for a Z-stack *or* a
+    """`<ZStage steps="...">` -- the Z-axis frame count for a Z-stack *or* a
     simultaneous multi-plane ("FastZ") acquisition, or None if
     missing/unparseable/neither is actually active.
 
     Two distinct ways real ThorImage data enables Z motion, both confirmed
-    on real data: a traditional step-and-shoot Z-stack sets ``ZStage
-    enable="1"`` directly; a FastZ acquisition (the piezo moves *during* one
+    on real data: a traditional step-and-shoot Z-stack sets `ZStage
+    enable="1"` directly; a FastZ acquisition (the piezo moves *during* one
     continuous streaming acquisition, not between discrete stops) instead
-    leaves ``ZStage enable="0"`` and signals Z motion via
-    ``<Streaming enable="1" zFastEnable="1">`` -- confirmed on a real
-    ``Fly1_FastZ_Test``, where checking only ``ZStage``'s own ``enable``
+    leaves `ZStage enable="0"` and signals Z motion via
+    `<Streaming enable="1" zFastEnable="1">` -- confirmed on a real
+    `Fly1_FastZ_Test`, where checking only `ZStage`'s own `enable`
     would have missed real, active Z motion entirely.
     """
     try:
@@ -136,8 +136,8 @@ def _thorimage_zstage_steps(experiment_xml: Path) -> int | None:
 
 
 def _thorimage_pixel_size_um(experiment_xml: Path) -> float | None:
-    """``<LSM pixelSizeUM="...">`` -- the scan system's actual per-pixel size,
-    not the wide-field ``<Camera pixelSizeUM>`` -- or None if unavailable.
+    """`<LSM pixelSizeUM="...">` -- the scan system's actual per-pixel size,
+    not the wide-field `<Camera pixelSizeUM>` -- or None if unavailable.
     """
     try:
         root = ET.parse(experiment_xml).getroot()
@@ -158,9 +158,9 @@ def _thorimage_pixel_size_um(experiment_xml: Path) -> float | None:
 def _matching_frame_files(
     folder: Path, channel: str
 ) -> list[tuple[Path, tuple[int, int, int, int]]]:
-    """Every file in *folder* matching ``<channel>_NNNN_NNNN_NNNN_NNNN.tif(f)``
+    """Every file in *folder* matching `<channel>_NNNN_NNNN_NNNN_NNNN.tif(f)`
     exactly -- four numeric groups, nothing else -- paired with its parsed
-    numeric groups. A real stray file like ``ChanB_Preview.tif`` (no numeric
+    numeric groups. A real stray file like `ChanB_Preview.tif` (no numeric
     groups at all) never matches, confirmed against real data.
     """
     pattern = re.compile(_FRAME_RE_TEMPLATE.format(chan=re.escape(channel)))
@@ -201,28 +201,28 @@ def _plan_fastz_channel(
     """Plan a simultaneous multi-plane ("FastZ") channel -- exactly two of the
     4 filename numeric groups vary at once, one per Z-plane and one per
     timepoint, rather than the single-axis streaming/Z-stack case
-    :func:`plan_assembly` otherwise handles. Confirmed on real data
-    (ThorImage's own ``zFastEnable`` acquisitions, e.g. a real
-    ``Fly1_FastZ_Test``: ``ZStage steps="4"`` + ``Timelapse timepoints="50"``
-    + ``Streaming enable="1"``, real files with Z values 1-4 crossed with T
+    `plan_assembly` otherwise handles. Confirmed on real data
+    (ThorImage's own `zFastEnable` acquisitions, e.g. a real
+    `Fly1_FastZ_Test`: `ZStage steps="4"` + `Timelapse timepoints="50"`
+    + `Streaming enable="1"`, real files with Z values 1-4 crossed with T
     values 1-50, 200 files total, every Z-plane's own T-sequence contiguous
     1..50).
 
     Output shape (Matthias's own preference, 2026-09-17): one TIFF per
     (channel, Z-plane) -- every timepoint for that plane, not one combined
     4-D file -- which is exactly the existing single-axis assembly case,
-    just partitioned by Z first: split ``found`` into one group per distinct
+    just partitioned by Z first: split `found` into one group per distinct
     Z value, then apply the same ordering/contiguity check
-    :func:`plan_assembly` already does for a single varying axis to each
+    `plan_assembly` already does for a single varying axis to each
     group independently.
 
-    Returns one ``"ready"`` :class:`ChannelPlan` per Z-plane when both
-    varying positions unambiguously match ``zsteps``/``timepoints`` (by
+    Returns one `"ready"` `ChannelPlan` per Z-plane when both
+    varying positions unambiguously match `zsteps`/`timepoints` (by
     distinct-value count -- the same count-based axis discrimination the
     single-axis case uses) and every Z-plane's own timepoint sequence is
-    contiguous. Returns ``None`` -- never a partial/guessed result -- when
+    contiguous. Returns `None` -- never a partial/guessed result -- when
     either axis can't be configured, both counts could plausibly be either
-    axis (e.g. ``zsteps == timepoints``, genuinely unresolvable from counts
+    axis (e.g. `zsteps == timepoints`, genuinely unresolvable from counts
     alone), or any single Z-plane's own file set doesn't cleanly resolve;
     the caller falls back to one "problem" entry for the whole channel.
     """
@@ -301,17 +301,17 @@ class AssemblyPlan:
 
 
 def plan_assembly(folder: Path) -> AssemblyPlan:
-    """Never raises. Empty ``.channels`` when tifffile is unavailable, when
-    ``Experiment.xml`` is missing/unparseable, or no ``<Wavelength>`` entries
+    """Never raises. Empty `.channels` when tifffile is unavailable, when
+    `Experiment.xml` is missing/unparseable, or no `<Wavelength>` entries
     are found -- caller treats an empty plan as "nothing to assemble, use a
-    plain transfer_tree copy", exactly like ``h5py_available() is False``
-    degrades ``twophoton_signals`` to "no verification" today. A channel
+    plain transfer_tree copy", exactly like `h5py_available() is False`
+    degrades `signals` to "no verification" today. A channel
     with exactly one matching file, or a channel declared but with zero
-    matching files on disk (e.g. an aborted ``rawData="1"`` test capture),
+    matching files on disk (e.g. an aborted `rawData="1"` test capture),
     produces no entry at all -- there's nothing to assemble and nothing wrong
-    either. A channel with more than one file is either ``"ready"`` (a
+    either. A channel with more than one file is either `"ready"` (a
     single, contiguous, count-verified varying position was found) or
-    ``"problem"`` (falls back to a plain per-file copy for that channel --
+    `"problem"` (falls back to a plain per-file copy for that channel --
     assembly must never mean silently dropping or corrupting frames).
     """
     empty = AssemblyPlan(folder)
@@ -427,10 +427,10 @@ def plan_assembly(folder: Path) -> AssemblyPlan:
 def _stopped_early(
     n: int, timepoints: int | None, zsteps: int | None
 ) -> tuple[Literal["T", "Z"], int] | None:
-    """``(axis, declared count)`` when *n* contiguous frames are fewer than a
+    """`(axis, declared count)` when *n* contiguous frames are fewer than a
     streaming capture's declared timepoints (or, for a single-timepoint
     capture, a Z-stack's declared slices) -- an acquisition stopped early.
-    Streaming captures also carry an enabled ``ZStage``, so timepoints win.
+    Streaming captures also carry an enabled `ZStage`, so timepoints win.
     """
     if timepoints is not None and timepoints > 1:
         return ("T", timepoints) if n < timepoints else None
@@ -472,12 +472,12 @@ def _ome_metadata(plan: ChannelPlan, experiment_xml: Path) -> dict:
 
 def _read_single_page(path: Path):
     """The raw pixel array of *path*'s own first (and only) IFD -- never
-    ``tifffile.imread(path)``, which is unsafe here: real ThorImage per-frame
+    `tifffile.imread(path)`, which is unsafe here: real ThorImage per-frame
     TIFFs embed OME-XML in their first file that cross-references every
     sibling file in the whole channel/Z/T set by filename (confirmed on real
     data -- a Z-stack's first file's OME-XML describes the *entire*
-    SizeC=2/SizeZ=9 dataset via ``<TiffData FirstZ FirstC><UUID
-    FileName=.../>`` entries per physical file), and ``imread`` follows that
+    SizeC=2/SizeZ=9 dataset via `<TiffData FirstZ FirstC><UUID
+    FileName=.../>` entries per physical file), and `imread` follows that
     linkage, silently returning a multi-file-stitched array instead of just
     this one file's own frame.
     """
@@ -502,10 +502,10 @@ def assemble_channel_stack(
     multi-GB channel (never holds more than one frame's pixel data in
     memory). Writes to a unique sibling temp file, fsyncs, verifies the
     written page count always and (when *full_verify*) every page's pixel
-    content against its source file, then ``os.replace()``s onto
+    content against its source file, then `os.replace()`s onto
     *dest_path* only after verification passes. Never raises: any failure
     (missing/corrupt source file, a tifffile write/read error, a verify
-    mismatch) aborts, removes the temp file, and returns ``ok=False`` with a
+    mismatch) aborts, removes the temp file, and returns `ok=False` with a
     reason -- the caller decides the fallback. Leaves no partial file at
     *dest_path* on failure.
     """
@@ -613,7 +613,7 @@ def assemble_channel_stack(
 def make_progress_logger(
     folder: Path, channel: str, interval_s: float = 8.0
 ) -> Callable[[int, int], None]:
-    """A time-gated progress callback for :func:`assemble_channel_stack` --
+    """A time-gated progress callback for `assemble_channel_stack` --
     logs every *interval_s* seconds and always on the final frame, never once
     per frame (a 1500-frame channel would otherwise reproduce exactly the
     log-spam problem this feature exists to fix).

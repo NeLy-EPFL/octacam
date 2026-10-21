@@ -1,25 +1,25 @@
-"""Synced behavior + 2-photon preview video (``synced_2p.mp4``, beside the grid).
+"""Synced behavior + 2-photon preview video (`synced_2p.mp4`, beside the grid).
 
 A quick-look render, not an analysis product: the behavior grid on the left,
 the 2P imaging as a green/red merge on the right, frame-aligned on
 ThorSync's own DAQ clock. Behavior frame *k* is the take's *k*-th
-``DI/Cameras`` edge and 2P frame *j* is its *j*-th ``DI/FrameOut`` edge,
-both inside the ``CaptureOn`` segment whose camera-edge count verified the
-pairing (see ``twophoton_signals``) -- so the two halves share one clock and
+`DI/Cameras` edge and 2P frame *j* is its *j*-th `DI/FrameOut` edge,
+both inside the `CaptureOn` segment whose camera-edge count verified the
+pairing (see `signals`) -- so the two halves share one clock and
 never drift, unlike wall-clock file timestamps.
 
-Works on an already-transferred take folder (``grid.mp4``,
-``2P/<ThorImage>/ChanX[_ZNN].tif`` assembled stacks,
-``2P/SyncData*/Episode001.h5``, ``twophoton_match.json``; either recording
-layout, see ``layout``), so the same code
-serves the automatic post-transfer hook in ``octacam process`` and the
-standalone ``octacam render`` backfill.
+Works on an already-transferred take folder (`grid.mp4`,
+`2P/<ThorImage>/ChanX[_ZNN].tif` assembled stacks,
+`2P/SyncData*/Episode001.h5`, `twophoton_match.json`; either recording
+layout, see `layout`), so the same code
+serves the automatic post-transfer hook in `octacam process` and the
+standalone `octacam render` backfill.
 
-**FastZ** (``ChanX_Z01..ZNN.tif``, one stack per plane): each timepoint is
-projected across its Z planes (``mean`` by default, which averages the
-planes into a steadier image; ``max`` is also available) and timestamped at
-the first ``FrameOut`` edge of its volume -- a volume spans ``planes +
-flybackFrames`` edges (confirmed on real data: 500 timepoints x (5 + 1) =
+**FastZ** (`ChanX_Z01..ZNN.tif`, one stack per plane): each timepoint is
+projected across its Z planes (`mean` by default, which averages the
+planes into a steadier image; `max` is also available) and timestamped at
+the first `FrameOut` edge of its volume -- a volume spans `planes +
+flybackFrames` edges (confirmed on real data: 500 timepoints x (5 + 1) =
 3000 edges).
 
 **Look**: each channel is linearly stretched between fixed percentiles
@@ -27,10 +27,10 @@ sampled across the whole recording (fixed, so the video doesn't flicker
 frame to frame), then mapped green/red. ThorImage records no per-channel
 color, so the mapping is configurable; the default (ChanA green, ChanB red)
 matches the 2P rig (confirmed by the operator). Non-square pixels are
-corrected to the physical um aspect from ``Experiment.xml``.
+corrected to the physical um aspect from `Experiment.xml`.
 
-Best-effort like the rest of the 2P pipeline: :func:`render_synced_video`
-logs and returns ``None`` on any missing input instead of raising, so a
+Best-effort like the rest of the 2P pipeline: `render_synced_video`
+logs and returns `None` on any missing input instead of raising, so a
 render can never fail a transfer.
 """
 
@@ -72,8 +72,8 @@ class SyncedRenderOptions:
 
 
 def options_from_config(twophoton_cfg) -> SyncedRenderOptions | None:
-    """Render options from a ``[transfer.twophoton]`` config, or None when
-    ``render_synced_video`` is off.
+    """Render options from the 2P settings (`settings`), or None when
+    `render_synced_video` is off.
     """
     if twophoton_cfg is None or not getattr(twophoton_cfg, "render_synced_video", True):
         return None
@@ -149,8 +149,8 @@ def saved_images(image_dir: Path) -> bool:
 
 
 def channel_stacks(image_dir: Path) -> dict[str, list[Path]]:
-    """``{channel: [stack, ...]}`` -- one stack for a plain stream, one per Z
-    plane (sorted) for FastZ. Ignores ThorImage's ``*_Preview.tif``.
+    """`{channel: [stack, ...]}` -- one stack for a plain stream, one per Z
+    plane (sorted) for FastZ. Ignores ThorImage's `*_Preview.tif`.
     """
     found: dict[str, list[tuple[int, Path]]] = {}
     for p in image_dir.iterdir():
@@ -219,7 +219,7 @@ class _TwoPhotonReader:
         out = {}
         for chan, files in self._files.items():
             # pages[i].asarray(), never imread(): ThorImage OME-XML links
-            # sibling files and imread would follow it (see twophoton_tiff).
+            # sibling files and imread would follow it (see `tiff`).
             planes = [f.pages[index].asarray().astype(np.float32) for f in files]
             if len(planes) == 1:
                 out[chan] = planes[0]
@@ -303,7 +303,7 @@ def render_synced_video(
     *,
     force: bool = False,
 ) -> Path | None:
-    """Render ``synced_2p.mp4`` beside *take_dir*'s grid. Returns its path, or
+    """Render `synced_2p.mp4` beside *take_dir*'s grid. Returns its path, or
     None when skipped/failed (reason logged). Skips an existing output unless
     *force*. Never raises.
     """

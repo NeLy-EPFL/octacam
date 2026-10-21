@@ -3,12 +3,12 @@ not record (ThorImage's ThorSync box unticked: real 2026-10-20, a whole day).
 
 The board times both halves on one clock. Its camera pulses come from its own
 timer at the recording's fps, started on the first 2P frame's rising edge, and
-its end-of-run report (``twophoton.json`` ``stop``) counts the 2P frame pulses
-and times the run in its ``millis()``. The 2P frame period follows:
+its end-of-run report (`twophoton.json` `stop`) counts the 2P frame pulses
+and times the run in its `millis()`. The 2P frame period follows:
 
     period = (run_ms - idle_ms - high_ms / edges) / (edges - 1)
 
-(the run ends ``idle_ms`` after the input last went LOW, which is one HIGH
+(the run ends `idle_ms` after the input last went LOW, which is one HIGH
 time past the last frame's start). Checked against ThorSync on 2026-10-16:
 0.1 camera frame off by the end of a 5000-frame take.
 
@@ -22,7 +22,7 @@ The first camera pulse fires half a camera period after the first 2P frame. A
 board running an older build (before 2026-10-21) carried its pin toggle over
 from the previous run, which made it half or a whole period: such a take's
 start is known to within a quarter period (2.5 ms at 100 fps). The plugin notes
-a current build in ``twophoton.json`` (``camera_phase``).
+a current build in `twophoton.json` (`camera_phase`).
 
 A board too old to report (before 2026-10-14) leaves no count nor run time.
 Its start rule is the same, so such a take is modeled from ThorImage instead:
@@ -32,7 +32,7 @@ nominal rate, measured on takes that have a report or a ThorSync recording
 (1.00111 at 1024x1024 / 7.7 Hz, 1.00121 at 1024x512 / 15.3 Hz, each stable to
 about 1e-5 over weeks).
 
-``twophoton_board_sync.json`` (the take's info folder) holds the model; the
+`twophoton_board_sync.json` (the take's info folder) holds the model; the
 synced render and scapepp read it in place of ThorSync's edges.
 """
 
@@ -97,7 +97,7 @@ def run_period_ms(stop: dict, idle_ms: int) -> float | None:
 
 
 def _nominal_rate(experiment_xml: Path) -> float | None:
-    """ThorImage's ``<LSM frameRate>`` (Hz), or None."""
+    """ThorImage's `<LSM frameRate>` (Hz), or None."""
     try:
         lsm = ET.parse(experiment_xml).getroot().find("LSM")
         return float(lsm.get("frameRate", "")) if lsm is not None else None
@@ -106,7 +106,7 @@ def _nominal_rate(experiment_xml: Path) -> float | None:
 
 
 def _scan_config(experiment_xml: Path) -> str | None:
-    """The scan configuration a rig factor belongs to: ``"1024x512"``."""
+    """The scan configuration a rig factor belongs to: `"1024x512"`."""
     try:
         lsm = ET.parse(experiment_xml).getroot().find("LSM")
     except ET.ParseError, OSError:
@@ -342,7 +342,7 @@ def board_sync(
 def _unreported(
     take: BoardTake, references: list[BoardTake], factors: dict[Path, float | None]
 ) -> tuple[int, float, str] | None:
-    """``(2P pulses, period, where the period came from)`` for a take whose
+    """`(2P pulses, period, where the period came from)` for a take whose
     board sent no report (module doc), or None.
     """
     pulses = _saved_scans(take)
@@ -374,7 +374,7 @@ def _unreported(
 
 
 def edge_times(model: dict) -> tuple[list[float], list[float]]:
-    """``(cameras, frameout)`` pulse times in seconds from the first 2P frame,
+    """`(cameras, frameout)` pulse times in seconds from the first 2P frame,
     as `signals.read_segment_edge_times` gives them from ThorSync.
     """
     cam_s = model["camera_period_ms"] / 1000

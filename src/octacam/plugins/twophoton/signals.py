@@ -3,11 +3,11 @@
 `twophoton_transfer.py` pairs a behavior take with a ThorSync/ThorImage folder
 by wall-clock time overlap alone -- a heuristic. Real-data testing found it can
 be made airtight instead, whenever ThorSync actually ran: a `SyncData*`
-folder's ``Episode*.h5`` records the Arduino's camera-trigger pulse on its own
-DAQ clock (digital input channel ``Cameras``), and its edge count on a real
+folder's `Episode*.h5` records the Arduino's camera-trigger pulse on its own
+DAQ clock (digital input channel `Cameras`), and its edge count on a real
 recording matched **exactly** the paired take's own recorded frame count
-(19399 == 19399); ``FrameOut``'s edge count likewise matched ThorImage's own
-``Experiment.xml <Timelapse timepoints="...">`` (1500 == 1500). ``CaptureOn``
+(19399 == 19399); `FrameOut`'s edge count likewise matched ThorImage's own
+`Experiment.xml <Timelapse timepoints="...">` (1500 == 1500). `CaptureOn`
 gates the DAQ's own "recording active" window (one rising + one falling edge
 per take actually recorded -- treated generically as N >= 0 segments here, since
 a `SyncData` folder can span more than one take).
@@ -17,7 +17,7 @@ ThorImage-only session (confirmed real case) has no signal to check against,
 and stays on the timestamp-only path in `twophoton_transfer.py`.
 
 Everything here is best-effort and never raises: `h5py` is an optional
-dependency (the ``twophoton`` extra) so a rig without it -- or a corrupt/
+dependency (the `twophoton` extra) so a rig without it -- or a corrupt/
 unexpected file -- simply gets no verification, not a crashed transfer.
 """
 
@@ -54,14 +54,14 @@ def h5py_available() -> bool:
 def channel_sample_rate(settings_xml: Path, channel_alias: str) -> float | None:
     """Best-effort DAQ sample rate (Hz) for *channel_alias*, or None.
 
-    ``ThorRealTimeDataSettings.xml`` can list several ``<AcquireBoard>``
+    `ThorRealTimeDataSettings.xml` can list several `<AcquireBoard>`
     blocks for the same physical device -- alternate presets, not all active
-    for a given recording -- each with its own enabled ``<SampleRate>`` and
-    its own ``<DataChannel enable="...">`` children. There is no reliable way
+    for a given recording -- each with its own enabled `<SampleRate>` and
+    its own `<DataChannel enable="...">` children. There is no reliable way
     to tell which block was actually active for *this* recording from the
     settings file alone, so this returns the first board's enabled rate where
     the channel itself is enabled -- possibly an inactive preset's. Use
-    :func:`thorsync_sample_rate` (the active board's first) for any timeline.
+    `thorsync_sample_rate` (the active board's first) for any timeline.
     """
     try:
         root = ET.parse(settings_xml).getroot()
@@ -93,7 +93,7 @@ def channel_sample_rate(settings_xml: Path, channel_alias: str) -> float | None:
 
 @dataclass(frozen=True)
 class CaptureSegment:
-    """One ``DI/CaptureOn`` rising->falling window within an Episode h5 file."""
+    """One `DI/CaptureOn` rising->falling window within an Episode h5 file."""
 
     start_sample: int
     end_sample: int
@@ -160,7 +160,7 @@ _CAMERA_TAIL_S = 10.0
 
 
 def _count_edges_in_range(edges: list[int], start: int, end: int) -> int:
-    """Edges in ``[start, end)`` -- *edges* is sorted (bisect, not a scan: a
+    """Edges in `[start, end)` -- *edges* is sorted (bisect, not a scan: a
     201-slice Z-stack has 201 segments over tens of thousands of edges).
     """
     import bisect
@@ -169,13 +169,13 @@ def _count_edges_in_range(edges: list[int], start: int, end: int) -> int:
 
 
 def read_capture_segments(sync_folder: Path) -> list[CaptureSegment] | None:
-    """Parse *sync_folder*'s ``Episode*.h5`` into one :class:`CaptureSegment`
-    per ``DI/CaptureOn`` on/off window.
+    """Parse *sync_folder*'s `Episode*.h5` into one `CaptureSegment`
+    per `DI/CaptureOn` on/off window.
 
-    Returns ``None`` when verification isn't possible at all -- h5py missing,
+    Returns `None` when verification isn't possible at all -- h5py missing,
     no episode file, a required dataset absent, or a corrupt/unreadable file
     -- distinct from an empty list, which means the file opened fine but
-    ``CaptureOn`` never toggled (also a real, meaningful outcome). Never
+    `CaptureOn` never toggled (also a real, meaningful outcome). Never
     raises.
     """
     if not h5py_available():
@@ -385,15 +385,15 @@ def camera_edge_diff(
 
 
 def frameout_edge_diff(segment: CaptureSegment, timepoints: int) -> int:
-    """``|FrameOut edges - timepoints|`` -- see :func:`camera_edge_diff`."""
+    """`|FrameOut edges - timepoints|` -- see `camera_edge_diff`."""
     return abs(segment.frameout_edges - timepoints)
 
 
 def read_segment_edge_times(
     sync_folder: Path, segment: CaptureSegment
 ) -> tuple[list[float], list[float]] | None:
-    """``(cameras, frameout)`` rising-edge times in seconds, relative to
-    *segment*'s own ``CaptureOn`` rise, for every edge inside that segment --
+    """`(cameras, frameout)` rising-edge times in seconds, relative to
+    *segment*'s own `CaptureOn` rise, for every edge inside that segment --
     the per-frame alignment both halves of a synced behavior+2P render share
     (one DAQ clock, so no wall-clock drift between the two). Falls back to
     ThorSync's usual 100 kHz when the settings file doesn't say. None when
@@ -436,7 +436,7 @@ def read_segment_edge_times(
 
 
 def _active_board(settings_xml: Path):
-    """ThorSync's active ``<AcquireBoard active="1">`` element, or None."""
+    """ThorSync's active `<AcquireBoard active="1">` element, or None."""
     try:
         root = ET.parse(settings_xml).getroot()
     except ET.ParseError, OSError:
@@ -447,7 +447,7 @@ def _active_board(settings_xml: Path):
 def thorsync_sample_rate(settings_xml: Path) -> float | None:
     """ThorSync's sample rate (Hz) -- the active board's, falling back to the
     first enabled one. The single source for every ThorSync timeline
-    (matching, cut-off detection, the synced render): ``channel_sample_rate``
+    (matching, cut-off detection, the synced render): `channel_sample_rate`
     alone can return an inactive preset's rate, which would stretch the
     render's timeline (e.g. 3.3x for a 30 kHz preset listed first).
     """
@@ -457,7 +457,7 @@ def thorsync_sample_rate(settings_xml: Path) -> float | None:
 
 
 def _active_board_rate(settings_xml: Path) -> float | None:
-    """Sample rate (Hz) of the active board -- unlike :func:`channel_sample_rate`,
+    """Sample rate (Hz) of the active board -- unlike `channel_sample_rate`,
     never an inactive preset's.
     """
     board = _active_board(settings_xml)
@@ -473,9 +473,9 @@ def _active_board_rate(settings_xml: Path) -> float | None:
 
 
 def thorsync_duration_limit(settings_xml: Path) -> float | None:
-    """ThorSync's acquisition length (s) -- the active ``<AcquireBoard
-    active="1">``'s ``duration``. ThorSync stops recording after it whatever
-    the capture is doing: real 2026-10-14 ``duration="320"`` cut every ~394 s
+    """ThorSync's acquisition length (s) -- the active `<AcquireBoard
+    active="1">`'s `duration`. ThorSync stops recording after it whatever
+    the capture is doing: real 2026-10-14 `duration="320"` cut every ~394 s
     take's episode at exactly 32 M samples (100 kHz). None when missing,
     unreadable or 0.
     """
@@ -491,7 +491,7 @@ def thorsync_duration_limit(settings_xml: Path) -> float | None:
 
 @dataclass(frozen=True)
 class EpisodeCutOff:
-    """A ThorSync episode that ended while ``CaptureOn`` was still high: the
+    """A ThorSync episode that ended while `CaptureOn` was still high: the
     acquisition went on, but ThorSync stopped recording (its duration limit)
     -- every channel (timing, AirFlow, ...) is missing for the rest of it.
     """
@@ -501,8 +501,8 @@ class EpisodeCutOff:
 
 
 def episode_cut_off(sync_folder: Path) -> EpisodeCutOff | None:
-    """An :class:`EpisodeCutOff` when *sync_folder*'s episode stops mid-capture
-    (``CaptureOn`` high at its last sample), else None -- also None when it
+    """An `EpisodeCutOff` when *sync_folder*'s episode stops mid-capture
+    (`CaptureOn` high at its last sample), else None -- also None when it
     can't be read (no h5py, no episode, no CaptureOn). Reads only the last
     sample, so it is cheap even on a multi-GB episode over the network. Only
     meaningful for a settled folder (a still-recording one is "cut" too).
@@ -557,7 +557,7 @@ def describe_cut_off(name: str, cut: EpisodeCutOff) -> str:
 
 
 def latest_thorsync_limit(source_root: Path) -> tuple[Path, float | None] | None:
-    """``(newest SyncData folder, its ThorSync duration limit)`` under
+    """`(newest SyncData folder, its ThorSync duration limit)` under
     *source_root*'s experiment folders -- the settings ThorSync used last,
     hence (until the next acquisition) the ones the next take will get. None
     when the share holds no SyncData folder or can't be listed.

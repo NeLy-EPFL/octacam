@@ -3,17 +3,17 @@ record, in place of the AirFlow channel ThorSync would have held.
 
 airflow_control (the rig's MFC controller, on the PC that runs octacam) logs
 every setpoint it writes as one JSON line with the host's wall clock
-(``airflow_*.jsonl``): the clock octacam stamps its frames with. The AirFlow
+(`airflow_*.jsonl`): the clock octacam stamps its frames with. The AirFlow
 sensor follows those commands closely (2026-10-16: the rebuilt signal gives
 the sensor's air on/off on 99.9 % of camera frames; scapepp's
-``analysis/dan_screen/airlog.py`` does the rebuild). So for a take paired
-without ThorSync, ``octacam process`` copies the commands that cover it into
-``octacam_recording/airflow_commands.jsonl``: every line its airflow_control
+`analysis/dan_screen/airlog.py` does the rebuild). So for a take paired
+without ThorSync, `octacam process` copies the commands that cover it into
+`octacam_recording/airflow_commands.jsonl`: every line its airflow_control
 session logged during the take (plus a second on either side), and that
 session's last setpoint of each channel before it, the flow the take started
 with.
 
-Set by the twophoton plugin option ``airflow_logs`` (the log folder).
+Set by the twophoton plugin option `airflow_logs` (the log folder).
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ def commands_for(take: Path, log_dir: Path) -> list[str] | None:
 def attach_airflow_commands(
     takes: list[Path], log_dir: Path, *, dry_run: bool = False
 ) -> list[Path]:
-    """Write ``airflow_commands.jsonl`` beside each of *takes* (paired without
+    """Write `airflow_commands.jsonl` beside each of *takes* (paired without
     ThorSync) that an airflow_control session covers. Returns those takes.
     """
     from octacam.files import atomic_write_text
