@@ -107,8 +107,13 @@ def verify(
         typer.Option(
             "--delete",
             help="Delete the share folders found identical at the destination "
-            "(only inside the share folder).",
+            "(only inside the share folder): those under PATHS, or every one "
+            "with --all.",
         ),
+    ] = False,
+    all_: Annotated[
+        bool,
+        typer.Option("--all", help="With --delete: the whole share folder."),
     ] = False,
     user: UserOption = None,
     verbose: Verbose = False,
@@ -123,6 +128,11 @@ def verify(
     from octacam.plugins.twophoton.verify import within
 
     dest_root, settings = _rig(config_dir, user)
+    if delete and not paths and not all_:
+        sys.exit(
+            "name the share folders to delete, or pass --all (every verified "
+            f"folder under {settings.source})"
+        )
     _source, folders = _scan(settings)
     if paths:
         folders = within(folders, paths)
@@ -277,8 +287,16 @@ def reassemble(
     config_dir: ConfigDir,
     paths: Annotated[
         list[Path] | None,
-        typer.Argument(help="Folders to search (default: the whole destination)."),
+        typer.Argument(help="Folders to search on the destination."),
     ] = None,
+    all_: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Search the whole destination (slow over a share; the frames "
+            "of each stacked folder are deleted).",
+        ),
+    ] = False,
     dry_run: DryRun = False,
     verbose: Verbose = False,
 ) -> None:
@@ -297,6 +315,11 @@ def reassemble(
     if not tifffile_available():
         sys.exit("stacking needs tifffile: install octacam[twophoton]")
     dest_root, _settings = _rig(config_dir)
+    if not paths and not all_:
+        sys.exit(
+            "name the folders to search, or pass --all (walks the whole destination "
+            f"{dest_root}, deleting each stacked folder's frames)"
+        )
     roots = list(paths or [dest_root])
     assembled = problems = 0
     for xml in sorted(

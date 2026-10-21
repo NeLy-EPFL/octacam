@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 import pytest
+from helpers import plugin_doctor_text
 from typer.testing import CliRunner
 
 from octacam import session_cache
@@ -521,6 +522,36 @@ def test_take_match_start_estimates_first_frame_for_older_synced_takes(tmp_path)
     assert match_start_s(folder, summary) == pytest.approx(1000.0)
 
 
+def test_a_take_still_waiting_for_its_2p_data_keeps_its_local_folder(tmp_path):
+    # Tommy's review: the delete after transfer removed the local folder and
+    # its pending note with it, so the take was never paired. #24 keeps a
+    # folder with a file the destination does not hold.
+    pytest.importorskip("tifffile")
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=take_start + 1)
+    image = _make_image_folder_2p(
+        source_root, "MB247_CI63", "Fly1", u_time=take_start + 1, n_frames=4
+    )
+    now = time.time()
+    for p in image.iterdir():
+        os.utime(p, (now, now))  # ThorImage still writing
+    folder = _armed_recording(
+        tmp_path / "rec",
+        source_root=source_root,
+        dest_root=dest_root,
+        take_start=take_start,
+        delete_share_data=True,
+    )
+    result = _process(folder, "--delete-after-transfer")
+    assert result.exit_code == 0, result.output
+    assert "still being written" in _out(result)
+    assert folder.is_dir()  # kept: its pending note is not at the destination
+    assert any(folder.rglob("twophoton_pending.json"))
+    assert image.is_dir() and (source_root / "MB247_CI63" / "SyncData102").is_dir()
+
+
 def test_take_waits_whole_while_one_2p_folder_is_still_written(tmp_path):
     # Audit 2026-10-15: the settled ThorSync folder alone was paired while
     # ThorImage still wrote its TIFFs; the image folder was later swept as
@@ -804,6 +835,23 @@ def test_rerun_keeps_complete_stacks_and_rebuilds_a_bad_one(tmp_path):
     assert not _stack_is_complete(stack, ch.source_files, recheck=False)
 
 
+def test_the_deleting_commands_need_paths_or_all(tmp_path):
+    # Tommy's review: no paths walked the whole destination (reassemble deletes
+    # the frames it stacks) or the whole share (verify --delete).
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "share"
+    source_root.mkdir()
+    config_dir = _rig_config(tmp_path, dest_root, source_root)
+    result = runner.invoke(
+        app, ["twophoton", "reassemble", "--config", str(config_dir)]
+    )
+    assert result.exit_code != 0 and "--all" in result.output
+    result = runner.invoke(
+        app, ["twophoton", "verify", "--config", str(config_dir), "--delete"]
+    )
+    assert result.exit_code != 0 and "--all" in result.output
+
+
 def test_reassemble_tiffs_requires_config():
     result = runner.invoke(app, ["twophoton", "reassemble"])
     assert result.exit_code != 0
@@ -816,7 +864,7 @@ def test_reassemble_tiffs_assembles_and_deletes_originals(tmp_path):
     _make_image_folder_2p_flat(take_folder / "2P" / "Fly1", n_frames=5)
     config_dir = _rig_config(tmp_path, dest_root)
     result = runner.invoke(
-        app, ["twophoton", "reassemble", "--config", str(config_dir)]
+        app, ["twophoton", "reassemble", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
     dest_2p = take_folder / "2P" / "Fly1"
@@ -824,7 +872,7 @@ def test_reassemble_tiffs_assembles_and_deletes_originals(tmp_path):
     assert not list(dest_2p.glob("ChanA_*.tif"))
     # Idempotent: an already-stacked folder is a no-op.
     result = runner.invoke(
-        app, ["twophoton", "reassemble", "--config", str(config_dir)]
+        app, ["twophoton", "reassemble", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
 
@@ -836,7 +884,8 @@ def test_reassemble_tiffs_dry_run_touches_nothing(tmp_path):
     _make_image_folder_2p_flat(take_folder / "2P" / "Fly1", n_frames=5)
     config_dir = _rig_config(tmp_path, dest_root)
     result = runner.invoke(
-        app, ["twophoton", "reassemble", "--config", str(config_dir), "--dry-run"]
+        app,
+        ["twophoton", "reassemble", "--config", str(config_dir), "--all", "--dry-run"],
     )
     assert result.exit_code == 0, result.output
     dest_2p = take_folder / "2P" / "Fly1"
@@ -1876,7 +1925,7 @@ def test_twophoton_verify_delete_removes_only_verified_folders(tmp_path):
             if corrupt and f.suffix == ".h5":
                 data += b"corrupted"
             (dest_2p / f.name).write_bytes(data)
-    result = _run_verify(tmp_path, dest_root, source_root, "--delete")
+    result = _run_verify(tmp_path, dest_root, source_root, "--delete", "--all")
     assert result.exit_code != 0  # the mismatch still fails the run
     assert not good.exists()
     assert bad.exists()
@@ -2582,9 +2631,8 @@ def test_doctor_checks_thorsync_duration_against_the_longest_take(
     source = tmp_path / "share"
     _thorsync_settings_folder(source / "PAM7xCI80", "SyncData184", duration)
     config_dir = _rig_config(tmp_path, tmp_path / "nas", source, **options)
-    result = runner.invoke(app, ["doctor", str(config_dir)])
-    assert result.exit_code == 0, result.output
-    out = _out(result)
+    # The plugins' checks alone: the whole command probes USB and serial.
+    out = " ".join(plugin_doctor_text(config_dir).split())
     if warns:
         assert "ThorSync is set to stop after 320 s" in out
         assert "PAM7xCI80/SyncData184" in out and "60 min" in out

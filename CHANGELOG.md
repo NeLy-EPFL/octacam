@@ -25,7 +25,7 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   `octacam twophoton verify|sweep|manifest|reconcile|reassemble|render` run
   these by hand. With `delete_after_transfer`, verified share folders are
   deleted, 2P-only ones too (the share's account needs delete rights);
-  `octacam twophoton verify --delete` clears a backlog of verified ones.
+  `octacam twophoton verify --delete --all` clears a backlog of verified ones.
   Settings are the plugin's options (`source`, ...); see the 2-photon guide.
 - **ThorSync reminder** (`twophoton`): ThorImage records ThorSync only with
   its ThorSync box ticked. The GUI's first armed take after launch asks about

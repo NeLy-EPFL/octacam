@@ -1310,3 +1310,48 @@ def test_no_attached_warning_for_an_unarmed_take_or_an_older_capture(
     plugin.on_recording_stop(aborted=False)
     time.sleep(0.3)
     assert spy.events == []
+
+
+def test_arming_never_waits_for_a_slow_thorsync_read(tmp_path, monkeypatch):
+    # Tommy's review: the arm waited up to 5 s for the share, longer than the
+    # monitor waits before a stop may cancel the board (START_HOOKS_TIMEOUT_S).
+    # The warning now comes when the read finishes.
+    import time
+
+    from octacam.plugins.twophoton import signals
+
+    share = _thorsync_share(tmp_path, 320)
+    release = threading.Event()
+    real = signals.latest_thorsync_limit
+
+    def slow(source):
+        release.wait(10)
+        return real(source)
+
+    monkeypatch.setattr(signals, "latest_thorsync_limit", slow)
+    plugin, link = _plugin_with_fake(match_thorimage=True)
+    spy = _attach(plugin, tmp_path)
+    plugin.source = str(share)
+    plugin.refresh_thorsync_limit()  # a read in progress (the share hangs)
+    started = time.monotonic()
+    plugin.on_recording_start(
+        {"fps": 100, "match_thorimage": False, "duration_ms": 3_600_000}
+    )
+    assert time.monotonic() - started < 0.5
+    assert link.written  # armed at once
+    assert spy.events == []
+    release.set()
+    wait_until(lambda: spy.events)
+    ((level, message),) = spy.events
+    assert level == "warning" and "ThorSync is set to stop after 320 s" in message
+
+
+def test_a_take_s_synced_choice_is_kept_in_its_snapshot():
+    # Tommy's review: a take recorded with "Synced with ThorImage" unticked
+    # relaunched synced (the config's match_thorimage).
+    plugin = TwoPhotonPlugin(match_thorimage=True)
+    assert plugin.snapshot_options({"fps": 100, "match_thorimage": True}) is None
+    assert plugin.snapshot_options({"fps": 100, "match_thorimage": False}) == {
+        "match_thorimage": False
+    }
+    assert plugin.snapshot_options(None) is None  # not armed: nothing to keep

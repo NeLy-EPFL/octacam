@@ -4,7 +4,8 @@ folder already there.
 
 Built once per run and destination: the rig's first version walked the whole
 tree (years of recordings, every TIFF) once per question. The walk never
-enters a 2P folder, a take's metadata or a take's subfolders other than `2P/`.
+enters a 2P folder, a take's metadata or a take's subfolders other than `2P/`,
+nor goes deeper than the layout needs (`MAX_DEPTH`).
 """
 
 from __future__ import annotations
@@ -35,6 +36,11 @@ GENERIC_DIRNAME = "2p_only"
 RECONCILED_2P_DIR_RE = re.compile(r"^Recording\d+_2P(_.+)?$")
 # Files only a ThorImage/ThorSync folder holds: never walked into.
 _ACQUISITION_MARKERS = ("Experiment.xml", "ThorRealTimeDataSettings.xml")
+# How deep the walk goes: a take is <day>/<fly>/<take> and a renumbered 2P-only
+# session's folder <day>/<fly>/RecordingN_2P/2P (4); one more level allows a
+# deeper relative_directory. Anything else under the root (analysis outputs,
+# years of other folders) is not walked over the share.
+MAX_DEPTH = 5
 
 
 @dataclass
@@ -63,13 +69,13 @@ class NasIndex:
     source_markers: dict[Path, str] = field(default_factory=dict)
 
     @classmethod
-    def build(cls, root: Path) -> NasIndex:
+    def build(cls, root: Path, max_depth: int = MAX_DEPTH) -> NasIndex:
         index = cls(root)
         if root.is_dir():
-            index._walk()
+            index._walk(max_depth)
         return index
 
-    def _walk(self) -> None:
+    def _walk(self, max_depth: int) -> None:
         for directory, subdirs, files in os.walk(self.root):
             here = Path(directory)
             rel = here.relative_to(self.root).parts
@@ -86,6 +92,8 @@ class NasIndex:
                 subdirs[:] = []
             elif any(marker in files for marker in _ACQUISITION_MARKERS):
                 subdirs[:] = []  # a 2P folder somewhere unexpected
+            elif len(rel) >= max_depth:
+                subdirs[:] = []
             else:
                 subdirs[:] = sorted(
                     d

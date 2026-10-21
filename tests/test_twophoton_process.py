@@ -5,8 +5,10 @@ share: pairing, the sweep, renumbering, and both recording layouts.
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
+from helpers import plugin_doctor_text
 from typer.testing import CliRunner
 
 from octacam import session_cache
@@ -255,9 +257,9 @@ def test_doctor_checks_the_2p_share(tmp_path):
     (config_dir / "octacam_config.toml").write_text(
         _twophoton_toml(tmp_path / "dest", tmp_path / "missing-share")
     )
-    result = runner.invoke(app, ["doctor", str(config_dir), "--json"])
-    assert "the 2P share" in result.output
-    assert "not reachable" in result.output
+    out = plugin_doctor_text(config_dir)
+    assert "the 2P share" in out
+    assert "not reachable" in out
 
 
 def test_the_twophoton_commands_are_mounted():
@@ -325,3 +327,29 @@ def test_a_verified_copy_is_trusted_by_a_rerun_until_something_changes(
     monkeypatch.setattr(copying, "transfer_tree", no_rehash)
     with pytest.raises(AssertionError):
         copying.copy_twophoton_folder(folder, dest, deleting)
+
+
+def test_the_destination_walk_stops_at_the_layout_s_depth(tmp_path, monkeypatch):
+    # Tommy's review: the walk descended into everything under the transfer
+    # root (analysis outputs, years of other folders) on every run.
+    from octacam.plugins.twophoton import nas
+
+    take = tmp_path / "261020_Exp" / "Fly1" / "001"
+    (take / "2P" / "Fly1_Streaming").mkdir(parents=True)
+    (take / "recording_summary.json").write_text("{}")
+    deep = tmp_path / "analysis" / "a" / "b" / "c" / "d" / "e"
+    (deep / "2P" / "X").mkdir(parents=True)
+    (deep / "recording_summary.json").write_text("{}")
+    walked = []
+    real_walk = os.walk
+
+    def spy(top, *a, **kw):
+        for directory, subdirs, files in real_walk(top, *a, **kw):
+            walked.append(Path(directory))
+            yield directory, subdirs, files
+
+    monkeypatch.setattr(nas.os, "walk", spy)
+    index = nas.NasIndex.build(tmp_path)
+    assert [t.path for t in index.takes] == [take]
+    assert index.twophoton_dirs == [take / "2P" / "Fly1_Streaming"]
+    assert max(len(d.relative_to(tmp_path).parts) for d in walked) <= nas.MAX_DEPTH

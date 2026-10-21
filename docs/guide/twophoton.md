@@ -161,8 +161,8 @@ user who does not keeps their 2P data on the imaging PC, copied but not
 deleted. Nothing outside the user's `source` folder is ever deleted. The share's account needs delete rights on the 2P PC for that (on a
 `noperm` CIFS mount the Windows server alone decides); without them octacam
 says so once and keeps going. `octacam twophoton verify` tells which folders
-are safe to delete, and `octacam twophoton verify --delete` deletes exactly
-those, for a backlog.
+are safe to delete, and `octacam twophoton verify --delete --all` (or naming
+the folders) deletes exactly those, for a backlog.
 
 ## Where things land
 
@@ -195,11 +195,11 @@ are read the same way.
 
 | Command | What it does |
 | --- | --- |
-| `octacam twophoton verify [SHARE_FOLDERS] -c <rig>` | Which share folders are verifiably at the destination (read-only; a stacked channel is compared page by page). `--delete` deletes the ones verified, inside the share folder only. `--user` uses a user's share folder and destination (also for `sweep`). |
+| `octacam twophoton verify [SHARE_FOLDERS] -c <rig>` | Which share folders are verifiably at the destination (read-only; a stacked channel is compared page by page). `--delete` deletes the ones verified under the given folders (or, with `--all`, the whole share folder), inside it only. `--user` uses a user's share folder and destination (also for `sweep`). |
 | `octacam twophoton sweep -c <rig>` | File the share's unclaimed 2P data, pair waiting takes. |
 | `octacam twophoton manifest -c <rig>` | Rewrite every day's `2p_reconciliation.md`. |
 | `octacam twophoton reconcile DAYS_OR_FLIES -c <rig>` | Renumber flies (`--all`: every fly, and group the generic bucket into new flies). |
-| `octacam twophoton reassemble -c <rig> [FOLDERS]` | Stack ThorImage folders still holding per-frame TIFFs, then delete the frames. |
+| `octacam twophoton reassemble -c <rig> FOLDERS` | Stack ThorImage folders still holding per-frame TIFFs, then delete the frames (`--all`: the whole destination). |
 | `octacam twophoton render PATHS` | Render (or re-render with `--force`) synced videos and Z-stack MIPs. |
 | `octacam twophoton board-sync PATHS` | Align takes transferred without ThorSync on the trigger board's clock (give a whole day: its completed captures time the stopped-early ones). A take from before the board's report (2026-10-14) needs `--reference` takes with ThorSync or a report (any day) to measure the rig's scan timing; `--airflow-logs` also attaches airflow_control's air commands. |
 

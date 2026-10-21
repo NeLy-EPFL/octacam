@@ -80,9 +80,6 @@ BOOT_SETTLE_S = 2.5
 ACK_TIMEOUT_S = 1.0
 # How often an idle plugin re-reads ThorSync's duration from the share.
 THORSYNC_REFRESH_S = 60.0
-# How long an arm waits for a ThorSync read still running (headless `record`
-# arms right after startup began one).
-THORSYNC_READ_WAIT_S = 5.0
 # How long after an armed take ends its ThorImage/ThorSync folders are looked
 # for (both are made when their acquisition starts; the share lags a little).
 THORSYNC_ATTACHED_CHECK_DELAY_S = 10.0
@@ -386,6 +383,9 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         self.thorsync: dict | None = None
         self._thorsync_lock = threading.Lock()
         self._thorsync_thread: threading.Thread | None = None
+        # An armed take's ThorSync check, waiting for a read still running:
+        # (the take's longest length, synced with ThorImage).
+        self._thorsync_check: tuple[float, bool] | None = None
         self._thorsync_stale = False
         self._watching = threading.Event()  # set: stop re-reading ThorSync
 
@@ -426,13 +426,17 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         """A recording made for a user keeps their share in its snapshot, so
         `octacam process` looks for its 2P data there, and their choice to
         delete it once verified (delete_share_data: each person decides for
-        their own data).
+        their own data); and the take's "Synced with ThorImage" choice.
         """
         options: dict = {}
         if self.source != self._configured_source:
             options["source"] = self.source
         if self._user_delete_share is not None:
             options["delete_share_data"] = self._user_delete_share
+        # The Record tab's "Synced with ThorImage", when it differs from the
+        # config's: a relaunch from the recording records the same way.
+        if params is not None and self._wants_match(params) != self.match_thorimage:
+            options["match_thorimage"] = self._wants_match(params)
         return options or None
 
     def busy_reason(self) -> str | None:
@@ -567,6 +571,14 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         if wait:
             thread.join(10)
 
+    def _warn_thorsync(self, longest_take_s: float, synced: bool) -> None:
+        """Tell the operator when ThorSync would stop before the take ends."""
+        warning = self.thorsync_warning(longest_take_s, synced=synced)
+        if warning and self.controller is not None:
+            self.controller.event("warning", warning)
+        elif warning:
+            log.warning("twophoton: %s", warning)
+
     def _read_thorsync(self) -> None:
         from octacam.plugins.twophoton.matching import latest_thorimage_plan
         from octacam.plugins.twophoton.signals import latest_thorsync_limit
@@ -594,6 +606,10 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
                 else None
             )
             self._push_state()
+            with self._thorsync_lock:
+                check, self._thorsync_check = self._thorsync_check, None
+            if check is not None:
+                self._warn_thorsync(*check)
 
     def thorsync_warning(
         self, longest_take_s: float, *, synced: bool = False
@@ -681,16 +697,15 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
                 self.banner,
             )
             return
-        reading = self._thorsync_thread
-        if self.thorsync is None and reading is not None:
-            reading.join(THORSYNC_READ_WAIT_S)
-        warning = self.thorsync_warning(
-            arm.duration_ms / 1000, synced=self._take_synced
-        )
-        if warning and controller is not None:
-            controller.event("warning", warning)
-        elif warning:
-            log.warning("twophoton: %s", warning)
+        # Never wait for a share read here: the arm must beat the monitor's
+        # START_HOOKS_TIMEOUT_S. A read still running checks once it is done
+        # (headless `record` arms right after startup began one).
+        check = (arm.duration_ms / 1000, self._take_synced)
+        with self._thorsync_lock:
+            reading = self.thorsync is None and self._thorsync_thread is not None
+            self._thorsync_check = check if reading else None
+        if not reading:
+            self._warn_thorsync(*check)
         if self._take_synced:
             log.info(
                 "twophoton: arming at %d fps until ThorImage stops (input idle "
@@ -781,6 +796,7 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         return info
 
     def _write_take_info(self) -> None:
+        from octacam.files import atomic_write_text
         from octacam.recording_format import RECORDING_INFO_DIRNAME
 
         take, self._take_dir = self._take_dir, None
@@ -789,7 +805,7 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         path = take / RECORDING_INFO_DIRNAME / TAKE_INFO_FILENAME
         try:
             path.parent.mkdir(exist_ok=True)
-            path.write_text(json.dumps(self.take_info(), indent=2) + "\n")
+            atomic_write_text(path, json.dumps(self.take_info(), indent=2) + "\n")
         except OSError as e:
             log.error("twophoton: could not write %s: %s", path, e)
 
