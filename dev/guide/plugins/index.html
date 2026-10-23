@@ -964,7 +964,15 @@ hardware-triggered cameras are driven for the recording's fps + duration.</p>
   on-time to bracket the longest live camera exposure + <code>strobe_guard_us</code>, or a
   <code>manual</code> <code>duty_percent</code>), <code>continuous</code>, or an optogenetic <code>pulse_train</code>
   (<code>freq_hz</code>, <code>pulse_us</code>, <code>start_delay_ms</code>, <code>train_ms</code>). All three channels are
-  electrically identical, so any channel can play any role.</li>
+  electrically identical, so any channel can play any role. A channel's <code>pin</code>
+  defaults to its CCS line but can be any broken-out line.</li>
+<li><strong>Dim outputs</strong> — <code>{ pin, percent }</code>: a pin held at a 0–100 % PWM level
+  whatever the board is doing, e.g. the white ambient light of an arena. Each
+  level is set when octacam connects to the board and stays until you change it
+  in the tab's <strong>Dimmed outputs</strong> slider (or with <code>POST /api/triggerbox/dim</code>);
+  starting, ending or cancelling a recording or a preview never touches it. A
+  dimmed pin can't also be a camera line or light: the board refuses such an
+  arm while the level is above 0.</li>
 </ul>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">[[plugins]]</span>
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"triggerbox"</span>
@@ -982,6 +990,15 @@ hardware-triggered cameras are driven for the recording's fps + duration.</p>
 <p>Omitting <code>cameras</code>/<code>lights</code> defaults to the classic rig: one <code>D13</code> line plus
 channels 1 and 2 strobing. The firmware and wiring notes are in
 <a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/triggerbox">arduino/triggerbox/</a>.</p>
+<p>With the lab's LED driver board in place of the CCS controller, its two inputs take raw 3.3 V lines: strobe the IR LEDs from a light channel moved to a free pin, and dim the white LEDs with a dim output:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">[plugins.options]</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">device</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"auto"</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="n">cameras</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">pin</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">"D13"</span><span class="p">,</span><span class="w"> </span><span class="n">pulse_us</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">500</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">]</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="n">lights</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">channel</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">pin</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">"D10"</span><span class="p">,</span><span class="w"> </span><span class="n">mode</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">"strobe"</span><span class="p">,</span><span class="w"> </span><span class="n">duty_mode</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">"auto"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">]</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="n">dim</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">pin</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">"D9"</span><span class="p">,</span><span class="w"> </span><span class="n">percent</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">40</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">]</span>
+</code></pre></div>
+<p>The level a recording started under is saved in its config snapshot. Dim outputs need the protocol v4 firmware (<code>TRIGGERBOX 4</code>); octacam offers to flash an older board as usual.</p>
+<p>The board remembers its dim pins and drives them at full from power-up until octacam connects and sets their level, so the white LEDs are on at full as soon as the trigger board has power: flies in the arena see full white (about 5,000 lux) until then, which matters for CsChrimson flies.</p>
 <p>With <code>trigger_source = "managed"</code> the board also drives the cameras during live
 preview, strobing exactly as the recording will. When a recording starts,
 octacam cancels that preview arm, switches the cameras into the recording grab,
@@ -1001,8 +1018,8 @@ octacam.</p>
 <p>Each serial plugin's <code>device</code> option is the OS path to the board (e.g.
 <code>/dev/ttyACM0</code>, <code>/dev/arduinoCams</code>, <code>COM3</code>). To see what's connected and how
 octacam classifies it, run:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>octacam<span class="w"> </span>doctor<span class="w">            </span><span class="c1"># lists a "Serial devices" section (board, path, VID:PID)</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>octacam<span class="w"> </span>doctor<span class="w"> </span>--probe-serial<span class="w">   </span><span class="c1"># also reads each board's firmware identity</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>doctor<span class="w">            </span><span class="c1"># lists a "Serial devices" section (board, path, VID:PID)</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>octacam<span class="w"> </span>doctor<span class="w"> </span>--probe-serial<span class="w">   </span><span class="c1"># also reads each board's firmware identity</span>
 </code></pre></div>
 <p><code>octacam doctor &lt;config_dir&gt;</code> cross-checks the device each enabled plugin is
 configured for against what's actually plugged in, and flags a missing or wrong
@@ -1011,9 +1028,9 @@ one (with a suggested udev rule for a stable path).</p>
 microcontroller-class port at launch, and reports a clear error if zero or more
 than one is present (so it never grabs the wrong board). An explicit path always
 wins over <code>"auto"</code>.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">[[plugins]]</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"triggerbox"</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">device</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">"auto"</span><span class="w"> </span><span class="p">}</span><span class="w">   </span><span class="c1"># or "/dev/ttyACM0", or a udev symlink</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">[[plugins]]</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"triggerbox"</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">device</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">"auto"</span><span class="w"> </span><span class="p">}</span><span class="w">   </span><span class="c1"># or "/dev/ttyACM0", or a udev symlink</span>
 </code></pre></div>
 <p>In the GUI, each plugin tab's connection panel has a <strong>port dropdown</strong> so you can
 pick a detected board and (re)connect to it without editing the config — handy
