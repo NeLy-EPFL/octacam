@@ -5,7 +5,7 @@
 // /plugins/<name>/).
 //
 // The app constructs a tab as new Tab({name, panel, status, send, notify,
-// getRecordSettings}) into the empty `panel` it made from the class's static
+// getRecordSettings, setDurationSync}) into the empty `panel` it made from the class's static
 // `label` and `title`, then calls setConnected, applyStatus (a /api/system
 // plugin status: the init's push, which is also the only sign that the cameras
 // opened), applyState (a "<name>_state" WebSocket message) and getStartParams.

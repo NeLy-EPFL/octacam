@@ -288,8 +288,16 @@ catching trailing pulses. Rules that are easy to break:
   **between cameras with the same delivery profile** (backend, DeviceModelName,
   W×H, pixel format, exposure in whole µs; read at recording start, off the lock,
   never at teardown); across profiles an informational `sync.notes` entry is
-  written. `sync.ok` is also False when a recording camera captured no frame or
-  skipped writer frames.
+  written. A camera's arrival latency is a **low quantile** (5 %) of its first
+  second of frames (delivery only ever lags; one early outlier must not
+  decide). Arrival is still weak evidence: six acA1920s on one USB bus deliver
+  a pulse up to 2.4 periods apart at 100 fps, so every 2P take read "started N
+  late". When the plugin that ended the take reports how many pulses its source
+  emitted (`finish_recording(name, pulses=N)`) on an unfilled clock, a camera
+  **spanning exactly N pulses** provably started on the first, and when every
+  camera does the arrivals are not compared. Equal spans alone prove nothing
+  (missing the first pulse and missing the last both span N−1). `sync.ok` is
+  also False when a recording camera captured no frame or skipped writer frames.
 
 The writer queue depth is `record.writer_queue_size` (default 64), tunable per
 rig to absorb transient encoder stalls. Summary schema 4 reports, per camera,
@@ -611,7 +619,18 @@ relaunch from the recording behaves differently), `api_router`,
 (`generates_trigger = True`, found by `PluginManager.trigger_plugin()`),
 `trigger_train` (the exact `{period_ns, count}` the recording arm will emit — the
 recording counts frames against it) and `prime_trigger` (sacrificial pulses
-before the train). Every hook taking start params gets its own slice
+before the train); `take_ceiling_s` for a plugin that **ends the take
+itself** (twophoton: when ThorImage stops) — its ceiling replaces the duration
+as the deadline and the pulse count (`Take.ceiling`), it ends the take with
+`controller.finish_recording(name, pulses=, take_id=)` (a *completed* take,
+unlike `stop_recording`; `pulses` is what its source emitted, when it can
+tell, and `take_id` — `controller.take_id` read while its take ran — keeps a
+late call from ending the next take), the snapshot reports `elapsed_ms` instead of
+`remaining_ms`, and the summary records `ended_by`, `duration_limit_s` and the
+real length as `duration_s`. Every summary also carries
+`first_frame_time_ns` (the countdown's start: for an external trigger, long
+after `start_time_ns`). `controller.event(level, message)` is the public way
+for a plugin to tell the operator. Every hook taking start params gets its own slice
 (`params[plugin.name]`, None when absent). `PluginManager.attach()` (from the
 controller's constructor and `create_app`) sets each plugin's `controller` and
 `broadcast`; `PluginManager._call` logs and isolates a raising hook. Each plugin

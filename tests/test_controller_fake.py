@@ -764,3 +764,62 @@ def test_fake_abort_recording(fake_system, tmp_path):
     controller.join(timeout=20)
     assert controller.state == "idle"
     assert controller.get_settings().save_dir.endswith("001")  # not incremented
+
+
+def test_plugin_ended_take_is_complete_and_bounded_by_its_ceiling(
+    fake_system, tmp_path
+):
+    # A plugin that ends the take itself (twophoton: when ThorImage stops) sets
+    # a ceiling in place of the duration, and ending it is a finish, not an
+    # early stop: completed, with who ended it and the real length.
+    from octacam.plugins.base import Plugin, PluginManager
+
+    class Ender(Plugin):
+        name = "ender"
+
+        def take_ceiling_s(self, params):
+            return 30.0
+
+    save_dir = tmp_path / "rec" / "001"
+    settings = RecordingSettings(
+        fps=50.0, duration_s=0.2, save_dir=str(save_dir), trigger_source="software"
+    )
+    controller = RecordingController(
+        fake_system, settings, PluginManager([Ender()]), auto_preview=False
+    )
+    assert controller.start_recording(plugin_params={"ender": {}}).ok
+    wait_until(lambda: controller.state == "recording", timeout=10)
+    wait_until(lambda: (controller.snapshot()["elapsed_ms"] or 0) > 600, timeout=10)
+    snap = controller.snapshot()
+    # Past the 0.2 s duration: the ceiling, not the duration, bounds it.
+    assert snap["state"] == "recording" and snap["remaining_ms"] is None
+    assert (snap["ended_by_plugin"], snap["duration_limit_s"]) == ("ender", 30.0)
+    controller.finish_recording("ender")
+    controller.join(timeout=20)
+
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
+    assert summary["completed"] is True and summary["aborted"] is False
+    assert (summary["ended_by"], summary["duration_limit_s"]) == ("ender", 30.0)
+    frames = max(c["frames"] for c in summary["cameras"])
+    # Padded to the triggers fired, never to the 30 s ceiling's 1500 (Tommy's
+    # review: 1490 fills): no fills, every camera on the same pulse, sync ok.
+    assert 25 < frames < 300
+    assert all(c["dropped"] == 0 for c in summary["cameras"])
+    assert len({c["frames"] for c in summary["cameras"]}) == 1
+    assert summary["pulse_train"]["count"] == frames
+    assert summary["sync"]["ok"], summary["sync"]
+    # From the frame timestamps: 50 fps, one interval per frame.
+    assert summary["duration_s"] == pytest.approx(frames / 50.0, rel=0.05)
+    assert summary["first_frame_time_ns"] >= summary["start_time_ns"] > 0
+
+
+def test_take_without_an_ending_plugin_keeps_its_duration(fake_system, tmp_path):
+    save_dir = tmp_path / "rec" / "001"
+    settings = RecordingSettings(fps=50.0, duration_s=0.4, save_dir=str(save_dir))
+    controller = RecordingController(fake_system, settings, auto_preview=False)
+    assert controller.start_recording().ok
+    controller.join(timeout=20)
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
+    assert summary["duration_s"] == 0.4
+    assert summary["ended_by"] is None and summary["duration_limit_s"] is None
+    assert summary["first_frame_time_ns"] >= summary["start_time_ns"]

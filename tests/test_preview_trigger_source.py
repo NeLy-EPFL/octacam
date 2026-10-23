@@ -40,7 +40,7 @@ class DrivingPlugin(Plugin):
     def on_preview_stop(self) -> None:
         self.preview_stops += 1
 
-    def default_start_params(self, fps, duration_s):
+    def default_start_params(self, fps, duration_s, *, fixed_duration=False):
         return {"fps": int(fps), "duration_ms": max(1, int(duration_s * 1000))}
 
 

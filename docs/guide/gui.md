@@ -35,10 +35,17 @@ instead of a spinner, and the server stays up.
 
 ## The tabs
 
-- **Record** — set fps, duration, and the save location, then start/stop
-  recording. The **Process** section here seeds the post-recording pipeline
-  (transcode params, transfer destination) that gets baked into each recording's
-  config snapshot — see [Processing](processing.md).
+- **Record** — only what a recording needs: duration and fps, who you are
+  (**User**) and the recording's name (**Experiment / Fly / Take**; **Next
+  fly** moves to the next fly with the take back at 001), then start/stop. A
+  **Ready?** strip on top says what to fix before recording: cameras, trigger
+  boards, disk space, your transfer destination, and each plugin's own checks
+  (for example the 2P share and ThorSync's duration); click it for every
+  check. The rest sits in collapsed sections (each remembers being opened):
+  **Paths** (they follow the user, and say so; a change applies to this
+  session), **Triggering**, **Encoding & output**, and **Post-processing**, the
+  pipeline baked into each recording's config snapshot. See
+  [Processing](processing.md) and [Users](configuration.md#users).
 - **Camera** — per-camera sensor controls (exposure, gain, ROI). Save them back
   to the per-camera sensor file from the *Save…* dialog.
 - **View** — arrange the preview layout and set each camera's rotation/flips.

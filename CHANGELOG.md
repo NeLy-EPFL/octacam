@@ -16,10 +16,40 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   cancels the start (for a reminder the operator must acknowledge, such as
   twophoton's "is ThorSync ticked in ThorImage?").
 
+- **A plugin can end the take itself**: `Plugin.take_ceiling_s` returns a
+  safety ceiling that replaces the set duration (deadline and pulse count),
+  and `controller.finish_recording(name, pulses=, take_id=)` ends the take as
+  *completed* (not an early stop). A plugin that knows how many pulses its
+  source emitted passes `pulses`: every video ends on that count, and on an
+  external trigger a camera spanning all of them provably started on the first
+  (otherwise the start is checked from when the first frames arrived).
+  `take_id` (`controller.take_id`, read while the take ran) keeps a late call
+  from ending a newer take. The GUI and `octacam record` show elapsed time for such a take;
+  its summary records `ended_by`, `duration_limit_s` and its real length as
+  `duration_s`. Every summary now also has `first_frame_time_ns`, when the
+  first frames were in (for an external trigger, possibly long after Start),
+  and plugins tell the operator through `controller.event(level, message)`.
+  `octacam record --duration` is exact: `Plugin.default_start_params` gets
+  `fixed_duration=True`, so such a plugin leaves that take to the duration (a
+  plugin overriding the hook must accept the new keyword). Its tab can offer a
+  checkbox in place of the Record tab's Duration (`setDurationSync` in a
+  plugin tab's context).
 - **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
   its cells down; with its own faster `ffmpeg_params` a grid builds several
   times faster (see Configuration).
-
+- **Users**: `[users.<initials>]` in the rig config says who records and where
+  their data goes (their transfer destination, and plugin folders such as the
+  2P share). The Record tab picks the user from a list and adds a new one in a
+  dialog that suggests and checks their folders (also `octacam users
+  list|add`, and `--user` on `gui` and `record`); each user gets their last
+  folder name back, and summaries name who recorded. `record` without
+  `--user` warns that it records as the last user and says where the data
+  goes.
+- **Experiment / Fly / Take fields with Next fly** in the Record tab (one
+  folder name each; a deeper recording folder keeps the raw field), and a
+  **Ready?** strip saying what to fix before recording (cameras, boards, disk,
+  destination, and each plugin's own checks). An explicit
+  `--set transfer.directory=...` wins over the chosen user's destination.
 - **`octacam process` transfers the data before building grids**, so a day's
   videos are on the destination hours earlier; grids are built and transferred
   after. **Plugins can add processing steps** (`Plugin.process_steps`, a
@@ -193,9 +223,19 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **No more false "started N pulse(s) late" on external-trigger rigs.** The
+  start check compared when each camera's first frames reached the host, and
+  six acA1920s on one USB bus deliver a pulse up to 2.4 periods apart: every
+  2-photon take read as out of sync (`sync.ok` False). A take a plugin ended
+  once its trigger stopped now proves the common start by frame count (every
+  camera spans the whole train), and a camera's latency is its fastest delivery
+  in its first second, not the median of its first 16 frames.
 - **The transfer copies every file of a recording's `octacam_recording`
   folder**, a plugin's own included (it copied only the files it knew by name,
   so with a delete after transfer a plugin's facts were lost).
+- **Saving the rig config from the GUI kept only the tables it knew**: any
+  other table (now `[users]`), array of tables or top-level key in the file
+  was dropped by the rewrite.
 - **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
   error, which made a request for a missing feature or command a 500; it is a
   clean "no such node" again.

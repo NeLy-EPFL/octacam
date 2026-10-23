@@ -72,6 +72,8 @@ def router(state: AppState) -> APIRouter:
         (RecordingSettings.updated), in any state; a RuntimeError (a valid
         change while recording or starting) answers 409.
         """
+        if "user" in patch:
+            raise HTTPException(422, "choose a user with POST /api/users/select")
         try:
             updated = controller.update_settings(**patch)
         except RuntimeError as e:

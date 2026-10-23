@@ -123,6 +123,40 @@ delete_after_transfer = false        # keep the local recording (default)
 
 See [Processing → Transfer](processing.md#transfer).
 
+## Users
+
+`[users.<initials>]` lists who records on this rig, each with where their data
+goes. Picking a user (the Record tab's **User**, or `--user MD` on `gui` and
+`record`) replaces `[transfer].directory` with theirs, gives each plugin their
+own folders (a sub-table named after the plugin), brings back the last folder
+name they recorded under, and notes them in each recording's summary. The last
+user is remembered on this machine; `octacam record` without `--user` records
+as them, and warns so, naming where the data goes.
+
+```toml
+[users.MD]
+name = "Matthias Durrieu"
+transfer_directory = "/mnt/upramdya_data/MD/BallPushing_Imaging"
+
+[users.MD.twophoton]
+source = "/mnt/windows_share/MD"     # the plugin's per-user option
+```
+
+Users are kept in each rig's own config, as rigs rarely share paths. Nobody
+needs to edit them by hand: **+ Add yourself…** in the User list (or
+`octacam users add <config> <INITIALS>`) asks for the initials and suggests
+the folders from the other users' (the same root, your own initials folder),
+checking that each exists. Initials folders found beside the users' on the NAS
+appear in the list as people who can be set up in one click. Adding a user
+appends their block to the config and leaves the rest of the file as it is.
+`octacam users list <config>` shows them all.
+
+| Key | Meaning |
+| --- | --- |
+| `name` | Shown in the user list. |
+| `transfer_directory` | Their transfer destination; blank keeps `[transfer].directory`. |
+| `[users.XX.<plugin>]` | That plugin's per-user options (the 2-photon plugin: `source`). |
+
 ## `[[cameras]]`
 
 One entry per camera, keyed by serial number. Pins each camera's **name** and its
