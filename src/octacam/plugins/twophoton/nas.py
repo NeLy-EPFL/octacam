@@ -156,13 +156,37 @@ class NasIndex:
     # ------------------------------------------------------------ queries
 
     def matched_sources(self, source_root: Path) -> set[Path]:
-        """Every share folder a transferred take is paired with."""
-        return {
-            (source_root / entry["path"]).resolve()
-            for take in self.takes
-            for entry in take.match.get("matched", [])
-            if entry.get("path")
-        }
+        """Every share folder a transferred take is paired with. A record names
+        its folder by share path, and ThorImage and ThorSync reuse names from day
+        to day once the share is cleared (real 2026-10-22: Fly1_Streaming_002 and
+        SyncData202 were also paired on 10-16 and 10-20, so the new ones were
+        never swept): a name claims the share folder only when the take's copy
+        is that acquisition (`twophoton_identity`), or has no copy yet.
+        """
+        from octacam.plugins.twophoton.matching import twophoton_identity
+
+        claimed: set[Path] = set()
+        share_ids: dict[Path, tuple[str, str] | None] = {}
+        for take in self.takes:
+            for entry in take.match.get("matched", []):
+                if not entry.get("path"):
+                    continue
+                share = (source_root / entry["path"]).resolve()
+                copy = take.path / TWOPHOTON_DIRNAME / Path(entry["path"]).name
+                if copy.is_dir():
+                    if share not in share_ids:
+                        share_ids[share] = (
+                            twophoton_identity(share) if share.is_dir() else None
+                        )
+                    want = share_ids[share]
+                    if (
+                        want is not None
+                        and want[1]
+                        and twophoton_identity(copy) != want
+                    ):
+                        continue  # another acquisition under the same name
+                claimed.add(share)
+        return claimed
 
     def twophoton_dirs_named(self, name: str) -> list[Path]:
         return [p for p in self.twophoton_dirs if p.name == name]

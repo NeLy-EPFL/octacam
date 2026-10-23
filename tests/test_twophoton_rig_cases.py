@@ -1389,6 +1389,45 @@ def test_sweep_does_not_skip_a_new_folder_sharing_an_old_folders_name(tmp_path):
     assert list(dest_root.glob("2p_only/expNew/*/Fly1_Zstack/Experiment.xml"))
 
 
+def test_sweep_does_not_count_a_reused_name_as_claimed(tmp_path):
+    # Real bug (2026-10-22): an older take's record pairs it with
+    # "AllPAMxCI80/Fly1_Streaming_002"; once the share was cleared, ThorImage
+    # reused the name, and the new capture was taken for claimed and never
+    # swept (nor deleted).
+    source_root = tmp_path / "windows_share" / "MD"
+    dest_root = tmp_path / "dest"
+    xml = (
+        '<?xml version="1.0"?><ThorImageExperiment><Date date="x" uTime="{}" />'
+        "</ThorImageExperiment>"
+    )
+    new = source_root / "AllPAMxCI80" / "Fly1_Streaming_002"
+    new.mkdir(parents=True)
+    (new / "Experiment.xml").write_text(xml.format(2_000_000))
+    old_mtime = time.time() - 10_000
+    os.utime(new / "Experiment.xml", (old_mtime, old_mtime))
+    old_take = dest_root / "261016_AllPAMxCI80" / "Fly1" / "Recording5_Synced"
+    info = old_take / "octacam_recording"
+    info.mkdir(parents=True)
+    (info / "recording_summary.json").write_text(json.dumps({"cameras": []}))
+    (info / "twophoton_match.json").write_text(
+        json.dumps(
+            {"matched": [{"path": "AllPAMxCI80/Fly1_Streaming_002", "kind": "image"}]}
+        )
+    )
+    old_copy = old_take / "2P" / "Fly1_Streaming_002"
+    old_copy.mkdir(parents=True)
+    (old_copy / "Experiment.xml").write_text(xml.format(1_000_000))
+    result = _sweep(
+        source_root,
+        dest_root,
+        attribute_unclaimed_to_fly=False,
+        assemble_tiff_stacks=False,
+    )
+    assert result.failed == 0 and result.copied >= 1
+    copied = list(dest_root.glob("2p_only/AllPAMxCI80/*/Fly1_Streaming_002"))
+    assert len(copied) == 1, copied
+
+
 def test_process_automatically_sweeps_unmatched_twophoton(tmp_path):
     # A normal process run also sweeps the share it paired from, in the same
     # command.
