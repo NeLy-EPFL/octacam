@@ -174,6 +174,22 @@ def pending_takes(source_root: Path) -> list[PendingTake]:
     return pending
 
 
+def _partial_pairings(source_root: Path) -> set[Path]:
+    """Share folders of the pending takes whose earlier copy failed (their
+    match record says `complete: false`).
+    """
+    held: set[Path] = set()
+    for p in pending_takes(source_root):
+        record = read_json(sidecar(p.folder, MATCH_FILENAME)) or {}
+        if record.get("complete") is False:
+            held.update(
+                (source_root / e["path"]).resolve()
+                for e in record.get("matched", [])
+                if e.get("path")
+            )
+    return held
+
+
 @dataclass
 class SweepResult:
     copied: int = 0
@@ -201,17 +217,21 @@ def sweep(
     content is deleted, as a paired take's are.
     """
     result = SweepResult()
+    # A pending take's partial copy: its folders go back to that take, whatever
+    # the destination already holds of them, and are never filed elsewhere.
+    retrying = _partial_pairings(source_root) - claimed_this_run
     claimed = (
         index.matched_sources(source_root)
         | locally_matched(source_root)
         | claimed_this_run
-    )
+    ) - retrying
     unclaimed = [
         f
         for f in folders
-        if f.path.resolve() not in claimed and not _on_destination(f, index)
+        if f.path.resolve() in retrying
+        or (f.path.resolve() not in claimed and not _on_destination(f, index))
     ]
-    held = _pair_pending(
+    held = retrying | _pair_pending(
         source_root, unclaimed, settings, mode, result, index, delete_sources
     )
     unclaimed = [f for f in unclaimed if f.path.resolve() not in held]

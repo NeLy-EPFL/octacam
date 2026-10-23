@@ -290,7 +290,9 @@ def finish_pairing(
     """Copy each settled match to `<dest>/2P/<name>` (a ThorImage folder's
     Experiment.xml also beside the take), then record the pairing in the take's
     `twophoton_match.json`, here and at *dest*. A ThorSync episode cut short by
-    its duration limit is warned about and noted in the record.
+    its duration limit is warned about and noted in the record. A copy that
+    failed marks the record incomplete and leaves the take pending, so a later
+    run finishes it.
     """
     from octacam.plugins.twophoton.signals import describe_cut_off, episode_cut_off
 
@@ -323,11 +325,16 @@ def finish_pairing(
                 "limit_s": cut.limit_s,
                 "message": message,
             }
+    if failed:
+        # Its share folders stay claimed by name (`NasIndex.matched_sources`)
+        # and held for the retry (`sweep`), never filed as unpaired data.
+        record["complete"] = False
     if not mode.dry_run:
         path = sidecar(take, MATCH_FILENAME)
         if write_json(path, record):
             failed += copy_sidecar(take, path, dest, mode)
-        clear_pending(take)
+        if not failed:
+            clear_pending(take)
     return Paired(copied_ok, failed)
 
 

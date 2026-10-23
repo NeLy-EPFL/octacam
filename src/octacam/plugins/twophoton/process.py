@@ -333,6 +333,11 @@ class TwoPhotonSteps(ProcessSteps):
                 )
             paired = finish_pairing(folder, dest, matches, target.source_root, mode)
             failed += paired.failed
+            if not paired.complete and not ctx.options.dry_run:
+                # Pending again: a later run finishes the copy, and the delete
+                # after transfer keeps the local folder (its note is not at the
+                # destination) until then.
+                write_pending(folder, takes[folder], dest, target.source_root, mode)
             if paired.complete:
                 self._renders.append(
                     _Render(dest, start_s(summary_of(folder)), settings)

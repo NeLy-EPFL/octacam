@@ -161,7 +161,7 @@ class NasIndex:
         to day once the share is cleared (real 2026-10-22: Fly1_Streaming_002 and
         SyncData202 were also paired on 10-16 and 10-20, so the new ones were
         never swept): a name claims the share folder only when the take's copy
-        is that acquisition (`twophoton_identity`), or has no copy yet.
+        is that acquisition (`twophoton_identity`), or has no complete copy yet.
         """
         from octacam.plugins.twophoton.matching import twophoton_identity
 
@@ -173,7 +173,8 @@ class NasIndex:
                     continue
                 share = (source_root / entry["path"]).resolve()
                 copy = take.path / TWOPHOTON_DIRNAME / Path(entry["path"]).name
-                if copy.is_dir():
+                # A partial copy is not the acquisition yet, but it is claimed.
+                if copy.is_dir() and take.match.get("complete") is not False:
                     if share not in share_ids:
                         share_ids[share] = (
                             twophoton_identity(share) if share.is_dir() else None

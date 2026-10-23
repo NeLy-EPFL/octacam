@@ -393,6 +393,57 @@ def test_a_repeated_process_run_keeps_a_paired_take_as_it_is(tmp_path):
     assert (dest_root / folder.name / "twophoton_match.json").read_text() == record
 
 
+@pytest.mark.parametrize("via_sweep", [False, True])
+def test_a_failed_2p_copy_is_finished_by_the_next_run(tmp_path, monkeypatch, via_sweep):
+    # A pairing whose copy failed wrote its match record and cleared the pending
+    # note, so every later run skipped the take, and the sweep filed the share
+    # folder (now unclaimed: the partial copy is not its acquisition) elsewhere,
+    # to be deleted with `delete_share_data`. The take never got its episode.
+    from octacam.plugins.twophoton import copying
+
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_verifiable_sync_folder_2p(
+        source_root, "MB247_CI63", "SyncData102", mtime=take_start + 1, camera_frames=42
+    )
+    folder = _armed_recording(
+        tmp_path / "rec",
+        source_root=source_root,
+        dest_root=dest_root,
+        take_start=take_start,
+        summary={"cameras": [{"name": "camera_LF", "frames": 42}]},
+    )
+    session_cache.record_recording(folder, session_id="s1")
+    real_copy = copying.copy_twophoton_folder
+
+    def lose_the_episode(folder, dest, mode):
+        result = real_copy(folder, dest, mode)
+        (dest / "Episode001.h5").unlink()
+        result.failed.append("Episode001.h5")
+        return result
+
+    monkeypatch.setattr(copying, "copy_twophoton_folder", lose_the_episode)
+    assert _process(folder).exit_code == 1
+    assert (folder / "twophoton_pending.json").exists()
+
+    monkeypatch.setattr(copying, "copy_twophoton_folder", real_copy)
+    if via_sweep:
+        # A later run that does not name the take: the sweep finds it pending.
+        config_dir = _rig_config(tmp_path, dest_root, source_root, settle_s=60)
+        args = ["twophoton", "sweep", "--config", str(config_dir)]
+        result = runner.invoke(app, args)
+    else:
+        result = _process(folder)
+    assert result.exit_code == 0, result.output
+    take_2p = dest_root / folder.name / "2P" / "SyncData102"
+    assert (take_2p / "Episode001.h5").exists()
+    assert [p for p in dest_root.rglob("SyncData102") if p.is_dir()] == [take_2p]
+    assert not (folder / "twophoton_pending.json").exists()
+    record = json.loads((dest_root / folder.name / "twophoton_match.json").read_text())
+    assert "complete" not in record
+
+
 def test_process_skips_twophoton_when_explicitly_not_armed(tmp_path):
     # Schema 4 with the checkbox recorded unchecked skips outright, unlike a
     # pre-feature recording that never had the chance to say "armed".
