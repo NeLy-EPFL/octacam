@@ -11,6 +11,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **A plugin tab can hold a recording start**: an optional async
+  `confirmStart()` on the tab runs when Start is pressed, and returning false
+  cancels the start (for a reminder the operator must acknowledge, such as
+  twophoton's "is ThorSync ticked in ThorImage?").
+
 - **A plugin can end the take itself**: `Plugin.take_ceiling_s` returns a
   safety ceiling that replaces the set duration (deadline and pulse count),
   and `controller.finish_recording(name, pulses=, take_id=)` ends the take as

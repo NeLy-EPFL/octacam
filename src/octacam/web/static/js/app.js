@@ -140,6 +140,21 @@ async function main() {
       }
       return params;
     },
+    // A plugin tab's confirmStart() (a reminder before the take) may cancel it;
+    // one that throws is named in the error the Record tab shows.
+    confirmPlugins: async () => {
+      for (const [name, tab] of pluginTabs) {
+        if (!tab.confirmStart) continue;
+        let ok;
+        try {
+          ok = await tab.confirmStart();
+        } catch (e) {
+          throw new Error(`${tab.constructor.label || name}: ${e?.message || e}`);
+        }
+        if (!ok) return false;
+      }
+      return true;
+    },
     notify,
   });
   record.setManagedAvailable(!!system.managed_trigger_available);

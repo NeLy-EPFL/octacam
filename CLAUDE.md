@@ -756,7 +756,8 @@ and footer; `tabs.js` the `TabBar` and `loadPluginTabs`; `util.js` the shared
 helpers (`el`, `store`, `request`, `Modal`, `api`, `clampInput`). A plugin tab
 extends `serial.js::SerialTab` (the shared serial-status block, port picker,
 Reconnect and firmware banner; `setConnected`/`applyStatus`/`applyState`/
-`getStartParams`), owns its panel markup and static `label`/`title`, and imports
+`getStartParams`; an optional async `confirmStart()` returning false cancels a
+recording start), owns its panel markup and static `label`/`title`, and imports
 `/js/util.js` and `/js/serial.js` itself; a `<name>_state` push goes to it by name.
 
 **Keyboard shortcuts** live in one place: `web/static/js/shortcuts.js`

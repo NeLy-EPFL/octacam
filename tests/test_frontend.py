@@ -1774,6 +1774,60 @@ def test_record_start_asks_while_a_background_step_runs(page, confirmed):
     assert bool(started) is confirmed
 
 
+@pytest.mark.parametrize("allowed", [False, True])
+def test_a_plugin_can_hold_a_recording_start(page, allowed):
+    # A plugin tab's confirmStart() (a reminder) runs before the start request;
+    # false cancels the start.
+    page.evaluate(
+        """async (allowed) => {
+            const m = await import('./js/record.js');
+            window.__calls = [];
+            window.__asked = 0;
+            window.fetch = async (url, opts) => {
+                window.__calls.push(url);
+                return { ok: true, status: 202, json: async () => ({}) };
+            };
+            window.__tab = new m.RecordTab({
+                formats: [], getPluginParams: () => ({}), notify: () => {},
+                confirmPlugins: async () => { window.__asked += 1; return allowed; },
+            });
+            await window.__tab._start();
+        }""",
+        allowed,
+    )
+    assert page.evaluate("window.__asked") == 1
+    started = [u for u in page.evaluate("window.__calls") if "recording/start" in u]
+    assert bool(started) is allowed
+
+
+def test_a_plugin_check_that_throws_cancels_the_start_and_says_so(page):
+    # Tommy's review: it read "Request failed: server unreachable".
+    page.evaluate(
+        """async () => {
+            const m = await import('./js/record.js');
+            window.__calls = [];
+            window.__notes = [];
+            window.fetch = async (url) => {
+                window.__calls.push(url);
+                return { ok: true, status: 202, json: async () => ({}) };
+            };
+            window.__tab = new m.RecordTab({
+                formats: [], getPluginParams: () => ({}),
+                notify: (level, message) => window.__notes.push([level, message]),
+                confirmPlugins: async () => {
+                    throw new Error('2-photon: share offline');
+                },
+            });
+            await window.__tab._onButton();
+        }"""
+    )
+    assert not [u for u in page.evaluate("window.__calls") if "recording/start" in u]
+    ((level, message),) = page.evaluate("window.__notes")
+    assert level == "error"
+    assert "plugin's check failed" in message and "share offline" in message
+    assert "unreachable" not in message
+
+
 def test_record_start_does_not_ask_when_no_job_is_busy(page):
     page.evaluate(
         """async () => {
