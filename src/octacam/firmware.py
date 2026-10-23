@@ -348,7 +348,9 @@ def _dfu_select_property(cli: str, fqbn: str, serial: str) -> str | None:
         return None
     if pattern[end : end + 1] == '"':
         end += 1
-    return f"{key}={pattern[:end]} -S {serial}{pattern[end:]}"
+    # The override takes the upload tool's own key: arduino-cli ignores the
+    # `tools.dfu-util.` spelling (checked with `upload --dry-run`).
+    return f"upload.pattern={pattern[:end]} -S {serial}{pattern[end:]}"
 
 
 def _render_build_header(spec: FirmwareSpec, build: str) -> str:

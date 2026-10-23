@@ -393,7 +393,7 @@ def test_dfu_select_property_pins_dfu_util_to_the_serial(monkeypatch):
     _board_details(monkeypatch, _NANO_ESP32_PROPS)
     prop = fw._dfu_select_property("cli", "arduino:esp32:nano_nora", "744DBDA08F18")
     assert prop == (
-        'tools.dfu-util.upload.pattern="{path}/{cmd}" -S 744DBDA08F18 '
+        'upload.pattern="{path}/{cmd}" -S 744DBDA08F18 '
         '--device {vid.0}:{pid.0} -D "{build.path}/{build.project_name}.bin" -Q'
     )
 
