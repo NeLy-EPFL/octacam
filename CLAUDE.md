@@ -141,7 +141,9 @@ src/octacam/
   trigger.py        precise periodic callback timer (the software trigger's pace)
   cameras/          backends (below): base.py (CameraBackend, Camera), take.py (CameraTake,
                     CameraStats), system.py, registry.py, genicam.py, one module per backend
-  plugins/          serial hardware (triggerbox, twophoton, flywheel) on serial.py's SerialPlugin
+  plugins/          serial hardware (triggerbox, twophoton, flywheel) on serial.py's SerialPlugin;
+                    opto (a 2nd board on the triggerbox sketch, opto outputs only);
+                    closedloop (ball tracking -> opto light; no board of its own)
   web/              FastAPI GUI: app.py, hub.py, preview.py, state.py, per-area routers, static/
 arduino/            triggerbox, 2photon_trigger, stepper_motor sketches
 configs/<rig>/      octacam_config.toml + per-camera sensor files (.pfs / .txt)
@@ -606,7 +608,9 @@ board** — a plugin that omits it never arms on the CLI), `on_preview_start/sto
 `snapshot_options` (the live settings a recording's config snapshot must carry; a
 plugin whose tab edits settings the config also holds must implement it, or a
 relaunch from the recording behaves differently), `api_router`,
-`on_ws_message/on_ws_disconnect`; for the trigger-*generating* plugin
+`on_ws_message/on_ws_disconnect`; for the opto-driving plugin (`drives_opto = True`, found by
+`PluginManager.opto_plugin()`), `set_opto(channel, duration_s)`; for the
+trigger-*generating* plugin
 (`generates_trigger = True`, found by `PluginManager.trigger_plugin()`),
 `trigger_train` (the exact `{period_ns, count}` the recording arm will emit — the
 recording counts frames against it) and `prime_trigger` (sacrificial pulses
@@ -658,6 +662,68 @@ plan is marked inexact and the arm warns (ending on a pulse count in the firmwar
 would remove that limit). The reader blocks for one byte then drains
 (`plugins/serial.py :: SerialLink._read_chunk`): a fixed `read(64)` delayed every
 token by up to the 0.2 s port timeout.
+
+**Opto outputs (protocol v3).** Besides the arm, the triggerbox sketch takes an
+opto config (`0xB0`: up to 6 `{pin, pulse_us, period_us}`, answered `O`/`o<c>`)
+and opto gates (`0xB1`: `{channel, duration_ms}`, silent unless refused `g<c>`;
+a gate on a channel already on extends it keeping its pulse phase), framed like
+the arm. Opto outputs run armed or idle, on their own esp_timer clock, and the
+**board ends each window itself** (a stalled host never leaves a light on).
+Neither an arm nor an opto config may take the other's pins (`d`). The `opto`
+plugin (`plugins/opto`) drives them on a *second* board running the same sketch
+(never armed; the triggerbox plugin itself has no opto option). Its operator
+override (`force`, the tab's On buttons) makes `set_opto` a no-op for that
+channel and is renewed by its own thread in 1 s windows every 0.25 s; the closed
+loop reads it per frame (`Plugin.opto_forced`), logs `override_on/off`, counts
+the LED lit and starts no window of its own on it.
+`TriggerboxLink.opto_configured` is per connection: a reopen or a `g` refusal
+(the board rebooted) makes the next `set_opto` reconfigure first. The opto
+plugin never sends to a board that does not identify (UNIDENTIFIED is drivable
+elsewhere): an unknown sketch, or a v2 board, would read the packets' bytes as
+commands (a `0xCA` cancels). Two Nano ESP32s each serve DFU while running, so
+`firmware.flash` compiles, then uploads with `upload.pattern` overridden to name
+the port's USB serial (`--upload-property tools.dfu-util…` is ignored).
+
+## Closed loop (`plugins/closedloop`)
+
+Ball pushing with optogenetic feedback: one camera over a six-corridor arena,
+corridors numbered left to right in the **raw** image, pairs (tracked corridor,
+yoked control, opto channel); only the tracked corridors' balls are followed.
+A push lights its pair for at least `min_on_s` and while the ball keeps moving
+(`PushDetector.moving`: > 2 px within 0.25 s), held in `HOLD_S` steps the board
+ends by itself, capped at `MAX_LIGHT_S`. Rules that are easy to break:
+
+- **Frames come from `Camera.frame_tap`** (a `FrameTap`: newest-wins slot,
+  `TapFrame(array, timestamp_ns, pulse, arrival_ns)`), fed by both grab loops
+  without blocking: the preview loop (pulse None; it fetches the array whenever
+  the tap is enabled) and `CameraTake._record` (the counted frame's pulse, before
+  the write). `pulse is not None` is how the loop knows a frame is recorded: only
+  those can light, and only while the plugin's log is open
+  (`on_recording_start` → `on_recording_stop`), so a late frame after the stop
+  never relights.
+- **Tracker thresholds come from the footage** (`tracker.py`; 35 min of
+  `ball_pushing_opto/261002…/Fly1/001,002`): balls score ~0.8 (1st pct 0.77),
+  but the ring-shaped gates and a fly beside its ball score up to ~0.7. So a
+  ball is re-acquired anywhere in its column only at `FIND_SCORE` 0.75; near its
+  last position (`search_px` 0.8 R: balls move ≤ ~15 px/frame at 80 fps, the fly
+  is further) a match is taken from 0.6 and kept down to 0.4; below that the ball
+  is **lost** (never a push). At 0.6 for re-acquisition an object over the arena
+  made three corridors lock onto gates for up to 2 min.
+- **A push is measured from where the ball rests** (`PushDetector`): the anchor
+  moves forward only on a push and back only once the ball has been still
+  (≤ 2 px for 0.25 s). The first version anchored at the furthest-back point,
+  which read a ball knocked back and bouncing forward as a push (about half of
+  all its "pushes" in the footage). Arena detection takes one candidate per
+  corridor column at quarter resolution (where a fly or gate scores up to 0.68,
+  a ball as low as 0.65), confirms each at `CONFIRM_SCORE` 0.65 at half
+  resolution (not `FIND_SCORE`: a ball beside the arena's triangle markers
+  scores only ~0.70 there), and is adopted only with all `corridors` balls
+  evenly spaced and two detections 0.5 s apart agreeing: a hidden ball plus a
+  distractor would otherwise renumber the corridors or track a fly (wrong
+  light). A recording never re-detects.
+- Logs (`closedloop_frames.csv`, `closedloop_events.csv`) stream into
+  `octacam_recording/` (a crash keeps what ran); `transfer` copies every file in
+  that subfolder. `OCTACAM_FAKE_VIDEO` replays footage through the fake camera.
 
 ## Arduino firmware & auto-flash
 
@@ -717,6 +783,21 @@ is `config_writer.save_rig_config`. The **Camera tab** is a full GenApi
 node-map browser (typed widgets, per-field reset, ROI auto-center; nodes writable
 only while not grabbing cycle the preview grab). Plugin tabs live in a responsive
 overflow menu; theme is a rig config option overridable per-browser.
+
+**Preview overlays.** A plugin tab draws on the camera previews through the
+`overlays` map `app.js` hands both `loadPluginTabs` (ctx) and `CameraGrid`:
+`name -> draw(ctx, view)`, called after each frame is drawn on its tile's
+canvas, with `view` mapping sensor px to that canvas (`x()`, `y()`, `scale`,
+`screen` CSS px per canvas px) and naming the camera. Drawing in the canvas,
+not over the tile, keeps it under the tile's CSS zoom/rotate/flip and the
+server's crop and decimation for free. The closed loop's state push (20 Hz) is
+what it draws.
+
+**Embedded plugin panels.** A plugin tab class with `static embedIn = "<host>"`
+(the opto board's, in the closed loop's) gets its panel from the host tab's
+`embed(name, label)` when the host loaded first, else a tab of its own;
+`loadPluginTabs` still registers it under its own name, so its status and
+`<name>_state` pushes reach it.
 
 Frontend: `app.js` wires the page; `connection.js` the initial load, socket, mode
 and footer; `tabs.js` the `TabBar` and `loadPluginTabs`; `util.js` the shared

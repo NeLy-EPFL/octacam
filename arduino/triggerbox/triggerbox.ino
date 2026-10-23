@@ -3,7 +3,7 @@
 #include "fw_build_info.h"  // TRIGGERBOX_FW_BUILD — source fingerprint (auto-generated)
 
 // =============================================================================
-//  triggerbox — configurable camera-trigger + light controller (protocol v2)
+//  triggerbox — configurable camera-trigger + light controller (protocol v3)
 //
 //  Target board: Arduino Nano ESP32 (ESP32-S3), mounted on the EPFL
 //  "common CCS light and camera trigger circuit" (common-trigger-circuit).
@@ -14,7 +14,9 @@
 //    * any number (<= MAX_CAM) of camera-trigger lines, each with its own pin,
 //      pulse width, and phase delay;
 //    * up to 3 light channels, each independently one of four modes:
-//        off / strobe (frame-locked) / continuous / pulse_train (opto).
+//        off / strobe (frame-locked) / continuous / pulse_train (opto);
+//    * up to 6 opto outputs the host switches on for a window at any time
+//      (armed or idle), each pulsing on its own clock: a closed loop's light.
 //  Pins are addressed by an index into a fixed label table (below), so the host
 //  can drive whichever screw-terminal lines the rig is actually wired to without
 //  reflashing. All three CCS channels are electrically identical (NPN sink,
@@ -46,7 +48,7 @@
 //
 //  ---- Host -> Arduino wire protocol (little-endian) -------------------------
 //    Arm:      [0xA5]                                     magic
-//              [version : u8 = 2]
+//              [version : u8 = 3]
 //              [payload_len : u16]                        bytes that follow, pre-checksum
 //              --- payload (payload_len bytes) ---
 //              [fps : u16]                                1..5000
@@ -57,7 +59,21 @@
 //              --- end payload ---
 //              [checksum : u8]                            XOR over version+len+payload
 //    Cancel:   [0xCA]
-//    Identify: [0x3F] '?'   -> replies "TRIGGERBOX 2 <build>\n" (build = source hash)
+//    Identify: [0x3F] '?'   -> replies "TRIGGERBOX 3 <build>\n" (build = source hash)
+//    Opto config: [0xB0][version u8 = 3][payload_len u16][payload][checksum u8]
+//              payload = [n_opto u8] n_opto x (pin_id u8, pulse_us u32, period_us u32)
+//              Opto channel k (0-based) is the k-th record. While on, it is HIGH
+//              for pulse_us of every period_us from the moment it is switched
+//              on; period_us 0 (or pulse_us >= period_us) = HIGH throughout.
+//              Replacing the config switches every opto output off. Its pins
+//              may not be the run's outputs, nor the run's the opto pins.
+//    Opto gate:   [0xB1][version u8 = 3][payload_len u16][payload][checksum u8]
+//              payload = n x (channel u8, duration_ms u32): switch the channel on
+//              for duration_ms from now, 0 = off now. A channel switched on
+//              starts its pulse train; one already on keeps its phase (a window
+//              extended in steps pulses as one).
+//              The board ends the window itself, so a stalled host cannot leave
+//              a light on. No reply unless it is refused.
 //
 //    light mode fields:
 //      0 off        : hold LOW
@@ -74,7 +90,10 @@
 //                          v version   c checksum   o oversize/count
 //                          l length    f fps        p bad pin id
 //                          r reserved pin            d duplicate pin   m bad mode
-//    "TRIGGERBOX 2 <build>\n" reply to identify (build = short source hash)
+//    "O\n"    opto config accepted
+//    "o<c>\n" opto config refused, "g<c>\n" opto gate refused (codes as for E;
+//                          for a gate, p = no such opto channel)
+//    "TRIGGERBOX 3 <build>\n" reply to identify (build = short source hash)
 // =============================================================================
 
 // ---- Canonical pin-label table (SINGLE SOURCE OF TRUTH) --------------------
@@ -98,14 +117,17 @@ constexpr uint8_t kLedBlue  = D4;
 constexpr uint8_t  kArmMagic        = 0xA5;
 constexpr uint8_t  kCancelMagic     = 0xCA;
 constexpr uint8_t  kIdentifyMagic   = 0x3F;  // '?'
-constexpr uint8_t  kProtocolVersion = 2;
+constexpr uint8_t  kOptoConfigMagic = 0xB0;
+constexpr uint8_t  kOptoGateMagic   = 0xB1;
+constexpr uint8_t  kProtocolVersion = 3;
 constexpr uint32_t kArmStaleMs      = 250;   // discard a partial packet after this
 constexpr long     kBaudRate        = 115200;
-constexpr char     kVersion[]       = "TRIGGERBOX 2";
+constexpr char     kVersion[]       = "TRIGGERBOX 3";
 
 constexpr uint16_t kMaxFps   = 5000;
 constexpr uint8_t  kMaxCam   = 12;
 constexpr uint8_t  kMaxLight = 3;
+constexpr uint8_t  kMaxOpto  = 6;
 // Fixed payload prefix (fps,duration,n_cam,n_light) + records.
 constexpr uint16_t kMaxPayload = 8 + 5 * kMaxCam + 18 * kMaxLight;  // 122
 // Frame buffer holds [version, len_lo, len_hi, ...payload..., checksum].
@@ -141,6 +163,26 @@ static Light g_lt[kMaxLight];
 static uint8_t g_ncam   = 0;
 static uint8_t g_nlight = 0;
 
+// An opto output: off until the host switches it on for a window, then pulsing
+// on its own clock (esp_timer us), whatever the run state.
+struct Opto {
+  uint8_t  gpio;
+  uint32_t pulse_us;
+  uint32_t period_us;  // 0 = HIGH throughout the window
+  bool     on;
+  uint64_t cyc_us;     // current pulse cycle's start
+  uint64_t end_us;     // the window's end
+  bool     high;
+};
+static Opto    g_opto[kMaxOpto];
+static uint8_t g_nopto = 0;
+
+// Pin-table bits of the opto outputs, and of the run's outputs (live, and a
+// staged re-arm's), so neither an arm nor an opto config takes the other's pins.
+static uint32_t g_opto_mask = 0;
+static uint32_t g_run_mask  = 0;
+static uint32_t g_pend_mask = 0;
+
 // Every pin currently driven as an output — so idle/re-arm can force the exact
 // set that was last active LOW, regardless of which runtime pins were chosen.
 static uint8_t g_active_gpio[kMaxCam + kMaxLight];
@@ -167,6 +209,7 @@ static uint64_t g_run_start_us  = 0;           // esp_timer_get_time() at arm (6
 // ---- Non-blocking packet reassembly ----------------------------------------
 enum class Rx : uint8_t { CMD, COLLECT };
 static Rx       g_rx          = Rx::CMD;
+static uint8_t  g_rx_magic    = 0;    // the command being collected
 static uint8_t  g_buf[kBufSize];
 static uint16_t g_got         = 0;
 static uint16_t g_need        = 0;    // total bytes to collect for the frame
@@ -206,11 +249,13 @@ static void emit(char c) {
   Serial.write(c);
   Serial.write('\n');
 }
-static void reject(char code) {
-  Serial.write('E');
+// Refuse a command: `kind` is 'E' (arm), 'o' (opto config) or 'g' (opto gate).
+static void refuse(char kind, char code) {
+  Serial.write(kind);
   Serial.write(code);
   Serial.write('\n');
 }
+static void reject(char code) { refuse('E', code); }
 
 // Recompute every output's level from the clocks and apply the transitions.
 static void apply_outputs(uint32_t elapsed, uint64_t run) {
@@ -380,6 +425,8 @@ static void enter_idle(char reason) {
   g_ncam = 0;
   g_nlight = 0;
   g_pending = false;
+  g_run_mask = 0;
+  g_pend_mask = 0;
   g_state = State::IDLE;
   set_status(false, true, false);  // green = idle / ready
   if (reason) emit(reason);
@@ -392,10 +439,13 @@ static void commit_pending() {
   install_outputs(g_pend_cam, g_pend_ncam, g_pend_lt, g_pend_nlight, /*carry=*/true);
   start_run_clock(g_pend_duration_ms);
   g_pending = false;
+  g_run_mask = g_pend_mask;
+  g_pend_mask = 0;
 }
 
 static void enter_running(uint16_t fps, uint32_t duration_ms, const Cam *cams,
-                          uint8_t ncam, const Light *lts, uint8_t nlight) {
+                          uint8_t ncam, const Light *lts, uint8_t nlight,
+                          uint32_t mask) {
   const bool was_running = (g_state == State::RUNNING);
   uint32_t period_us = (1000000UL + fps / 2) / fps;
   if (period_us < 2) period_us = 2;
@@ -409,6 +459,7 @@ static void enter_running(uint16_t fps, uint32_t duration_ms, const Cam *cams,
     g_pend_ncam = ncam;
     g_pend_nlight = nlight;
     g_pend_duration_ms = duration_ms;
+    g_pend_mask = mask;
     g_duration_ms = 0;
     g_pending = true;
     emit('C');  // the superseded run ended...
@@ -421,6 +472,8 @@ static void enter_running(uint16_t fps, uint32_t duration_ms, const Cam *cams,
   Light next_lt[kMaxLight];
   prepare_outputs(period_us, cams, ncam, lts, nlight, next_cam, next_lt);
   g_pending = false;
+  g_run_mask = mask;
+  g_pend_mask = 0;
   g_period_us = period_us;
   install_outputs(next_cam, ncam, next_lt, nlight, /*carry=*/false);
   start_run_clock(duration_ms);
@@ -452,7 +505,7 @@ static void parse_and_validate(const uint8_t *payload, uint16_t len) {
     uint8_t idx = p[0];
     if (idx >= kNumPins) { reject('p'); return; }
     if ((1u << idx) & kReservedMask) { reject('r'); return; }
-    if (used & (1u << idx)) { reject('d'); return; }
+    if ((used | g_opto_mask) & (1u << idx)) { reject('d'); return; }
     used |= (1u << idx);
     tmpc[i].gpio = kPinTable[idx];
     tmpc[i].pulse_us = rd16(p + 1);
@@ -465,7 +518,7 @@ static void parse_and_validate(const uint8_t *payload, uint16_t len) {
     uint8_t mode = p[1];
     if (idx >= kNumPins) { reject('p'); return; }
     if ((1u << idx) & kReservedMask) { reject('r'); return; }
-    if (used & (1u << idx)) { reject('d'); return; }
+    if ((used | g_opto_mask) & (1u << idx)) { reject('d'); return; }
     if (mode > kModePulseTrain) { reject('m'); return; }
     used |= (1u << idx);
     tmpl[i].gpio = kPinTable[idx];
@@ -479,7 +532,87 @@ static void parse_and_validate(const uint8_t *payload, uint16_t len) {
     p += 18;
   }
 
-  enter_running(fps, duration_ms, tmpc, ncam, tmpl, nlight);
+  enter_running(fps, duration_ms, tmpc, ncam, tmpl, nlight, used);
+}
+
+// ---- Opto outputs ----------------------------------------------------------
+static void apply_opto(uint64_t now) {
+  for (uint8_t i = 0; i < g_nopto; i++) {
+    Opto &o = g_opto[i];
+    if (!o.on) continue;
+    bool w;
+    if (now >= o.end_us) {
+      o.on = false;
+      w = false;
+    } else if (o.period_us == 0) {
+      w = true;
+    } else {
+      while (now - o.cyc_us >= (uint64_t)o.period_us) o.cyc_us += o.period_us;
+      w = (now - o.cyc_us) < (uint64_t)o.pulse_us;
+    }
+    set_level(o.gpio, o.high, w);
+  }
+}
+
+// Replace the opto outputs (every one off): staged, so a refused config
+// changes nothing.
+static void parse_opto_config(const uint8_t *payload, uint16_t len) {
+  if (len < 1) { refuse('o', 'l'); return; }
+  const uint8_t n = payload[0];
+  if (n > kMaxOpto) { refuse('o', 'o'); return; }
+  if (len != (uint16_t)(1 + 9 * n)) { refuse('o', 'l'); return; }
+  Opto tmp[kMaxOpto];
+  uint32_t mask = 0;
+  const uint8_t *p = payload + 1;
+  for (uint8_t i = 0; i < n; i++, p += 9) {
+    const uint8_t idx = p[0];
+    if (idx >= kNumPins) { refuse('o', 'p'); return; }
+    if ((1u << idx) & kReservedMask) { refuse('o', 'r'); return; }
+    if ((mask | g_run_mask | g_pend_mask) & (1u << idx)) { refuse('o', 'd'); return; }
+    mask |= (1u << idx);
+    uint32_t pulse = rd32(p + 1);
+    uint32_t period = rd32(p + 5);
+    if (pulse == 0 || pulse >= period) period = 0;  // never off within a cycle
+    tmp[i] = {kPinTable[idx], pulse, period, false, 0, 0, false};
+  }
+  for (uint8_t i = 0; i < g_nopto; i++) {
+    digitalWrite(g_opto[i].gpio, LOW);
+    pinMode(g_opto[i].gpio, INPUT_PULLDOWN);
+  }
+  for (uint8_t i = 0; i < n; i++) {
+    pinMode(tmp[i].gpio, OUTPUT);
+    digitalWrite(tmp[i].gpio, LOW);
+    g_opto[i] = tmp[i];
+  }
+  g_nopto = n;
+  g_opto_mask = mask;
+  emit('O');
+}
+
+// Switch opto channels on for a window from now, or off (duration 0); a
+// channel already on keeps its pulse phase.
+static void parse_opto_gate(const uint8_t *payload, uint16_t len) {
+  if (len == 0 || len % 5 != 0 || len / 5 > kMaxOpto) { refuse('g', 'l'); return; }
+  for (uint16_t k = 0; k < len; k += 5) {
+    if (payload[k] >= g_nopto) { refuse('g', 'p'); return; }
+  }
+  const uint64_t now = (uint64_t)esp_timer_get_time();
+  for (uint16_t k = 0; k < len; k += 5) {
+    Opto &o = g_opto[payload[k]];
+    const uint32_t ms = rd32(payload + k + 1);
+    if (!o.on) o.cyc_us = now;
+    o.on = ms > 0;
+    o.end_us = now + (uint64_t)ms * 1000ULL;
+    if (!o.on) set_level(o.gpio, o.high, false);
+  }
+  apply_opto(now);
+}
+
+// The refusal prefix of the command being collected.
+static char rx_kind() {
+  if (g_rx_magic == kOptoConfigMagic) return 'o';
+  if (g_rx_magic == kOptoGateMagic) return 'g';
+  return 'E';
 }
 
 // ---- setup / loop ----------------------------------------------------------
@@ -509,7 +642,7 @@ void loop() {
         // Header complete: [version, len_lo, len_hi].
         g_want_len = (uint16_t)g_buf[1] | ((uint16_t)g_buf[2] << 8);
         if (g_want_len > kMaxPayload) {
-          reject('o');
+          refuse(rx_kind(), 'o');
           g_rx = Rx::CMD;
         } else {
           g_need = 3 + g_want_len + 1;  // + checksum
@@ -519,9 +652,13 @@ void loop() {
         uint8_t sum = 0;
         for (uint16_t i = 0; i < (uint16_t)(3 + g_want_len); i++) sum ^= g_buf[i];
         if (sum != g_buf[g_need - 1]) {
-          reject('c');
+          refuse(rx_kind(), 'c');
         } else if (g_buf[0] != kProtocolVersion) {
-          reject('v');
+          refuse(rx_kind(), 'v');
+        } else if (g_rx_magic == kOptoConfigMagic) {
+          parse_opto_config(g_buf + 3, g_want_len);
+        } else if (g_rx_magic == kOptoGateMagic) {
+          parse_opto_gate(g_buf + 3, g_want_len);
         } else {
           parse_and_validate(g_buf + 3, g_want_len);
         }
@@ -537,8 +674,9 @@ void loop() {
       Serial.write(' ');
       Serial.print(TRIGGERBOX_FW_BUILD);
       Serial.write('\n');
-    } else if (b == kArmMagic) {
+    } else if (b == kArmMagic || b == kOptoConfigMagic || b == kOptoGateMagic) {
       g_rx = Rx::COLLECT;
+      g_rx_magic = b;
       g_got = 0;
       g_need = 3;  // collect the header first
       g_deadline_ms = millis() + kArmStaleMs;
@@ -564,4 +702,7 @@ void loop() {
       enter_idle('D');
     }
   }
+
+  // ---- Opto windows (armed or idle) ------------------------------------------
+  if (g_nopto) apply_opto((uint64_t)esp_timer_get_time());
 }

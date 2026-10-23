@@ -17,7 +17,9 @@ log = logging.getLogger("octacam")
 
 # name -> "module:Class", imported on first use.
 _PLUGINS = {
+    "closedloop": "octacam.plugins.closedloop.plugin:ClosedLoopPlugin",
     "flywheel": "octacam.plugins.flywheel:FlywheelPlugin",
+    "opto": "octacam.plugins.opto:OptoPlugin",
     "twophoton": "octacam.plugins.twophoton:TwoPhotonPlugin",
     "triggerbox": "octacam.plugins.triggerbox.plugin:TriggerboxPlugin",
 }

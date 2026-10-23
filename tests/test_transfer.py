@@ -158,6 +158,7 @@ def test_nested_metadata_lands_in_the_destinations_subfolder(tmp_path):
     (info / "40018631.pfs").write_text("basler")
     (info / "17475185.txt").write_text("flir")
     (info / "._17475185.txt").write_text("fork")  # hidden: not metadata
+    (info / "closedloop.csv").write_text("frame\n")  # a plugin's log
     dest = tmp_path / "dest" / "rec"
 
     result = _transfer(src, dest=dest)
@@ -169,6 +170,7 @@ def test_nested_metadata_lands_in_the_destinations_subfolder(tmp_path):
         CONFIG_SNAPSHOT_FILENAME,
         "40018631.pfs",
         "17475185.txt",
+        "closedloop.csv",
     ]
     assert result.copied == ["camera_LF.mp4"] + [
         f"{RECORDING_INFO_DIRNAME}/{name}" for name in meta

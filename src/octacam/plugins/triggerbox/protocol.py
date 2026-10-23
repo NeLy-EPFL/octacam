@@ -1,32 +1,41 @@
-"""The triggerbox wire protocol v2 (must match ``arduino/triggerbox``) and the
+"""The triggerbox wire protocol v3 (must match ``arduino/triggerbox``) and the
 serial link that speaks it.
 
 Host -> board (little-endian):
-  [0xA5][version u8 = 2][payload_len u16][payload][xor u8]  arm
+  [0xA5][version u8 = 3][payload_len u16][payload][xor u8]  arm
+  [0xB0][version u8 = 3][payload_len u16][payload][xor u8]  opto config
+  [0xB1][version u8 = 3][payload_len u16][payload][xor u8]  opto gate
   [0xCA]                                                    cancel
   [0x3F] '?'                                                identify
-  payload = fps u16 | duration_ms u32 | n_cam u8 | n_light u8
+  arm payload = fps u16 | duration_ms u32 | n_cam u8 | n_light u8
             | n_cam x (pin_id u8, pulse_us u16, delay_us u16)
             | n_light x (pin_id u8, mode u8, p0 u32, p1 u32, p2 u32, p3 u32)
+  opto config payload = n u8 | n x (pin_id u8, pulse_us u32, period_us u32)
+  opto gate payload = n x (channel u8, duration_ms u32)
 Board -> host, newline-terminated: "R" running, "D" done, "C" cancelled or
-idle, "E<c>" rejected, "TRIGGERBOX <version> <build>" the identify reply.
+idle, "E<c>" rejected, "O" opto config accepted, "o<c>"/"g<c>" opto config/gate
+refused, "TRIGGERBOX <version> <build>" the identify reply.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import struct
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from octacam.plugins.serial import SerialLink
 
-PROTOCOL_VERSION = 2
+log = logging.getLogger("octacam")
+
+PROTOCOL_VERSION = 3
 BANNER = "TRIGGERBOX"
 MAX_FPS = 5000
 MAX_CAM = 12
 MAX_LIGHT = 3
+MAX_OPTO = 6
 DEFAULT_DUTY_PERCENT = 20.0
 
 # How long an arm waits for the board's 'R' (or 'E').
@@ -37,10 +46,13 @@ CANCEL_ACK_TIMEOUT_S = 0.3
 
 _ARM_MAGIC = 0xA5
 _CANCEL_MAGIC = 0xCA
-_HDR = struct.Struct("<BBH")      # magic u8, version u8, payload_len u16
+_OPTO_CONFIG_MAGIC = 0xB0
+_OPTO_GATE_MAGIC = 0xB1
 _FIXED = struct.Struct("<HIBB")   # fps u16, duration_ms u32, n_cam u8, n_light u8
 _CAM = struct.Struct("<BHH")      # pin_id u8, pulse_us u16, delay_us u16
 _LIGHT = struct.Struct("<BBIIII")  # pin_id u8, mode u8, p0 u32, p1 u32, p2 u32, p3 u32
+_OPTO = struct.Struct("<BII")     # pin_id u8, pulse_us u32, period_us u32
+_GATE = struct.Struct("<BI")      # channel u8, duration_ms u32
 
 # The wire's pin ids (by index): the single source of truth, mirrored by kPinTable
 # in triggerbox.ino (a test keeps them equal). D2/D3/D4 drive the status LED and
@@ -57,7 +69,8 @@ LIGHT_PIN_BY_CHANNEL = {1: "D5", 2: "D6", 3: "D7"}
 LIGHT_MODE_IDS = {"off": 0, "strobe": 1, "continuous": 2, "pulse_train": 3, "pulse": 3}
 LIGHT_MODE_NAMES = {0: "off", 1: "strobe", 2: "continuous", 3: "pulse_train"}
 
-# The firmware's 'E<c>' reject codes.
+# The firmware's 'E<c>' reject codes (and an opto config's 'o<c>', a gate's
+# 'g<c>': for a gate "p" is a channel the board has no opto output for).
 REJECT_REASONS = {
     "v": "protocol version mismatch",
     "c": "checksum",
@@ -144,6 +157,45 @@ class LightChannel:
 
 
 @dataclass
+class OptoChannel:
+    """One opto output: while switched on it pulses ``pulse_ms`` at ``freq_hz``,
+    or stays on throughout when ``freq_hz`` is 0."""
+
+    pin: str = "D8"
+    freq_hz: float = 0.0
+    pulse_ms: float = 10.0
+
+    def record(self) -> tuple[int, int, int]:
+        """The wire record ``(pin_id, pulse_us, period_us)``; period 0 = steady."""
+        if self.freq_hz <= 0:
+            return (pin_id(self.pin), 0, 0)
+        period = int(round(1_000_000.0 / self.freq_hz))
+        return (pin_id(self.pin), _u32(self.pulse_ms * 1000), _u32(period))
+
+
+def _packet(magic: int, payload: bytes) -> bytes:
+    """``[magic][version][len][payload][xor]``; the checksum spans version, length
+    and payload (a framing/desync guard)."""
+    body = bytes([PROTOCOL_VERSION]) + struct.pack("<H", len(payload)) + payload
+    checksum = 0
+    for byte in body:
+        checksum ^= byte
+    return bytes([magic]) + body + bytes([checksum])
+
+
+def opto_config_packet(channels: Sequence[OptoChannel]) -> bytes:
+    payload = bytes([len(channels)])
+    for channel in channels:
+        payload += _OPTO.pack(*channel.record())
+    return _packet(_OPTO_CONFIG_MAGIC, payload)
+
+
+def opto_gate_packet(gates: Sequence[tuple[int, int]]) -> bytes:
+    """Switch each ``(channel, duration_ms)`` (0-based; 0 ms = off now)."""
+    return _packet(_OPTO_GATE_MAGIC, b"".join(_GATE.pack(c, _u32(ms)) for c, ms in gates))
+
+
+@dataclass
 class ArmSpec:
     """An arm packet: fps, duration and the outputs' wire records."""
 
@@ -158,12 +210,7 @@ class ArmSpec:
             payload += _CAM.pack(*rec)
         for rec in self.lights:
             payload += _LIGHT.pack(*rec)
-        # Checksum spans version + payload_len + payload (framing/desync guard).
-        body = bytes([PROTOCOL_VERSION]) + struct.pack("<H", len(payload)) + payload
-        checksum = 0
-        for byte in body:
-            checksum ^= byte
-        return _HDR.pack(_ARM_MAGIC, PROTOCOL_VERSION, len(payload)) + payload + bytes([checksum])
+        return _packet(_ARM_MAGIC, payload)
 
 
 class TriggerboxLink(SerialLink):
@@ -183,6 +230,16 @@ class TriggerboxLink(SerialLink):
         self._idle = threading.Event()  # 'C' to the last cancel
         self._events = {"R": self._answered, "D": self._done, "C": self._idle}
         self.reject: str | None = None  # the last arm's reject code
+        self._opto_lock = threading.Lock()
+        self._opto_answered = threading.Event()  # 'O' or 'o<c>' to the last config
+        self.opto_reject: str | None = None
+        # The board holds this connection's opto config: a reopened port (the
+        # board may have rebooted) or a refused gate clears it.
+        self.opto_configured = False
+
+    def open(self, device: str, baud: int) -> None:
+        self.opto_configured = False
+        super().open(device, baud)
 
     def arm(self, spec: ArmSpec) -> str:
         """Send an arm: ``"ok"`` ('R'), ``"reject"`` ('E<c>', code in
@@ -207,6 +264,27 @@ class TriggerboxLink(SerialLink):
                 return True
             return self._idle.wait(min(ACK_TIMEOUT_S, CANCEL_ACK_TIMEOUT_S))
 
+    def configure_opto(self, channels: Sequence[OptoChannel]) -> str:
+        """Send the opto outputs (every one off): ``"ok"`` ('O'), ``"reject"``
+        (code in :attr:`opto_reject`), ``"timeout"`` or ``"write_failed"``."""
+        with self._opto_lock:
+            self._opto_answered.clear()
+            self.opto_configured = False
+            self.opto_reject = None
+            if not self._write(opto_config_packet(channels)):
+                return "write_failed"
+            if not self._opto_answered.wait(ACK_TIMEOUT_S):
+                return "timeout"
+            if self.opto_reject is not None:
+                return "reject"
+            self.opto_configured = True
+            return "ok"
+
+    def gate_opto(self, gates: Sequence[tuple[int, int]]) -> bool:
+        """Switch opto channels (see :func:`opto_gate_packet`) without waiting:
+        True once written. A refusal comes back as 'g<c>' and is logged."""
+        return self._write(opto_gate_packet(gates))
+
     def send_cancel(self) -> None:
         """Cancel without waiting; an idle board ignores it."""
         self._write(bytes([_CANCEL_MAGIC]))
@@ -226,3 +304,13 @@ class TriggerboxLink(SerialLink):
             elif token[0] == "E":
                 self.reject = token[1:]
                 self._answered.set()
+            elif token == "O":
+                self._opto_answered.set()
+            elif token[0] == "o":
+                self.opto_reject = token[1:] or "?"
+                self._opto_answered.set()
+            elif token[0] == "g":
+                self.opto_configured = False
+                code = token[1:2]
+                reason = "no such opto channel" if code == "p" else REJECT_REASONS.get(code, "unknown")
+                log.warning("triggerbox: the board refused an opto gate (%s: %s)", code, reason)

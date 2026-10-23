@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone driver for the triggerbox firmware (protocol v2).
+"""Standalone driver for the triggerbox firmware (protocol v3).
 
 Sends an arm packet to the Arduino Nano ESP32 running ``triggerbox.ino`` and
 prints its status tokens, so you can bench-test camera triggering and the light
@@ -24,6 +24,10 @@ Examples::
     # just check what's on the port
     python triggerbox_send.py --identify
 
+    # light an opto LED wired to D8 for 3 s, 20 Hz x 10 ms pulses (no arm)
+    python triggerbox_send.py --opto D8,20,10 --duration 3
+
+Opto spec:    PIN[,freq_hz[,pulse_ms]]            (freq 0/omitted = steady)
 Camera spec:  PIN[,pulse_us[,delay_us]]           (pulse 0/omitted = firmware default)
 Light spec:   CH,off
               CH,strobe,on_us[,delay_us]
@@ -46,7 +50,9 @@ except ImportError:
 ARM_MAGIC = 0xA5
 CANCEL_MAGIC = 0xCA
 IDENTIFY_MAGIC = 0x3F
-PROTOCOL_VERSION = 2
+OPTO_CONFIG_MAGIC = 0xB0
+OPTO_GATE_MAGIC = 0xB1
+PROTOCOL_VERSION = 3
 
 # Canonical pin-label table — must match kPinTable in triggerbox.ino (and
 # PIN_LABELS in the octacam plugin). Index on the wire; D2/D3/D4 are the status
@@ -73,6 +79,24 @@ def pin_id(label: str) -> int:
         return PIN_LABELS.index(label.upper())
     except ValueError:
         raise SystemExit(f"unknown pin {label!r}; valid: {', '.join(PIN_LABELS)}")
+
+
+def build_packet(magic: int, payload: bytes) -> bytes:
+    body = bytes([PROTOCOL_VERSION]) + struct.pack("<H", len(payload)) + payload
+    checksum = 0
+    for b in body:
+        checksum ^= b
+    return bytes([magic]) + body + bytes([checksum])
+
+
+def parse_opto(spec: str) -> tuple[int, int, int]:
+    """PIN[,freq_hz[,pulse_ms]] -> (pin_id, pulse_us, period_us)."""
+    parts = spec.split(",")
+    freq = float(parts[1]) if len(parts) > 1 else 0.0
+    pulse_ms = float(parts[2]) if len(parts) > 2 else 10.0
+    if freq <= 0:
+        return (pin_id(parts[0]), 0, 0)
+    return (pin_id(parts[0]), int(pulse_ms * 1000), int(round(1e6 / freq)))
 
 
 def build_arm(fps: int, duration_ms: int, cams: list[tuple], lights: list[tuple]) -> bytes:
@@ -140,6 +164,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="a light channel (repeatable)")
     p.add_argument("--identify", action="store_true",
                    help="just query the board's identity and exit")
+    p.add_argument("--opto", action="append", default=[], metavar="PIN[,freq[,pulse_ms]]",
+                   help="light opto outputs for --duration instead of arming (repeatable)")
     return p.parse_args(argv)
 
 
@@ -177,6 +203,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.identify:
             port.write(bytes([IDENTIFY_MAGIC]))
             read_tokens(port, time.monotonic() + 1.0)
+            return 0
+
+        if args.opto:
+            records = [parse_opto(s) for s in args.opto]
+            payload = bytes([len(records)]) + b"".join(struct.pack("<BII", *r) for r in records)
+            port.write(build_packet(OPTO_CONFIG_MAGIC, payload))
+            read_tokens(port, time.monotonic() + 0.5)  # expect "O"
+            gates = b"".join(struct.pack("<BI", k, duration_ms) for k in range(len(records)))
+            print(f"-> opto on for {duration_ms} ms: {', '.join(args.opto)}")
+            port.write(build_packet(OPTO_GATE_MAGIC, gates))
+            read_tokens(port, time.monotonic() + duration_ms / 1000 + 0.5)
             return 0
 
         cams = [parse_camera(s) for s in args.camera] or [parse_camera("D13")]

@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from octacam import serial_ports
+
 log = logging.getLogger("octacam")
 
 # Hashed into the fingerprint and copied into a build; the build header is
@@ -356,6 +358,35 @@ def _run_streaming(
     return (proc.returncode if proc.returncode is not None else -1), "\n".join(lines)
 
 
+# Boards uploaded over DFU, whose upload pattern names the board: dfu-util finds
+# every attached board of a model (a Nano ESP32 serves DFU while it runs) and
+# refuses to pick one. %s is the port's USB serial number.
+_DFU_UPLOAD_PATTERNS = {
+    "arduino:esp32:nano_nora": (
+        '"{path}/{cmd}" --device {vid.0}:{pid.0} --serial %s '
+        '-D "{build.path}/{build.project_name}.bin" -Q'
+    ),
+}
+
+
+def _flash_commands(cli: str, spec: FirmwareSpec, port: str, sketch: Path, build: Path) -> list[list[str]]:
+    """The arduino-cli runs that build *sketch* and upload it to *port*: one
+    ``compile --upload``, or for a DFU board whose serial number is known a
+    compile then an upload pinned to that board."""
+    pattern = _DFU_UPLOAD_PATTERNS.get(spec.fqbn)
+    serial = serial_ports.usb_serial_number(port) if pattern else None
+    if pattern is None or serial is None:
+        return [[cli, "compile", "--fqbn", spec.fqbn, "--upload", "--port", port, str(sketch)]]
+    return [
+        [cli, "compile", "--fqbn", spec.fqbn, "--build-path", str(build), str(sketch)],
+        [
+            cli, "upload", "--fqbn", spec.fqbn, "--port", port, "--input-dir", str(build),
+            "--upload-property", f"upload.pattern={pattern % serial}",
+            str(sketch),
+        ],
+    ]
+
+
 def flash(
     spec: FirmwareSpec,
     port: str,
@@ -387,15 +418,15 @@ def flash(
         (build_sketch / spec.build_header).write_text(
             _render_build_header(spec, needed_build)
         )
-        cmd = [
-            cli, "compile",
-            "--fqbn", spec.fqbn,
-            "--upload", "--port", port,
-            str(build_sketch),
-        ]
-        if on_line is not None:
-            on_line(f"$ {' '.join(cmd)}")
-        code, out = _run_streaming(cmd, timeout, on_line)
+        code, outs = 0, []
+        for cmd in _flash_commands(cli, spec, port, build_sketch, Path(tmp) / "build"):
+            if on_line is not None:
+                on_line(f"$ {' '.join(cmd)}")
+            code, out = _run_streaming(cmd, timeout, on_line)
+            outs.append(out)
+            if code != 0:
+                break
+        out = "\n".join(outs)
         if code == 0:
             return FlashResult(
                 True,

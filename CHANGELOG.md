@@ -11,6 +11,29 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **Closed-loop optogenetics for ball pushing** (`closedloop` plugin) — tracks
+  the tracked corridors' balls in real time (~0.2 ms per ball per 2048² frame) and,
+  while recording, lights a corridor pair's opto LED when its fly pushes the
+  ball: for at least `min_on_s`, and while the ball keeps moving; the pair's
+  control corridor shares the light. A **Closed loop** tab shows the balls, the
+  pushes and the light, edits the push rule, tests each light, and has a
+  **Light in preview (test)** switch to try the loop without recording, and
+  a per-pair choice of which corridor (left or right) is tracked. Each
+  recording logs every tracked frame and every push to `octacam_recording/`.
+- The closed loop draws on the tracked camera's preview: each tracked ball,
+  its pair's LED state (the corridors tinted red while lit) and pushes as they
+  land. Plugin tabs can draw on any camera preview (`overlays`).
+- **`opto` plugin: an optogenetic LED board** — a second Nano ESP32 running the
+  triggerbox sketch, whose opto outputs (firmware protocol v3: up to six lines
+  switched on for a window, steady or pulsed) the closed loop drives; the board
+  ends each window itself. Protocol v3 boards must be reflashed (`octacam flash`).
+  Its **Opto LEDs** panel (in the Closed loop tab) holds any LED on until
+  released (an override the closed loop logs and never switches off). A plugin
+  tab can host another's panel (`static embedIn`).
+- A camera's `frame_tap` hands every grabbed frame (with its pulse while
+  recording) to an in-process consumer without ever stalling the grab.
+- `OCTACAM_FAKE_VIDEO=<video>` makes the fake cameras replay a recording, to
+  rehearse on real footage.
 - **Every frame is assigned to the trigger pulse that exposed it; missed pulses
   are detected, filled and reported** — a hardware-triggered camera that misses
   a pulse delivers no frame for it and nothing in its frame stream said so, so a
@@ -50,6 +73,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Changed
 
+- Flashing a Nano ESP32 names its USB serial number to the DFU uploader, so a
+  rig with two of them (triggerbox + opto) can flash either.
+- `octacam process` transfers every file in a recording's `octacam_recording/`
+  folder (a plugin's log, like the closed loop's), not only the summary,
+  timestamps, config snapshot and camera parameter files.
 - `PUT /api/settings` reports a bad value as one message naming the field, in any
   state (only a valid change answers 409 during a take). It no longer coerces
   `true`/`2.0`/`"3"` into the integer settings or accepts `null` for a setting

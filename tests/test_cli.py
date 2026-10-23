@@ -23,6 +23,7 @@ from octacam.cli.wizard import _build_config_doc, _resolve_backend
 from octacam.firmware import FirmwareSpec
 from octacam.plugins.base import PluginManager
 from octacam.plugins.serial import SerialPlugin
+from octacam.plugins.triggerbox.protocol import PROTOCOL_VERSION as TRIGGERBOX_PROTOCOL
 
 runner = CliRunner()
 
@@ -2098,13 +2099,17 @@ def _current_triggerbox_build():
     return fw.sketch_fingerprint(fw.resolve_sketch_dir("triggerbox"))
 
 
+# The triggerbox protocol the current sketch speaks.
+TB_V = TRIGGERBOX_PROTOCOL
+
+
 @pytest.fixture
 def fake_triggerbox(monkeypatch):
     """The triggerbox link, faked at the class: the board answers ``banner`` and
     ``devices`` lists every port the plugin opened."""
     from octacam.plugins.triggerbox.protocol import TriggerboxLink
 
-    board = SimpleNamespace(open=False, banner="TRIGGERBOX 2 oldbuild", devices=[])
+    board = SimpleNamespace(open=False, banner=f"TRIGGERBOX {TB_V} oldbuild", devices=[])
 
     def open_(self, device, baud):
         board.devices.append(device)
@@ -2166,7 +2171,7 @@ def test_flash_yes_still_warns_of_an_unidentified_board(fake_triggerbox):
 
 
 def test_flash_leaves_a_current_board_alone(fake_triggerbox):
-    fake_triggerbox.banner = f"TRIGGERBOX 2 {_current_triggerbox_build()}"
+    fake_triggerbox.banner = f"TRIGGERBOX {TB_V} {_current_triggerbox_build()}"
     result = runner.invoke(
         app, ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x"]
     )
@@ -2212,7 +2217,7 @@ def test_flash_without_the_sketch_never_calls_a_board_up_to_date(
     # A flash can't happen; --check fails only on a board known to be out of date.
     assert result.exit_code == (0 if flags == ["--check"] else 1), result.output
     flat = " ".join(result.output.split())
-    assert "board firmware: TRIGGERBOX 2 oldbuild" in flat
+    assert f"board firmware: TRIGGERBOX {TB_V} oldbuild" in flat
     assert "source build: (not available)" in flat
     assert "? unknown — the sketch source was not found" in flat
     assert "up to date" not in flat
@@ -2222,7 +2227,7 @@ def test_flash_without_the_sketch_never_calls_a_board_up_to_date(
 
 
 @pytest.mark.parametrize("flags", [["--yes"], ["--check"]], ids=["yes", "check"])
-@pytest.mark.parametrize("banner", ["FLYWHEEL 1 abc", "TRIGGERBOX 3 x"])
+@pytest.mark.parametrize("banner", ["FLYWHEEL 1 abc", f"TRIGGERBOX {TB_V + 1} x"])
 def test_flash_without_the_sketch_names_a_foreign_board_incompatible(
     fake_triggerbox, no_sketch, flags, banner
 ):
@@ -2235,7 +2240,7 @@ def test_flash_without_the_sketch_names_a_foreign_board_incompatible(
     assert result.exit_code == 1, result.output
     flat = " ".join(result.output.split())
     assert (
-        "✗ incompatible firmware — the board does not run TRIGGERBOX v2 firmware "
+        f"✗ incompatible firmware — the board does not run TRIGGERBOX v{TB_V} firmware "
         "(arming is disabled); the sketch source was not found"
     ) in flat
     assert "? unknown" not in flat
@@ -2279,7 +2284,7 @@ def test_flash_without_a_flashable_plugin(tmp_path, plugin, exit_code):
 @pytest.mark.parametrize(
     ("banner", "line"),
     [
-        ("TRIGGERBOX 2 oldbuild", "triggerbox firmware needs flashing"),
+        (f"TRIGGERBOX {TB_V} oldbuild", "triggerbox firmware needs flashing"),
         ("FLYWHEEL 1 abc", "triggerbox firmware needs flashing"),
         (None, "triggerbox firmware up to date"),
     ],
@@ -2288,14 +2293,14 @@ def test_flash_without_a_flashable_plugin(tmp_path, plugin, exit_code):
 def test_doctor_probe_classifies_a_configured_board(
     emulated_rig, monkeypatch, tmp_path, banner, line
 ):
-    banner = banner or f"TRIGGERBOX 2 {_current_triggerbox_build()}"
+    banner = banner or f"TRIGGERBOX {TB_V} {_current_triggerbox_build()}"
     flat = _doctor_probe_triggerbox(monkeypatch, tmp_path, banner)
     assert "plugin 'triggerbox' device /dev/ttyACM0 is connected" in flat
     assert line in flat
 
 
 @pytest.mark.parametrize(
-    ("banner", "foreign"), [("FLYWHEEL 1 abc", True), ("TRIGGERBOX 2 x", False)]
+    ("banner", "foreign"), [("FLYWHEEL 1 abc", True), (f"TRIGGERBOX {TB_V} x", False)]
 )
 def test_doctor_probe_without_the_sketch_checks_the_banner_name(
     emulated_rig, monkeypatch, tmp_path, banner, foreign

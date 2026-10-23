@@ -321,6 +321,7 @@ def test_flash_writes_header_and_reports_success(real_spec, monkeypatch):
 
     monkeypatch.setattr(fw, "core_installed", lambda cli, fqbn: True)
     monkeypatch.setattr(fw, "_run_streaming", fake_run)
+    monkeypatch.setattr(fw.serial_ports, "usb_serial_number", lambda port: None)
     lines: list[str] = []
     result = fw.flash(real_spec, "/dev/ttyACM0", "beefcafe", cli="/x/arduino-cli", on_line=lines.append)
 
@@ -331,6 +332,31 @@ def test_flash_writes_header_and_reports_success(real_spec, monkeypatch):
     assert captured["has_ino"]
     assert "--upload" in captured["cmd"] and "/dev/ttyACM0" in captured["cmd"]
     assert any("Uploading" in ln for ln in lines)
+
+
+def test_flash_pins_a_dfu_upload_to_the_ports_board(real_spec, monkeypatch):
+    # dfu-util refuses to choose among several attached boards of one model: the
+    # upload names the port's USB serial number.
+    cmds = []
+    monkeypatch.setattr(fw, "core_installed", lambda cli, fqbn: True)
+    monkeypatch.setattr(fw, "_run_streaming", lambda cmd, timeout, on_line: cmds.append(cmd) or (0, "ok"))
+    monkeypatch.setattr(fw.serial_ports, "usb_serial_number", lambda port: "DCDA0C20DDFC")
+    assert fw.flash(real_spec, "/dev/ttyACM1", "beefcafe", cli="/x/arduino-cli").ok
+    compile_cmd, upload_cmd = cmds
+    assert compile_cmd[1] == "compile" and "--upload" not in compile_cmd
+    build = compile_cmd[compile_cmd.index("--build-path") + 1]
+    assert upload_cmd[1] == "upload" and upload_cmd[upload_cmd.index("--input-dir") + 1] == build
+    pattern = upload_cmd[upload_cmd.index("--upload-property") + 1]
+    assert pattern.startswith("upload.pattern=") and "--serial DCDA0C20DDFC" in pattern
+
+
+def test_flash_stops_at_a_failed_compile(real_spec, monkeypatch):
+    cmds = []
+    monkeypatch.setattr(fw, "core_installed", lambda cli, fqbn: True)
+    monkeypatch.setattr(fw, "_run_streaming", lambda cmd, timeout, on_line: cmds.append(cmd) or (1, "error: boom"))
+    monkeypatch.setattr(fw.serial_ports, "usb_serial_number", lambda port: "DCDA0C20DDFC")
+    result = fw.flash(real_spec, "/dev/ttyACM1", "beefcafe", cli="/x/arduino-cli")
+    assert not result.ok and "boom" in result.log and len(cmds) == 1
 
 
 def test_flash_reports_failure_from_nonzero_exit(real_spec, monkeypatch):

@@ -222,6 +222,19 @@ def _usb_device_dir(tty_device: str) -> str | None:
     return None
 
 
+def usb_serial_number(tty_device: str) -> str | None:
+    """The USB serial number of the device behind a tty (a symlink is followed),
+    or None when it has none or is not USB. Linux only."""
+    usb_dir = _usb_device_dir(tty_device)
+    if usb_dir is None:
+        return None
+    try:
+        with open(os.path.join(usb_dir, "serial")) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 def reset_usb_device(device: str) -> tuple[bool, str]:
     """Reset the USB device behind *device* from the host: ``(ok, message)``.
 
