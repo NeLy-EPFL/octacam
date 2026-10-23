@@ -162,7 +162,11 @@ async function main() {
   // A loaded but not-ready plugin keeps its tab (with a Reconnect button), so
   // an unplugged board is visible.
   const tabBar = new TabBar(byId("tabs"));
+  // Drawings plugins add on the camera previews: name -> draw(ctx, view) (see
+  // CameraGrid's overlays).
+  const overlays = new Map();
   pluginTabs = await loadPluginTabs(system.plugins, tabBar, {
+    overlays,
     send: (m) => conn.send(m),
     notify,
     getRecordSettings: () => record.settings,
@@ -338,6 +342,7 @@ async function main() {
       },
       onRename: (i, name) => cameraTab?.renameCamera(i, name),
       onViewChange: scheduleViewSend,
+      overlays,
     });
     viewTab = new ViewTab({ cameras, grid, onSelect: (i) => grid.select(i) });
     cameraTab = new CameraTab({

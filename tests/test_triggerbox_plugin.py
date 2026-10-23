@@ -1,4 +1,4 @@
-"""triggerbox plugin (protocol v4): wire format, resolve, hooks, REST, link."""
+"""triggerbox plugin (protocol v5): wire format, resolve, hooks, REST, link."""
 
 import importlib.util
 import logging
@@ -31,6 +31,7 @@ from octacam.plugins.triggerbox.protocol import (
     REJECT_REASONS,
     ArmSpec,
     LightChannel,
+    OptoChannel,
     TriggerboxLink,
     dim_duty,
     dim_frame,
@@ -40,6 +41,8 @@ from octacam.plugins.triggerbox.train import period_us, plan_train, pulse_count
 
 ARM_MAGIC = 0xA5
 DIM_MAGIC = 0xD1
+OPTO_CONFIG_MAGIC = 0xB0
+OPTO_GATE_MAGIC = 0xB1
 CANCEL_MAGIC = 0xCA
 IDENTIFY_MAGIC = 0x3F
 DEVICE = "/dev/ttyACM0"
@@ -102,6 +105,18 @@ def _decode_frame(raw: bytes) -> dict:
     }
 
 
+def _unframe(raw: bytes, magic: int) -> bytes:
+    """The payload of a `[magic][version][len][payload][xor]` packet."""
+    got, version, payload_len = _HDR.unpack_from(raw, 0)
+    assert got == magic and version == PROTOCOL_VERSION
+    checksum = 0
+    for b in raw[1 : 4 + payload_len]:  # version + len + payload
+        checksum ^= b
+    assert checksum == raw[-1], "checksum mismatch"
+    assert len(raw) == 4 + payload_len + 1
+    return raw[4 : 4 + payload_len]
+
+
 def _decode_dim(raw: bytes) -> tuple[str, int]:
     """A dim frame's `(pin label, duty)`, checking its framing and checksum."""
     magic, version, payload_len = _HDR.unpack_from(raw, 0)
@@ -138,6 +153,7 @@ class FakeLink(TriggerboxLink):
         self.acks = True
         self.reject_code: str | None = None
         self.dim_reject_code: str | None = None
+        self.opto_reject_code: str | None = None
         self.banner: str | None = None
         self.delay_s = delay_s
         self.opens = 0
@@ -186,6 +202,9 @@ class FakeLink(TriggerboxLink):
         elif data[0] == DIM_MAGIC:
             code = self.dim_reject_code
             self._answer("P" if code is None else "E" + code)
+        elif data[0] == OPTO_CONFIG_MAGIC:
+            code = self.opto_reject_code
+            self._answer("O" if code is None else "o" + code)
         elif data == bytes([CANCEL_MAGIC]):
             self._answer("C")
         return True
@@ -304,11 +323,18 @@ def test_protocol_constants_match_firmware():
     assert _ino_constant(ino, "kVersion") == f'"{BANNER} {PROTOCOL_VERSION}"'
     assert int(_ino_constant(ino, "kArmMagic"), 16) == protocol._ARM_MAGIC
     assert int(_ino_constant(ino, "kDimMagic"), 16) == protocol._DIM_MAGIC
+    assert (
+        int(_ino_constant(ino, "kOptoConfigMagic"), 16) == protocol._OPTO_CONFIG_MAGIC
+    )
+    assert int(_ino_constant(ino, "kOptoGateMagic"), 16) == protocol._OPTO_GATE_MAGIC
+    assert int(_ino_constant(ino, "kMaxOpto")) == protocol.MAX_OPTO
     assert int(_ino_constant(ino, "kCancelMagic"), 16) == protocol._CANCEL_MAGIC
     assert int(_ino_constant(ino, "kDimFull")) == DIM_FULL_SCALE
     assert int(_ino_constant(ino, "kDimPayload")) == _DIM.size
-    # Every code the firmware sends has a reason the GUI can show.
-    assert set(re.findall(r"reject\('(.)'\)", ino)) == set(REJECT_REASONS)
+    # Every code the firmware sends (an arm's or dim's E, an opto config's o or
+    # gate's g) has a reason the GUI can show.
+    codes = re.findall(r"(?:reject\(|refuse\([^,]+,\s*)'(.)'\)", ino)
+    assert set(codes) == set(REJECT_REASONS)
 
     spec = importlib.util.spec_from_file_location(
         "triggerbox_send", FIRMWARE_DIR / "triggerbox_send.py"
@@ -1160,10 +1186,10 @@ def test_link_parses_status_and_reject_tokens(monkeypatch):
     link = TriggerboxLink(states.append, _noop)
     link.open(DEVICE, 115200)
     try:
-        fake.feed(b"R\nTRIGGERBOX 4\nEp\nD\nC\n")
+        fake.feed(b"R\nTRIGGERBOX 5\nEp\nD\nC\n")
         assert wait_until(lambda: states == ["R", "D", "C"])
         assert link.reject == "p"
-        assert link.identity == "TRIGGERBOX 4"
+        assert link.identity == "TRIGGERBOX 5"
     finally:
         link.close()
 
@@ -1208,9 +1234,9 @@ def test_link_is_open_false_when_never_opened():
 
 def test_verify_identity_accepts_triggerbox_v3():
     plugin, link = _plugin_with_fake()
-    link.banner = "TRIGGERBOX 4"
+    link.banner = "TRIGGERBOX 5"
     plugin._identify()
-    assert plugin.banner == "TRIGGERBOX 4" and plugin.firmware_ok is True
+    assert plugin.banner == "TRIGGERBOX 5" and plugin.firmware_ok is True
 
 
 def test_verify_identity_refuses_foreign_board(caplog):
@@ -1259,10 +1285,10 @@ def test_open_no_reset_for_healthy_board(monkeypatch):
         sp, "reset_usb_device", lambda device: (calls.append(device), (True, "x"))[1]
     )
     plugin, link = _plugin_with_fake()
-    link.banner = "TRIGGERBOX 4"
+    link.banner = "TRIGGERBOX 5"
     plugin._open()
     assert calls == []  # a healthy identify never triggers a reset
-    assert plugin.banner == "TRIGGERBOX 4"
+    assert plugin.banner == "TRIGGERBOX 5"
 
 
 # ===========================================================================
@@ -1299,7 +1325,7 @@ def _verify_with_banner(plugin: TriggerboxPlugin, link: FakeLink, banner):
 
 def test_identify_current_build_is_up_to_date():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, f"TRIGGERBOX 4 {plugin.needed_build}")
+    _verify_with_banner(plugin, link, f"TRIGGERBOX 5 {plugin.needed_build}")
     assert plugin.firmware_ok
     prov = plugin.firmware_provisioning()
     assert prov["state"] == "current"
@@ -1309,7 +1335,7 @@ def test_identify_current_build_is_up_to_date():
 def test_identify_outdated_build_still_arms():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(
-        plugin, link, "TRIGGERBOX 4"
+        plugin, link, "TRIGGERBOX 5"
     )  # no build tag = pre-fingerprint flash
     assert plugin.firmware_ok  # OUTDATED is still wire-compatible; arming stays enabled
     prov = plugin.firmware_provisioning()
@@ -1317,7 +1343,9 @@ def test_identify_outdated_build_still_arms():
     assert prov["needs_flash"] is True
 
 
-@pytest.mark.parametrize("banner", ["TRIGGERBOX 1 abc1234", "TRIGGERBOX 3 3b651cd9"])
+@pytest.mark.parametrize(
+    "banner", ["TRIGGERBOX 1 abc1234", "TRIGGERBOX 3 3b651cd9", "TRIGGERBOX 4 e8b4c6b"]
+)
 def test_identify_wrong_version_disables_arming(banner):
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, banner)
@@ -1357,7 +1385,7 @@ def no_source_checkout(monkeypatch):
 def test_no_source_falls_back_to_banner_compatibility(no_source_checkout):
     plugin, link = _plugin_with_fake()
     assert plugin.firmware_provisioning()["needed_build"] is None
-    _verify_with_banner(plugin, link, "TRIGGERBOX 4")
+    _verify_with_banner(plugin, link, "TRIGGERBOX 5")
     assert plugin.firmware_ok  # name+version compatible; no flash offer
     assert plugin.firmware_check is None
     _verify_with_banner(plugin, link, "TRIGGERBOX 1")
@@ -1368,7 +1396,7 @@ def test_broadcast_includes_firmware_state():
     plugin, link = _plugin_with_fake()
     bc = _Broadcasts()
     PluginManager([plugin]).attach(broadcast=bc)
-    _verify_with_banner(plugin, link, "TRIGGERBOX 4")
+    _verify_with_banner(plugin, link, "TRIGGERBOX 5")
     plugin._push_state()
     last = bc.msgs[-1]
     assert last["firmware_state"] == "outdated"
@@ -1377,9 +1405,9 @@ def test_broadcast_includes_firmware_state():
 
 def test_flash_firmware_success_updates_state():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "TRIGGERBOX 4")  # start out of date
+    _verify_with_banner(plugin, link, "TRIGGERBOX 5")  # start out of date
     # After the (faked) upload the board reports the current build on re-identify.
-    link.banner = f"TRIGGERBOX 4 {plugin.needed_build}"
+    link.banner = f"TRIGGERBOX 5 {plugin.needed_build}"
     result = plugin.flash_firmware()
     assert result.ok
     assert plugin.firmware_ok
@@ -1414,7 +1442,7 @@ def test_flash_firmware_without_source(no_source_checkout):
 
 def test_flash_firmware_failure_is_reported(monkeypatch):
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "TRIGGERBOX 4")
+    _verify_with_banner(plugin, link, "TRIGGERBOX 5")
     monkeypatch.setattr(
         fw_mod,
         "flash",
@@ -1429,7 +1457,7 @@ def test_flash_firmware_failure_is_reported(monkeypatch):
 
 def test_firmware_endpoint():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "TRIGGERBOX 4")
+    _verify_with_banner(plugin, link, "TRIGGERBOX 5")
     body = _test_client(plugin).get("/api/triggerbox/firmware").json()
     assert body["state"] == "outdated"
     assert body["needs_flash"] is True
@@ -1439,8 +1467,8 @@ def test_firmware_endpoint():
 
 def test_flash_endpoint():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "TRIGGERBOX 4")
-    link.banner = f"TRIGGERBOX 4 {plugin.needed_build}"
+    _verify_with_banner(plugin, link, "TRIGGERBOX 5")
+    link.banner = f"TRIGGERBOX 5 {plugin.needed_build}"
     body = _test_client(plugin).post("/api/triggerbox/flash", json={}).json()
     assert body["ok"] is True
     assert body["provisioning"]["needs_flash"] is False
@@ -1914,12 +1942,20 @@ def test_open_sets_the_dim_levels_on_a_current_board():
 
 
 @pytest.mark.parametrize(
-    "banner", [None, "TRIGGERBOX 2 abc", "TRIGGERBOX 3 3b651cd9", "FLYWHEEL 1 abc"]
+    "banner",
+    [
+        None,
+        "TRIGGERBOX 2 abc",
+        "TRIGGERBOX 3 3b651cd9",
+        "TRIGGERBOX 4 e8b4c6b",
+        "FLYWHEEL 1 abc",
+    ],
 )
 def test_open_sends_no_dim_to_a_board_not_known_to_speak_it(banner):
     """Other firmware would read a dim frame's bytes as commands of its own
     (0xCA cancels a run), so only a board identified as this protocol gets one.
-    `TRIGGERBOX 3` is the closed-loop branch's opto firmware.
+    `TRIGGERBOX 3` was the closed-loop branch's opto-only firmware and
+    `TRIGGERBOX 4` the dim branch's dim-only one.
     """
     plugin, link = _plugin_with_fake(dim=[{"pin": "D9", "percent": 40}])
     link.banner = banner
@@ -2008,3 +2044,57 @@ def test_snapshot_options_carry_changed_dim_levels():
     options = plugin.snapshot_options(None)
     assert options == {"dim": [{"pin": "D9", "percent": 25.0}]}
     assert TriggerboxPlugin.from_options(options)._dim == {"D9": 25.0}
+
+
+# ===========================================================================
+# Opto outputs (protocol v5): the wire format; the opto plugin drives them
+# ===========================================================================
+
+
+OPTO_CHANNELS = [
+    OptoChannel("D7", freq_hz=20, pulse_ms=10),
+    OptoChannel("D9", freq_hz=0),
+    OptoChannel("D10", freq_hz=40, pulse_ms=50),  # pulse past the period: steady
+]
+
+
+def _opto_records(raw: bytes) -> list[tuple[int, int, int]]:
+    payload = _unframe(raw, OPTO_CONFIG_MAGIC)
+    n = payload[0]
+    assert len(payload) == 1 + 9 * n
+    return [struct.unpack_from("<BII", payload, 1 + 9 * k) for k in range(n)]
+
+
+def _gates(raw: bytes) -> list[tuple[int, int]]:
+    payload = _unframe(raw, OPTO_GATE_MAGIC)
+    return [struct.unpack_from("<BI", payload, k) for k in range(0, len(payload), 5)]
+
+
+def _written(link: FakeLink, magic: int) -> list[bytes]:
+    return [f for f in link.snapshot() if f and f[0] == magic]
+
+
+def test_opto_config_packet_matches_the_wire_format():
+    raw = protocol.opto_config_packet(OPTO_CHANNELS)
+    assert _opto_records(raw) == [
+        (PIN_LABELS.index("D7"), 10_000, 50_000),
+        (PIN_LABELS.index("D9"), 0, 0),
+        # The firmware treats pulse >= period as steady; the host sends it as given.
+        (PIN_LABELS.index("D10"), 50_000, 25_000),
+    ]
+    assert _gates(protocol.opto_gate_packet([(0, 1500), (2, 0)])) == [(0, 1500), (2, 0)]
+
+
+def test_opto_config_answers_and_a_refused_gate_needs_a_new_config(caplog):
+    _, link = _plugin_with_fake()
+    assert link.configure_opto(OPTO_CHANNELS) == "ok"
+    assert link.opto_configured
+    link.opto_reject_code = "u"  # a pin the run or a dim holds
+    assert link.configure_opto(OPTO_CHANNELS) == "reject"
+    assert link.opto_reject == "u" and not link.opto_configured
+    link.opto_reject_code = None
+    assert link.configure_opto(OPTO_CHANNELS) == "ok"
+    caplog.set_level(logging.WARNING, logger="octacam")
+    link._feed(b"gp\n")  # the board rebooted and lost its config
+    assert not link.opto_configured
+    assert "no such opto channel" in caplog.text

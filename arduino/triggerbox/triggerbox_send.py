@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone driver for the triggerbox firmware (protocol v4).
+"""Standalone driver for the triggerbox firmware (protocol v5).
 
 Sends an arm packet to the Arduino Nano ESP32 running `triggerbox.ino` and
 prints its status tokens, so you can bench-test camera triggering, the light
@@ -28,6 +28,10 @@ Examples::
     # just check what's on the port
     python triggerbox_send.py --identify
 
+    # light an opto LED wired to D8 for 3 s, 20 Hz x 10 ms pulses (no arm)
+    python triggerbox_send.py --opto D8,20,10 --duration 3
+
+Opto spec:    PIN[,freq_hz[,pulse_ms]]            (freq 0/omitted = steady)
 Camera spec:  PIN[,pulse_us[,delay_us]]           (pulse 0/omitted = firmware default)
 Light spec:   CH,off
               CH,strobe,on_us[,delay_us]
@@ -52,9 +56,11 @@ except ImportError:
 
 ARM_MAGIC = 0xA5
 DIM_MAGIC = 0xD1
+OPTO_CONFIG_MAGIC = 0xB0
+OPTO_GATE_MAGIC = 0xB1
 CANCEL_MAGIC = 0xCA
 IDENTIFY_MAGIC = 0x3F
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 DIM_FULL_SCALE = 4095  # 12-bit PWM duty; full scale holds the pin HIGH
 
 # Canonical pin-label table -- must match kPinTable in triggerbox.ino (and
@@ -175,9 +181,19 @@ def parse_dim(spec: str) -> tuple[int, int]:
     return pin_id(label), round(level / 100.0 * DIM_FULL_SCALE)
 
 
+def parse_opto(spec: str) -> tuple[int, int, int]:
+    """PIN[,freq_hz[,pulse_ms]] -> (pin_id, pulse_us, period_us)."""
+    parts = spec.split(",")
+    freq = float(parts[1]) if len(parts) > 1 else 0.0
+    pulse_ms = float(parts[2]) if len(parts) > 2 else 10.0
+    if freq <= 0:
+        return (pin_id(parts[0]), 0, 0)
+    return (pin_id(parts[0]), round(pulse_ms * 1000), round(1e6 / freq))
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Drive the triggerbox camera-trigger + light firmware (v4).",
+        description="Drive the triggerbox camera-trigger + light firmware (v5).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -216,6 +232,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="just query the board's identity and exit",
     )
+    p.add_argument(
+        "--opto",
+        action="append",
+        default=[],
+        metavar="PIN[,freq[,pulse_ms]]",
+        help="light opto outputs for --duration instead of arming (repeatable)",
+    )
     return p.parse_args(argv)
 
 
@@ -235,7 +258,7 @@ def read_tokens(port: serial.Serial, deadline: float, stop: str = "D") -> None:
             text = line.decode("ascii", "replace").strip()
             if text:
                 print(f"  <- {text}")
-            if text == stop or text.startswith("E"):
+            if text == stop or text[:1] in ("E", "o", "g"):  # done, or refused
                 return
 
 
@@ -262,7 +285,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"-> dim: {PIN_LABELS[pid]} duty={duty}/{DIM_FULL_SCALE}")
             port.write(build_dim(pid, duty))
             read_tokens(port, time.monotonic() + 1.0, stop="P")
-        if args.dim and not (args.camera or args.light):
+        if args.dim and not (args.camera or args.light or args.opto):
+            return 0
+
+        if args.opto:
+            records = [parse_opto(s) for s in args.opto]
+            payload = bytes([len(records)]) + b"".join(
+                struct.pack("<BII", *r) for r in records
+            )
+            port.write(frame(OPTO_CONFIG_MAGIC, payload))
+            read_tokens(port, time.monotonic() + 0.5, stop="O")
+            gates = b"".join(
+                struct.pack("<BI", k, duration_ms) for k in range(len(records))
+            )
+            print(f"-> opto on for {duration_ms} ms: {', '.join(args.opto)}")
+            port.write(frame(OPTO_GATE_MAGIC, gates))
+            read_tokens(port, time.monotonic() + duration_ms / 1000 + 0.5)
             return 0
 
         cams = [parse_camera(s) for s in args.camera] or [parse_camera("D13")]

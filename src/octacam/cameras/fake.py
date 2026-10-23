@@ -3,7 +3,9 @@
 An SFNC-keyed node table spanning every widget kind, and synthetic Mono8 frames
 that come only once `trigger_once` has fired, so the rig's PreciseTimer drives
 it. Its test knobs model a real camera's failure modes. `enumerate_fake` reads
-serials from `OCTACAM_FAKE_CAMERAS` (default `FAKE-0,FAKE-1`).
+serials from `OCTACAM_FAKE_CAMERAS` (default `FAKE-0,FAKE-1`); with
+`OCTACAM_FAKE_VIDEO` set to a video file, every frame is that video's next
+one (looping, center-cropped to the ROI): a rehearsal on recorded footage.
 """
 
 import logging
@@ -28,6 +30,7 @@ from octacam.cameras.registry import BackendSpec, select_serials
 log = logging.getLogger("octacam")
 
 FAKE_CAMERAS_ENV = "OCTACAM_FAKE_CAMERAS"
+FAKE_VIDEO_ENV = "OCTACAM_FAKE_VIDEO"
 _DEFAULT_SERIALS = "FAKE-0,FAKE-1"
 
 # The modeled sensor: the ROI sits within it and bounds the offsets.
@@ -375,6 +378,12 @@ class FakeBackend(GenICamBackend):
         # fetch reports an incomplete image (a missed trigger).
         self._device_images: list[_Image] = []
         self._incomplete = False
+        # Draws frame (width, height, index): the trigger's sequence number where
+        # the frame answers one, else the frame count.
+        video = os.environ.get(FAKE_VIDEO_ENV)
+        self.render: Callable[[int, int, int], np.ndarray] = (
+            _VideoFrames(video) if video else _render
+        )
 
     def open(self) -> None:
         self._open = True
@@ -551,7 +560,7 @@ class FakeBackend(GenICamBackend):
                 return None
         self._frame_index += 1
         array = (
-            _render(self.width(), self.height(), self._frame_index)
+            self.render(self.width(), self.height(), self._frame_index)
             if wants_array()
             else None
         )
@@ -647,7 +656,9 @@ class FakeBackend(GenICamBackend):
         if answers_trigger:
             self.trigger.answered(image.stamp)
         array = (
-            _render(self.width(), self.height(), image.seq) if wants_array() else None
+            self.render(self.width(), self.height(), image.seq)
+            if wants_array()
+            else None
         )
         return (array, image.stamp)
 
@@ -687,7 +698,7 @@ class FakeBackend(GenICamBackend):
             return None  # this trigger never exposed a frame
         if seq in self.miss_triggers or seq in self.lost_triggers:
             return None  # the pulse was missed
-        array = _render(self.width(), self.height(), seq) if wants_array() else None
+        array = self.render(self.width(), self.height(), seq) if wants_array() else None
         if seq in self.zero_timestamp_triggers:
             return (array, 0)
         return (array, self._clock_t0 + seq * period_ns)
@@ -707,6 +718,35 @@ def _render(width: int, height: int, index: int) -> np.ndarray:
     sequence number where the frame answers one, else the frame count).
     """
     return np.full((height, width), index % 256, dtype=np.uint8)
+
+
+class _VideoFrames:
+    """A video's frames in order, looping, center-cropped (or padded) to the
+    requested size; the index is ignored.
+    """
+
+    def __init__(self, path: str):
+        import cv2
+
+        self._cv2 = cv2
+        self._capture = cv2.VideoCapture(path)
+        if not self._capture.isOpened():
+            raise BackendError(f"{FAKE_VIDEO_ENV}: cannot open {path}")
+
+    def __call__(self, width: int, height: int, index: int) -> np.ndarray:
+        ok, image = self._capture.read()
+        if not ok:  # the end: loop
+            self._capture.set(self._cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, image = self._capture.read()
+        if not ok:
+            return _render(width, height, index)
+        gray = image[:, :, 0] if image.ndim == 3 else image
+        out = np.zeros((height, width), dtype=np.uint8)
+        h, w = min(height, gray.shape[0]), min(width, gray.shape[1])
+        y0, x0 = (gray.shape[0] - h) // 2, (gray.shape[1] - w) // 2
+        oy, ox = (height - h) // 2, (width - w) // 2
+        out[oy : oy + h, ox : ox + w] = gray[y0 : y0 + h, x0 : x0 + w]
+        return out
 
 
 def _available_serials() -> list[str]:

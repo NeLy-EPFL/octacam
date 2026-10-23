@@ -99,11 +99,24 @@ _BUNDLED = [
     ("flywheel", False, "/dev/ttyACM0", "FLYWHEEL"),
     ("twophoton", False, "/dev/arduinoCams", "2PHOTON"),
     ("triggerbox", True, "/dev/ttyACM0", "TRIGGERBOX"),
+    ("opto", False, "/dev/ttyACM1", "TRIGGERBOX"),  # runs the triggerbox sketch
 ]
+# Plugins with no board of their own.
+_BOARDLESS = ["closedloop"]
 
 
 def test_every_bundled_plugin_is_listed():
-    assert [row[0] for row in _BUNDLED] == list(plugins_mod._PLUGINS)
+    assert sorted([row[0] for row in _BUNDLED] + _BOARDLESS) == sorted(
+        plugins_mod._PLUGINS
+    )
+
+
+@pytest.mark.parametrize("name", _BOARDLESS)
+def test_a_boardless_plugin_has_a_tab_and_builds_bare(name):
+    cls = plugin_class(name)
+    assert cls.name == name and not cls.generates_trigger
+    assert cls.web_dir is not None and (cls.web_dir / f"{name}.js").is_file()
+    cls.from_options({})
 
 
 @pytest.mark.parametrize(("name", "trigger", "device", "banner"), _BUNDLED)
