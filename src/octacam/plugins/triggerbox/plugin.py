@@ -3,7 +3,8 @@
 Drives the Nano ESP32 running `arduino/triggerbox` on the EPFL
 common-trigger-circuit board: camera-trigger lines plus three interchangeable
 CCS light channels, each off, strobe, continuous or a pulse train on its own
-clock. Pins are chosen at run time, so rewiring needs only the config::
+clock, and dim outputs (a pin held at a PWM level, whatever the run state).
+Pins are chosen at run time, so rewiring needs only the config::
 
     [[plugins]]
     name = "triggerbox"
@@ -19,11 +20,16 @@ clock. Pins are chosen at run time, so rewiring needs only the config::
       { channel = 2, mode = "strobe", duty_mode = "manual", duty_percent = 20 },
       { channel = 3, mode = "off" },
     ]
+    dim = [ { pin = "D9", percent = 40 } ]   # e.g. a white ambient light
 
 Without `cameras`/`lights` it drives the classic rig: a D13 camera line and
 channels 1 and 2 strobing at `default_duty_percent`. An auto-duty strobe stays
 on for `max(TriggerDelay + ExposureTime) + strobe_guard_us` over the live
-cameras. Recordings use `trigger_source = "managed"`.
+cameras. Recordings use `trigger_source = "managed"`. Each `dim` level is set
+whenever the board (re)connects and stays until the tab or the API changes it;
+arms, run ends and cancels leave it alone, and an arm may not use a dimmed pin.
+Until then the board holds every pin it was ever told to dim at full, its boot
+default, which an arm may take over.
 """
 
 from __future__ import annotations
@@ -53,6 +59,7 @@ from octacam.plugins.triggerbox.protocol import (
     CameraLine,
     LightChannel,
     TriggerboxLink,
+    dim_duty,
 )
 from octacam.plugins.triggerbox.train import period_us, plan_train, pulse_count
 
@@ -146,6 +153,46 @@ def _light_from_dict(
     )
 
 
+def _dim_pin(label) -> str:
+    """*label* as a pin a dim output may drive; ValueError otherwise."""
+    pin = str(label).upper()
+    if pin not in PIN_LABELS:
+        raise ValueError(f"unknown pin {label!r}")
+    if pin in RESERVED_PINS:
+        raise ValueError(f"pin {pin} drives the status LED")
+    return pin
+
+
+def _dim_level(percent) -> float:
+    """*percent* clamped to 0..100; ValueError when it is not a number."""
+    dim_duty(percent)  # validates
+    return max(0.0, min(100.0, float(percent)))
+
+
+def _dim_from(raw: list) -> dict[str, float]:
+    """The `dim` option's `{pin, percent}` tables as pin -> level; an invalid
+    or repeated entry is warned about and skipped.
+    """
+    levels: dict[str, float] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            log.warning("triggerbox: ignoring non-table dim entry %r", entry)
+            continue
+        try:
+            pin = _dim_pin(entry.get("pin"))
+            level = _dim_level(entry.get("percent", 0.0))
+        except ValueError as e:
+            log.warning("triggerbox: ignoring dim entry %r: %s", entry, e)
+            continue
+        if pin in levels:
+            log.warning(
+                "triggerbox: dim pin %s is listed twice; keeping the first", pin
+            )
+            continue
+        levels[pin] = level
+    return levels
+
+
 def _cameras_from(raw: list, default_pulse: int) -> list[CameraLine]:
     lines = (_camera_from_dict(entry, default_pulse) for entry in raw[:MAX_CAM])
     return [line for line in lines if line is not None]
@@ -195,6 +242,7 @@ class TriggerboxPlugin(SerialPlugin[TriggerboxLink]):
         default_cam_pulse_us: int = DEFAULT_CAM_PULSE_US,
         cameras: list[CameraLine] | None = None,
         lights: list[LightChannel] | None = None,
+        dim: dict[str, float] | None = None,
     ):
         super().__init__(
             TriggerboxLink(self._on_state, self._on_link_broken),
@@ -212,9 +260,24 @@ class TriggerboxPlugin(SerialPlugin[TriggerboxLink]):
             CameraLine(pin="D13", pulse_us=default_cam_pulse_us)
         ]
         self._lights: list[LightChannel] = lights or []
-        # Tab edits replace _cameras/_lights; snapshot_options compares with these.
+        # Dim output pin -> level in percent: the configured levels until the tab
+        # changes one, and what every (re)connect sets. Replaced, never mutated,
+        # so a reader on another thread sees a whole mapping.
+        self._dim: dict[str, float] = dict(dim or {})
+        # Tab edits replace _cameras/_lights/_dim; snapshot_options compares
+        # with these.
         self._configured_cameras = [replace(c) for c in self._cameras]
         self._configured_lights = [replace(lt) for lt in self._lights]
+        self._configured_dim = dict(self._dim)
+        driven = {c.pin for c in self._cameras} | {
+            lt.pin for lt in self._lights if lt.mode != "off"
+        }
+        if shared := sorted(driven & set(self._dim)):
+            log.warning(
+                "triggerbox: %s is both a dim output and a camera line or light; "
+                "the board refuses an arm that uses a dimmed pin",
+                ", ".join(shared),
+            )
         # A tab edit re-arms the board only during an (indefinite) preview arm.
         self._preview_armed = False
 
@@ -322,6 +385,14 @@ class TriggerboxPlugin(SerialPlugin[TriggerboxLink]):
             )
             lights = []
 
+        raw_dim = options.get("dim", [])
+        if not isinstance(raw_dim, list):
+            log.warning(
+                "triggerbox plugin: 'dim' must be an array of tables; ignoring %r",
+                raw_dim,
+            )
+            raw_dim = []
+
         return cls(
             device=str(options.get("device") or DEFAULT_DEVICE),
             baud=_opt_int("baud", DEFAULT_BAUD),
@@ -334,6 +405,7 @@ class TriggerboxPlugin(SerialPlugin[TriggerboxLink]):
             default_cam_pulse_us=default_cam_pulse_us,
             cameras=cameras,
             lights=lights,
+            dim=_dim_from(raw_dim),
         )
 
     def busy_reason(self) -> str | None:
@@ -372,6 +444,107 @@ class TriggerboxPlugin(SerialPlugin[TriggerboxLink]):
             "cameras": [asdict(c) for c in self._cameras],
             "lights": [asdict(lt) for lt in self._lights],
         }
+
+    def link_status(self) -> dict:
+        """The base fields plus the dim levels: every status, state push and
+        reconnect reply carries them, so each tab shows what the board outputs.
+        """
+        return {**super().link_status(), "dim": self._dim_list()}
+
+    # -------------------------------------------------- dim outputs
+
+    def _dim_list(self) -> list[dict]:
+        return [{"pin": pin, "percent": level} for pin, level in self._dim.items()]
+
+    def _dimmed_pins(self) -> set[str]:
+        """The pins dimmed above 0, which the board will not let an arm use."""
+        return {pin for pin, level in self._dim.items() if dim_duty(level) > 0}
+
+    def _dim_capable(self) -> bool:
+        """Whether the board identified as this protocol's firmware. An older
+        one reads a dim command's bytes as commands of its own (a cancel, an
+        arm), and a board that sent no banner may be older.
+        """
+        name, version, _build = fw.parse_banner(self.banner)
+        return self.firmware_ok and name == BANNER and version == PROTOCOL_VERSION
+
+    def _send_dim(self, pin: str, level: float) -> str | None:
+        """Set one dim output; the error message, or None once confirmed."""
+        result = self._link.dim(pin, level)
+        if result == "ok":
+            return None
+        if result == "reject":
+            code = self._link.reject or ""
+            reason = REJECT_REASONS.get(code[:1], "unknown")
+            return f"{self.device} refused to dim {pin} (code {code!r}: {reason})"
+        what = (
+            "the serial write failed"
+            if result == "write_failed"
+            else f"no acknowledgement within {ACK_TIMEOUT_S:.1f}s"
+        )
+        return f"the board on {self.device} did not dim {pin} to {level:g}% ({what})"
+
+    def set_dim(self, pin, percent) -> str | None:
+        """Hold dim output *pin* at *percent* (clamped to 0..100) from now on,
+        whatever the board's run state; the error message, or None once the
+        board confirmed it. Raises ValueError for a pin no dim output may use
+        or a level that is not a number.
+        """
+        pin = _dim_pin(pin)
+        level = _dim_level(percent)
+        if not self._link.is_open:
+            return f"the board on {self.device} is not connected"
+        if not self._dim_capable():
+            return (
+                f"the board on {self.device} does not report TRIGGERBOX "
+                f"{PROTOCOL_VERSION} firmware; reflash it to use dim outputs"
+            )
+        error = self._send_dim(pin, level)
+        if error is not None:
+            log.warning("triggerbox: %s", error)
+            return error
+        self._dim = {**self._dim, pin: level}
+        log.info("triggerbox: %s dimmed to %g%%", pin, level)
+        self._push_state()
+        return None
+
+    def _apply_dim(self) -> None:
+        """Set every dim output to its level once the board is (re)opened: a
+        board that reset comes up with them at full (its boot default).
+        """
+        levels = dict(self._dim)
+        if not levels or not self._link.is_open or not self.firmware_ok:
+            return  # a firmware problem is reported on its own
+        if not self._dim_capable():
+            log.warning(
+                "triggerbox: %s did not identify as TRIGGERBOX %d; dim outputs "
+                "%s are not set",
+                self.device,
+                PROTOCOL_VERSION,
+                ", ".join(levels),
+            )
+            return
+        for pin, level in levels.items():
+            error = self._send_dim(pin, level)
+            if error is not None:
+                self.report_error(error)
+            else:
+                log.info("triggerbox: %s dimmed to %g%%", pin, level)
+        self._push_state()
+
+    def _open(self, *, recover: bool = True) -> str | None:
+        error = super()._open(recover=recover)
+        if error is None:
+            self._apply_dim()
+        return error
+
+    def _recover_usb(self, why: str) -> bool:
+        reopened = super()._recover_usb(why)
+        # The bus reset may have reset the board. Within an open the board is
+        # not identified yet, and the open sets them once it is.
+        if reopened and self._dim_capable():
+            self._apply_dim()
+        return reopened
 
     # -------------------------------------------------- spec -> arm packet
 
@@ -437,9 +610,12 @@ class TriggerboxPlugin(SerialPlugin[TriggerboxLink]):
             fps=fps,
             duration_ms=0,
             cameras=[c.record() for c in self._cameras_from_spec(spec)[:MAX_CAM]],
+            # An off light drives nothing (pins that leave a spec are parked
+            # LOW), so it is not sent: it would claim its pin, a dimmed one too.
             lights=[
                 lt.resolve(1_000_000.0 / fps, auto_led_on_us)
                 for lt in lights[:MAX_LIGHT]
+                if lt.mode != "off"
             ],
         )
 
@@ -457,22 +633,22 @@ class TriggerboxPlugin(SerialPlugin[TriggerboxLink]):
         }
 
     def snapshot_options(self, params: dict | None) -> dict | None:
-        """The camera lines and light channels a recording armed, as config
-        options; None when it armed none or what the config says. Off channels
-        are left out on both sides: the tab never sends them, and an empty
-        `lights` list reloads as all-off.
+        """The camera lines and light channels a recording armed and the dim
+        levels it started under, as config options; None when they are what the
+        config says. Off channels are left out on both sides: the tab never
+        sends them, and an empty `lights` list reloads as all-off.
         """
-        if params is None:
-            return None
-        cameras = self._cameras_from_spec(params)
-        lights = [lt for lt in self._lights_from_spec(params) if lt.mode != "off"]
-        configured = [lt for lt in self._configured_lights if lt.mode != "off"]
-        if cameras == self._configured_cameras and lights == configured:
-            return None
-        return {
-            "cameras": [asdict(c) for c in cameras],
-            "lights": [asdict(lt) for lt in lights],
-        }
+        options: dict = {}
+        if params is not None:
+            cameras = self._cameras_from_spec(params)
+            lights = [lt for lt in self._lights_from_spec(params) if lt.mode != "off"]
+            configured = [lt for lt in self._configured_lights if lt.mode != "off"]
+            if cameras != self._configured_cameras or lights != configured:
+                options["cameras"] = [asdict(c) for c in cameras]
+                options["lights"] = [asdict(lt) for lt in lights]
+        if self._dim != self._configured_dim:
+            options["dim"] = self._dim_list()
+        return options or None
 
     def trigger_train(self, params: dict | None) -> dict | None:
         """The exact period and pulse count on_recording_start emits for
@@ -617,6 +793,15 @@ class TriggerboxPlugin(SerialPlugin[TriggerboxLink]):
         except Exception:
             log.exception("triggerbox: could not build arm packet; not arming")
             return
+        # The board would reject the arm ('u'); this names the pins.
+        dimmed = sorted({PIN_LABELS[i] for i in arm.pin_ids()} & self._dimmed_pins())
+        if dimmed:
+            self.report_error(
+                f"the arm drives dimmed pin(s) {', '.join(dimmed)}, which the board "
+                f"refuses; {subject} will not be triggered. Dim them to 0% or move "
+                "those outputs to other pins."
+            )
+            return
         log.info(
             "triggerbox: arming %d fps for %s \N{EM DASH} %d camera line(s), %d light "
             "channel(s)",
@@ -668,7 +853,21 @@ class TriggerboxPlugin(SerialPlugin[TriggerboxLink]):
     # -------------------------------------------------- web contributions
 
     def api_router(self):
+        from fastapi import Body, HTTPException
+
         router = super().api_router()
+
+        @router.post("/api/triggerbox/dim")
+        def post_dim(payload: dict = Body(default={})):
+            """Hold a dim output at a level now: `{"pin": "D9", "percent": 40}`."""
+            body = payload if isinstance(payload, dict) else {}
+            try:
+                error = self.set_dim(body.get("pin"), body.get("percent"))
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from None
+            if error is not None:
+                raise HTTPException(409, error)
+            return {"dim": self._dim_list()}
 
         @router.get("/api/triggerbox/exposures")
         def get_exposures():

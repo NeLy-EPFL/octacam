@@ -7,7 +7,8 @@ capability to the host:
 - **any number of camera-trigger lines** (≤ 12), each on a pin of your choice
   with its own pulse width and phase delay;
 - **up to 3 CCS light channels** (D5/D6/D7), each independently one of four
-  modes — **off / strobe / continuous / pulse-train**.
+  modes — **off / strobe / continuous / pulse-train**;
+- **dimmed outputs**: any free pin held at a 0–100 % PWM level (11-bit, ~19.5 kHz) whatever the board is doing, e.g. the white ambient light of an arena. Arming, a run's end and a cancel never change it.
 
 All output pins are chosen **at run time** from the arm packet, so you can rewire
 which screw-terminal lines drive the cameras (or which light channels are used)
@@ -42,6 +43,8 @@ Outputs are written with `digitalWrite` on transitions only. Several edges on th
 same loop iteration are emitted sequentially (~1–2 µs apart on the S3) — well
 inside the frame period and the strobe guard, but not literally simultaneous.
 
+A **dimmed output** runs on the ESP32-S3's LEDC peripheral, in hardware, so it costs the frame clock nothing. Level 0 drives the pin LOW and 100 % drives it steadily HIGH, both as plain GPIO (no PWM edges at either end); in between it is 11-bit PWM at 40 MHz / 2048 ≈ 19.5 kHz (the command carries a 12-bit level, halved on the board). On the 2.0.x core the LEDC runs from the 40 MHz crystal, where 12 bits tops out at 9.8 kHz: `ledcSetup(ch, 19531, 12)` fails on a real Nano ESP32. Applying a new level takes one pass of the main loop, like an arm; crossing 0 % or 100 % attaches or detaches the PWM, which takes longer (not yet measured), so a frame-locked edge due at that moment comes out that much late. The sketch uses the Arduino-ESP32 core 3.x LEDC API (`ledcAttach`) and falls back to the 2.0.x one (`ledcSetup` + `ledcAttachPin`) on an older core, such as a 2.0.x `arduino:esp32` Nano ESP32 package.
+
 ## Hardware wiring
 
 Pins follow the `common-trigger-circuit` schematic. The **defaults** below match
@@ -58,14 +61,23 @@ any of D5/D6/D7 for a light channel.
 | Status LED (green)  | D3             | board indicator: **green = idle / ready**                |
 | Status LED (blue)   | D4             | unused                                                   |
 
-**D2/D3/D4 are reserved** for the status LED and cannot be used as trigger/light
+**D2/D3/D4 are reserved** for the status LED and cannot be used as trigger/light/dim
 outputs. Every other broken-out line (D5–D13, A0–A7) may. Note **A2 = GPIO3** is
 an ESP32-S3 strapping pin — usable as an output but best avoided if a wired
 trigger input imposes a strong pull.
 
+**Lab LED driver board (replaces the CCS PD3).** The board's two logic-level N-MOSFET low-side switches take raw 3.3 V lines straight from the Nano (pin HIGH = LEDs on), so wire them to free lines outside the CCS sinks, e.g. one of D8–D12 / A0–A7 for each:
+
+| Driver input | Example pin | Configure as                                                   |
+|--------------|-------------|----------------------------------------------------------------|
+| IR LEDs      | D10         | a light channel in `strobe` mode with `pin = "D10"`            |
+| White LEDs   | D9          | a dim output (`dim = [{ pin = "D9", percent = 40 }]`)          |
+
+Share the driver board's ground with the Nano's GND. A dimmed pin can't also be a camera line or light: the board rejects an arm that uses it while its level is above 0.
+
 **Boot state.** Until the first arm packet chooses them, all non-status pins are
 held LOW via an internal pulldown (they can't float into a camera trigger input).
-An external pull-down on trigger lines is still recommended.
+An external pull-down on trigger lines is still recommended. **Dim outputs come up at full**: the board remembers in NVS (namespace `triggerbox`, key `dim_pins`, normally kept across reflashing) every pin a dim command has set and drives it steadily HIGH from power-up until octacam sets its level on connecting. So with the driver board the white LEDs are on at full as soon as the trigger board has power, and flies in the arena see full white (about 5,000 lux) until octacam connects, which matters for CsChrimson flies. An arm that drives such a pin takes it over and the board forgets it (it was rewired); any dim command, 0 % included, keeps it remembered. The set is written only when it changes, and only while the board is idle.
 
 **Light polarity.** Each CCS channel drives an NPN sink transistor, so an Arduino
 pin driven HIGH sinks the channel to GND → **light ON**. This assumes the CCS
@@ -73,13 +85,13 @@ pin driven HIGH sinks the channel to GND → **light ON**. This assumes the CCS
 strobe mode instead, its on-time is fixed on the unit and the strobe here only
 needs to deliver a clean rising edge per frame.
 
-## Serial wire protocol (v2)
+## Serial wire protocol (v4)
 
 Baud rate: **115200** (nominal — USB CDC). All multi-byte fields little-endian.
 
 ### Host → Arduino
 
-**Arm** — `0xA5` · `version=2` (u8) · `payload_len` (u16) · *payload* · `checksum` (u8)
+**Arm** — `0xA5` · `version=3` (u8) · `payload_len` (u16) · *payload* · `checksum` (u8)
 
 The **payload** (`payload_len` bytes) is:
 
@@ -106,7 +118,9 @@ Light **mode** fields:
 | 2    | continuous  | —             | —            | —                | — (on for whole run)   |
 | 3    | pulse_train | pulse_us      | interval_us  | start_delay_us   | train_us (0 = forever) |
 
-**Cancel** — `0xCA`. **Identify** — `0x3F` (`?`) → replies `TRIGGERBOX 2 <build>\n`,
+**Dim** — `0xD1` · `version=3` (u8) · `payload_len=3` (u16) · `pin_id` (u8) · `duty` (u16) · `checksum` (u8), framed and checksummed like an arm. `duty` is 0–4095: 0 drives the pin LOW, 4095 steadily HIGH, anything between is PWM at `duty`/4096 (a larger value counts as 4095). The board answers `P`, or `E<c>`; the level holds until the next dim of that pin or a board reset, whatever the run state. Dimming a pin that the running spec (or a staged re-arm) drives is rejected with `Eu`, and so is an arm that uses a pin dimmed above 0. Dim 0 frees the pin for arms again.
+
+**Cancel** — `0xCA`. **Identify** — `0x3F` (`?`) → replies `TRIGGERBOX 4 <build>\n`,
 where `<build>` is a short hash of the sketch source (see *Firmware fingerprint* below).
 
 A valid new arm re-arms from any state, superseding a run in progress (`C`, then
@@ -128,8 +142,9 @@ gate — a pulse-train longer than the run is truncated at the end — and pulse
 | `R`              | running — arm accepted, clocks started                         |
 | `D`              | done — requested duration elapsed, back to idle                |
 | `C`              | cancelled — cancel received (or a valid re-arm superseded)     |
-| `E<c>`           | rejected — arm refused; `<c>`: `v`ersion `c`hecksum `o`versize `l`ength `f`ps `p`in `r`eserved `d`uplicate `m`ode |
-| `TRIGGERBOX 2 <build>` | reply to an identify request (`<build>` = source hash) |
+| `P`              | dimmed — dim command applied                                   |
+| `E<c>`           | rejected — arm or dim refused; `<c>`: `v`ersion `c`hecksum `o`versize `l`ength `f`ps `p`in `r`eserved `d`uplicate `m`ode, `u` pin in use (dimmed, or driven by the run), `w` no free PWM channel (at most 8 pins dim between 0 and 100 %) |
+| `TRIGGERBOX 4 <build>` | reply to an identify request (`<build>` = source hash) |
 
 ## Flashing the firmware
 
@@ -184,6 +199,9 @@ python arduino/triggerbox/triggerbox_send.py --fps 80 --duration 5 \
 # camera on a different line + an opto pulse train on ch3 (5 ms @ 10 Hz)
 python arduino/triggerbox/triggerbox_send.py \
     --camera D10,300 --light 3,pulse,5000,100000,0,0
+
+# hold a white light on D9 at 40 % without arming anything
+python arduino/triggerbox/triggerbox_send.py --dim D9,40
 
 python arduino/triggerbox/triggerbox_send.py --identify   # who's on the port?
 ```

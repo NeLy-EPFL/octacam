@@ -77,6 +77,27 @@
   flex-wrap: wrap;
 }
 
+/* ---- Dimmed outputs --------------------------------------------------- */
+.tb-dim-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.tb-dim-pin {
+  align-self: center;
+  min-width: 2.5em;
+  font-weight: 500;
+}
+.tb-dim-range {
+  align-self: center;
+  flex: 1;
+  min-width: 6em;
+}
+.tb-dim-field input {
+  width: 4.5em;
+}
+
 /* ---- Frame-timing visualization -------------------------------------- */
 .triggerbox-timing {
   margin: 8px 0;
