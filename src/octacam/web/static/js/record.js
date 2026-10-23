@@ -531,7 +531,15 @@ export class RecordTab {
     // a transfer) shares the workstation with it: ask first.
     const busy = this.backgroundJobWarning?.();
     if (busy && !window.confirm(busy)) return;
-    if (this.confirmPlugins && !(await this.confirmPlugins())) return;
+    // A plugin's check that fails is not a dead server: say so, and do not start.
+    let confirmed = true;
+    try {
+      confirmed = !this.confirmPlugins || (await this.confirmPlugins());
+    } catch (e) {
+      this.notify("error", `Start cancelled: a plugin's check failed (${e?.message || e})`);
+      return;
+    }
+    if (!confirmed) return;
     const body = { confirm_overwrite: false };
     const pluginParams = this.getPluginParams?.() ?? {};
     if (Object.keys(pluginParams).length) body.plugin_params = pluginParams;

@@ -1720,6 +1720,34 @@ def test_a_plugin_can_hold_a_recording_start(page, allowed):
     assert bool(started) is allowed
 
 
+def test_a_plugin_check_that_throws_cancels_the_start_and_says_so(page):
+    # Tommy's review: it read "Request failed: server unreachable".
+    page.evaluate(
+        """async () => {
+            const m = await import('./js/record.js');
+            window.__calls = [];
+            window.__notes = [];
+            window.fetch = async (url) => {
+                window.__calls.push(url);
+                return { ok: true, status: 202, json: async () => ({}) };
+            };
+            window.__tab = new m.RecordTab({
+                formats: [], getPluginParams: () => ({}),
+                notify: (level, message) => window.__notes.push([level, message]),
+                confirmPlugins: async () => {
+                    throw new Error('2-photon: share offline');
+                },
+            });
+            await window.__tab._onButton();
+        }"""
+    )
+    assert not [u for u in page.evaluate("window.__calls") if "recording/start" in u]
+    ((level, message),) = page.evaluate("window.__notes")
+    assert level == "error"
+    assert "plugin's check failed" in message and "share offline" in message
+    assert "unreachable" not in message
+
+
 def test_record_start_does_not_ask_when_no_job_is_busy(page):
     page.evaluate(
         """async () => {
