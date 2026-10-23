@@ -18,7 +18,7 @@
         <link rel="prev" href="../backends/">
       
       
-        <link rel="next" href="../../reference/troubleshooting/">
+        <link rel="next" href="../twophoton/">
       
       
         
@@ -662,6 +662,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../twophoton/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    2-photon rigs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../reference/troubleshooting/" class="md-nav__link">
         
   
@@ -945,9 +973,12 @@ be reproduced later.</p>
 <h3 id="twophoton-2-photon-hardware-trigger"><code>twophoton</code> — 2-photon hardware trigger<a class="headerlink" href="#twophoton-2-photon-hardware-trigger" title="Permanent link">&para;</a></h3>
 <p>Arms an Arduino hardware camera trigger for a 2-photon rig. The Arduino waits for
 a ThorSync rising edge, then emits a square-wave trigger at the recording's fps
-for its duration. Adds the web GUI's <strong>2-Photon</strong> tab (live Arduino state plus
-"arm with recording") and arms at recording start, so capture is synced to the
-ThorSync edge.</p>
+until ThorImage stops (its ThorSync input quiet for <code>stop_idle_ms</code>), and the
+take ends with it: no duration to set. Unticking the Record tab's <strong>Synced with
+ThorImage</strong> (or <code>match_thorimage = false</code>) records for the set duration instead.
+Adds the web GUI's <strong>2-Photon</strong> tab (live Arduino state plus "arm with
+recording"), warns when ThorSync is set to stop before the take can end, and
+gives <code>octacam process</code> its 2P steps: see <a href="../twophoton/">2-photon rigs</a>.</p>
 <p>The firmware and wiring notes are in
 <a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/2photon_trigger">arduino/2photon_trigger/</a>.</p>
 <h3 id="triggerbox-configurable-camera-trigger-lights"><code>triggerbox</code> — configurable camera trigger + lights<a class="headerlink" href="#triggerbox-configurable-camera-trigger-lights" title="Permanent link">&para;</a></h3>
@@ -1087,13 +1118,13 @@ after an unplug/replug or when the path changed.</p>
         
         
           
-          <a href="../../reference/troubleshooting/" class="md-footer__link md-footer__link--next" aria-label="Next: Troubleshooting">
+          <a href="../twophoton/" class="md-footer__link md-footer__link--next" aria-label="Next: 2-photon rigs">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Troubleshooting
+                2-photon rigs
               </div>
             </div>
             <div class="md-footer__button md-icon">
