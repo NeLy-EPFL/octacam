@@ -4,7 +4,7 @@
 #include "fw_build_info.h"  // TRIGGERBOX_FW_BUILD — source fingerprint (auto-generated)
 
 // =============================================================================
-//  triggerbox — configurable camera-trigger + light controller (protocol v4)
+//  triggerbox — configurable camera-trigger + light controller (protocol v5)
 //
 //  Target board: Arduino Nano ESP32 (ESP32-S3), mounted on the EPFL
 //  "common CCS light and camera trigger circuit" (common-trigger-circuit).
@@ -15,7 +15,9 @@
 //    * any number (<= MAX_CAM) of camera-trigger lines, each with its own pin,
 //      pulse width, and phase delay;
 //    * up to 3 light channels, each independently one of four modes:
-//        off / strobe (frame-locked) / continuous / pulse_train (opto).
+//        off / strobe (frame-locked) / continuous / pulse_train (opto);
+//    * up to 6 opto outputs the host switches on for a window at any time
+//      (armed or idle), each pulsing on its own clock: a closed loop's light.
 //  Pins are addressed by an index into a fixed label table (below), so the host
 //  can drive whichever screw-terminal lines the rig is actually wired to without
 //  reflashing. All three CCS channels are electrically identical (NPN sink,
@@ -51,9 +53,9 @@
 //  arming, a run's end, a cancel and idle parking never touch a dimmed pin,
 //  and the PWM costs the frame clock nothing (LEDC runs in hardware). Level 0
 //  drives the pin LOW and full scale HIGH, both as plain GPIO; a pin is
-//  "dimmed" while its level is above 0. An arm that uses a dimmed pin is
-//  rejected, and so is a dim command on a pin the running spec (or a staged
-//  re-arm) drives. Applying a dim command takes one loop iteration, like an
+//  "dimmed" while its level is above 0. An arm or opto config that uses a
+//  dimmed pin is rejected, and so is a dim command on a pin the running spec
+//  (or a staged re-arm) or an opto output drives. Applying a dim command takes one loop iteration, like an
 //  arm: a few register writes for a level change, longer (not yet measured)
 //  when the PWM is attached or detached, so a frame-locked edge due then is
 //  emitted that much late.
@@ -62,15 +64,15 @@
 //  "dim_pins", a pin-index mask) every pin a dim command has set, and drives
 //  them steadily HIGH (full) from power-up until the host sets their level, so
 //  a white ambient light is on before the host connects. A boot-default pin
-//  yields to an arm instead of rejecting it: an arm that drives it takes the
-//  pin over, and it is forgotten (it was rewired). Any dim command for it, 0
+//  yields to an arm (or opto config) instead of rejecting it: one that drives
+//  it takes the pin over, and it is forgotten (it was rewired). Any dim command for it, 0
 //  included, makes it an ordinary dimmed pin for the session and keeps it
 //  remembered. NVS is written only when that set changes, and only while idle,
 //  so a level change never touches flash and a write never stalls a run.
 //
 //  ---- Host -> Arduino wire protocol (little-endian) -------------------------
 //    Arm:      [0xA5]                                     magic
-//              [version : u8 = 4]
+//              [version : u8 = 5]
 //              [payload_len : u16]                        bytes that follow, pre-checksum
 //              --- payload (payload_len bytes) ---
 //              [fps : u16]                                1..5000
@@ -80,11 +82,26 @@
 //              n_light x light_record  (18 B): [pin_id u8][mode u8][p0 u32][p1 u32][p2 u32][p3 u32]
 //              --- end payload ---
 //              [checksum : u8]                            XOR over version+len+payload
-//    Dim:      [0xD1] [version : u8 = 4] [payload_len : u16 = 3]
+//    Dim:      [0xD1] [version : u8 = 5] [payload_len : u16 = 3]
 //              [pin_id : u8] [duty : u16]                 0..4095 (4095 = steady HIGH)
 //              [checksum : u8]                            as for arm
 //    Cancel:   [0xCA]
-//    Identify: [0x3F] '?'   -> replies "TRIGGERBOX 4 <build>\n" (build = source hash)
+//    Identify: [0x3F] '?'   -> replies "TRIGGERBOX 5 <build>\n" (build = source hash)
+//    Opto config: [0xB0][version u8 = 5][payload_len u16][payload][checksum u8]
+//              payload = [n_opto u8] n_opto x (pin_id u8, pulse_us u32, period_us u32)
+//              Opto channel k (0-based) is the k-th record. While on, it is HIGH
+//              for pulse_us of every period_us from the moment it is switched
+//              on; period_us 0 (or pulse_us >= period_us) = HIGH throughout.
+//              Replacing the config switches every opto output off. Its pins
+//              may not be the run's outputs or dimmed, nor the run's or a dim's
+//              the opto pins (E/o 'u'); a boot-default dim pin yields, as to an arm.
+//    Opto gate:   [0xB1][version u8 = 5][payload_len u16][payload][checksum u8]
+//              payload = n x (channel u8, duration_ms u32): switch the channel on
+//              for duration_ms from now, 0 = off now. A channel switched on
+//              starts its pulse train; one already on keeps its phase (a window
+//              extended in steps pulses as one).
+//              The board ends the window itself, so a stalled host cannot leave
+//              a light on. No reply unless it is refused.
 //
 //    light mode fields:
 //      0 off        : hold LOW
@@ -102,9 +119,12 @@
 //                          v version   c checksum   o oversize/count
 //                          l length    f fps        p bad pin id
 //                          r reserved pin            d duplicate pin   m bad mode
-//                          u pin in use (dimmed, or driven by the run)
+//                          u pin in use (dimmed, opto, or driven by the run)
 //                          w no free PWM (LEDC) channel
-//    "TRIGGERBOX 4 <build>\n" reply to identify (build = short source hash)
+//    "O\n"    opto config accepted
+//    "o<c>\n" opto config refused, "g<c>\n" opto gate refused (codes as for E;
+//                          for a gate, p = no such opto channel)
+//    "TRIGGERBOX 5 <build>\n" reply to identify (build = short source hash)
 // =============================================================================
 
 // ---- Canonical pin-label table (SINGLE SOURCE OF TRUTH) --------------------
@@ -127,16 +147,19 @@ constexpr uint8_t kLedBlue  = D4;
 // ---- Serial protocol constants ---------------------------------------------
 constexpr uint8_t  kArmMagic        = 0xA5;
 constexpr uint8_t  kDimMagic        = 0xD1;
+constexpr uint8_t  kOptoConfigMagic = 0xB0;
+constexpr uint8_t  kOptoGateMagic   = 0xB1;
 constexpr uint8_t  kCancelMagic     = 0xCA;
 constexpr uint8_t  kIdentifyMagic   = 0x3F;  // '?'
-constexpr uint8_t  kProtocolVersion = 4;
+constexpr uint8_t  kProtocolVersion = 5;
 constexpr uint32_t kArmStaleMs      = 250;   // discard a partial packet after this
 constexpr long     kBaudRate        = 115200;
-constexpr char     kVersion[]       = "TRIGGERBOX 4";
+constexpr char     kVersion[]       = "TRIGGERBOX 5";
 
 constexpr uint16_t kMaxFps   = 5000;
 constexpr uint8_t  kMaxCam   = 12;
 constexpr uint8_t  kMaxLight = 3;
+constexpr uint8_t  kMaxOpto  = 6;
 // Fixed payload prefix (fps,duration,n_cam,n_light) + records.
 constexpr uint16_t kMaxPayload = 8 + 5 * kMaxCam + 18 * kMaxLight;  // 122
 // Frame buffer holds [version, len_lo, len_hi, ...payload..., checksum].
@@ -184,6 +207,21 @@ static Light g_lt[kMaxLight];
 static uint8_t g_ncam   = 0;
 static uint8_t g_nlight = 0;
 
+// An opto output: off until the host switches it on for a window, then pulsing
+// on its own clock (esp_timer us), whatever the run state.
+struct Opto {
+  uint8_t  gpio;
+  uint32_t pulse_us;
+  uint32_t period_us;  // 0 = HIGH throughout the window
+  bool     on;
+  uint64_t cyc_us;     // current pulse cycle's start
+  uint64_t end_us;     // the window's end
+  bool     high;
+};
+static Opto    g_opto[kMaxOpto];
+static uint8_t g_nopto = 0;
+static uint32_t g_opto_mask = 0;  // pin-index mask of the opto outputs
+
 // Every pin currently driven as an output — so idle/re-arm can force the exact
 // set that was last active LOW, regardless of which runtime pins were chosen.
 static uint8_t g_active_gpio[kMaxCam + kMaxLight];
@@ -208,7 +246,8 @@ static uint32_t g_frame_t0_us   = 0;           // micros() at current frame edge
 static uint64_t g_run_start_us  = 0;           // esp_timer_get_time() at arm (64-bit)
 
 // Pin-index masks of the pins the live spec drives and the ones a staged
-// same-fps re-arm will drive: a dim command must leave both alone.
+// same-fps re-arm will drive: a dim command and an opto config must leave both
+// alone.
 static uint32_t g_run_mask  = 0;
 static uint32_t g_pend_mask = 0;
 
@@ -267,11 +306,14 @@ static void emit(char c) {
   Serial.write(c);
   Serial.write('\n');
 }
-static void reject(char code) {
-  Serial.write('E');
+// Refuse a command: `kind` is 'E' (arm or dim), 'o' (opto config) or 'g'
+// (opto gate).
+static void refuse(char kind, char code) {
+  Serial.write(kind);
   Serial.write(code);
   Serial.write('\n');
 }
+static void reject(char code) { refuse('E', code); }
 
 // Recompute every output's level from the clocks and apply the transitions.
 static void apply_outputs(uint32_t elapsed, uint64_t run) {
@@ -502,9 +544,10 @@ static void enter_running(uint16_t fps, uint32_t duration_ms, const Cam *cams,
   emit('R');
 }
 
-// An accepted arm drives the pins in `used`: one at its boot default yields
-// (driven LOW, no longer dimmed) for the spec to take over, and none of them
-// is remembered as a dim output any more, since it now drives something else.
+// An accepted arm or opto config drives the pins in `used`: one at its boot
+// default yields (driven LOW, no longer dimmed) for it to take over, and none
+// of them is remembered as a dim output any more, since it now drives
+// something else.
 static void release_boot_dims(uint32_t used) {
   const uint32_t taken = used & g_dim_boot;
   for (uint8_t idx = 0; idx < kNumPins; idx++) {
@@ -537,7 +580,7 @@ static void parse_and_validate(const uint8_t *payload, uint16_t len) {
     uint8_t idx = p[0];
     if (idx >= kNumPins) { reject('p'); return; }
     if ((1u << idx) & kReservedMask) { reject('r'); return; }
-    if ((1u << idx) & g_dim_mask & ~g_dim_boot) { reject('u'); return; }
+    if ((1u << idx) & ((g_dim_mask & ~g_dim_boot) | g_opto_mask)) { reject('u'); return; }
     if (used & (1u << idx)) { reject('d'); return; }
     used |= (1u << idx);
     tmpc[i].gpio = kPinTable[idx];
@@ -551,7 +594,7 @@ static void parse_and_validate(const uint8_t *payload, uint16_t len) {
     uint8_t mode = p[1];
     if (idx >= kNumPins) { reject('p'); return; }
     if ((1u << idx) & kReservedMask) { reject('r'); return; }
-    if ((1u << idx) & g_dim_mask & ~g_dim_boot) { reject('u'); return; }
+    if ((1u << idx) & ((g_dim_mask & ~g_dim_boot) | g_opto_mask)) { reject('u'); return; }
     if (used & (1u << idx)) { reject('d'); return; }
     if (mode > kModePulseTrain) { reject('m'); return; }
     used |= (1u << idx);
@@ -652,12 +695,99 @@ static void parse_dim(const uint8_t *payload, uint16_t len) {
   uint16_t duty = rd16(payload + 1);
   if (idx >= kNumPins) { reject('p'); return; }
   if ((1u << idx) & kReservedMask) { reject('r'); return; }
-  if ((1u << idx) & (g_run_mask | g_pend_mask)) { reject('u'); return; }
+  if ((1u << idx) & (g_run_mask | g_pend_mask | g_opto_mask)) { reject('u'); return; }
   if (duty > kDimFull) duty = kDimFull;
   if (!set_dim(idx, duty)) { reject('w'); return; }
   g_dim_boot &= ~(1u << idx);   // the host owns its level from now on
   g_dim_known |= (1u << idx);   // and it comes up at full on the next boot
   emit('P');
+}
+
+// ---- Opto outputs ----------------------------------------------------------
+static void apply_opto(uint64_t now) {
+  for (uint8_t i = 0; i < g_nopto; i++) {
+    Opto &o = g_opto[i];
+    if (!o.on) continue;
+    bool w;
+    if (now >= o.end_us) {
+      o.on = false;
+      w = false;
+    } else if (o.period_us == 0) {
+      w = true;
+    } else {
+      while (now - o.cyc_us >= (uint64_t)o.period_us) o.cyc_us += o.period_us;
+      w = (now - o.cyc_us) < (uint64_t)o.pulse_us;
+    }
+    set_level(o.gpio, o.high, w);
+  }
+}
+
+// Replace the opto outputs (every one off): staged, so a refused config
+// changes nothing. A pin the run (live or staged) drives, or a dimmed one, is
+// in use ('u'); a boot-default dim pin yields, as to an arm.
+static void parse_opto_config(const uint8_t *payload, uint16_t len) {
+  if (len < 1) { refuse('o', 'l'); return; }
+  const uint8_t n = payload[0];
+  if (n > kMaxOpto) { refuse('o', 'o'); return; }
+  if (len != (uint16_t)(1 + 9 * n)) { refuse('o', 'l'); return; }
+  Opto tmp[kMaxOpto];
+  uint32_t mask = 0;
+  const uint8_t *p = payload + 1;
+  for (uint8_t i = 0; i < n; i++, p += 9) {
+    const uint8_t idx = p[0];
+    const uint32_t bit = 1u << idx;
+    if (idx >= kNumPins) { refuse('o', 'p'); return; }
+    if (bit & kReservedMask) { refuse('o', 'r'); return; }
+    if (bit & (g_run_mask | g_pend_mask | (g_dim_mask & ~g_dim_boot))) {
+      refuse('o', 'u');
+      return;
+    }
+    if (mask & bit) { refuse('o', 'd'); return; }
+    mask |= bit;
+    uint32_t pulse = rd32(p + 1);
+    uint32_t period = rd32(p + 5);
+    if (pulse == 0 || pulse >= period) period = 0;  // never off within a cycle
+    tmp[i] = {kPinTable[idx], pulse, period, false, 0, 0, false};
+  }
+  for (uint8_t i = 0; i < g_nopto; i++) {
+    digitalWrite(g_opto[i].gpio, LOW);
+    pinMode(g_opto[i].gpio, INPUT_PULLDOWN);
+  }
+  release_boot_dims(mask);
+  for (uint8_t i = 0; i < n; i++) {
+    pinMode(tmp[i].gpio, OUTPUT);
+    digitalWrite(tmp[i].gpio, LOW);
+    g_opto[i] = tmp[i];
+  }
+  g_nopto = n;
+  g_opto_mask = mask;
+  emit('O');
+}
+
+// Switch opto channels on for a window from now, or off (duration 0); a
+// channel already on keeps its pulse phase.
+static void parse_opto_gate(const uint8_t *payload, uint16_t len) {
+  if (len == 0 || len % 5 != 0 || len / 5 > kMaxOpto) { refuse('g', 'l'); return; }
+  for (uint16_t k = 0; k < len; k += 5) {
+    if (payload[k] >= g_nopto) { refuse('g', 'p'); return; }
+  }
+  const uint64_t now = (uint64_t)esp_timer_get_time();
+  for (uint16_t k = 0; k < len; k += 5) {
+    Opto &o = g_opto[payload[k]];
+    const uint32_t ms = rd32(payload + k + 1);
+    if (!o.on) o.cyc_us = now;
+    o.on = ms > 0;
+    o.end_us = now + (uint64_t)ms * 1000ULL;
+    if (!o.on) set_level(o.gpio, o.high, false);
+  }
+  apply_opto(now);
+}
+
+// The refusal prefix of the command being collected.
+static char rx_kind() {
+  if (g_cmd == kOptoConfigMagic) return 'o';
+  if (g_cmd == kOptoGateMagic) return 'g';
+  return 'E';
 }
 
 // Bring the remembered dim pins up at full (their boot default).
@@ -708,7 +838,7 @@ void loop() {
         // Header complete: [version, len_lo, len_hi].
         g_want_len = (uint16_t)g_buf[1] | ((uint16_t)g_buf[2] << 8);
         if (g_want_len > kMaxPayload) {
-          reject('o');
+          refuse(rx_kind(), 'o');
           g_rx = Rx::CMD;
         } else {
           g_need = 3 + g_want_len + 1;  // + checksum
@@ -718,11 +848,15 @@ void loop() {
         uint8_t sum = 0;
         for (uint16_t i = 0; i < (uint16_t)(3 + g_want_len); i++) sum ^= g_buf[i];
         if (sum != g_buf[g_need - 1]) {
-          reject('c');
+          refuse(rx_kind(), 'c');
         } else if (g_buf[0] != kProtocolVersion) {
-          reject('v');
+          refuse(rx_kind(), 'v');
         } else if (g_cmd == kDimMagic) {
           parse_dim(g_buf + 3, g_want_len);
+        } else if (g_cmd == kOptoConfigMagic) {
+          parse_opto_config(g_buf + 3, g_want_len);
+        } else if (g_cmd == kOptoGateMagic) {
+          parse_opto_gate(g_buf + 3, g_want_len);
         } else {
           parse_and_validate(g_buf + 3, g_want_len);
         }
@@ -738,8 +872,10 @@ void loop() {
       Serial.write(' ');
       Serial.print(TRIGGERBOX_FW_BUILD);
       Serial.write('\n');
-    } else if (b == kArmMagic || b == kDimMagic) {
-      // Both frames share the header, length and checksum; g_cmd picks the parser.
+    } else if (b == kArmMagic || b == kDimMagic || b == kOptoConfigMagic ||
+               b == kOptoGateMagic) {
+      // Every framed command shares the header, length and checksum; g_cmd
+      // picks the parser.
       g_cmd = b;
       g_rx = Rx::COLLECT;
       g_got = 0;
@@ -769,4 +905,7 @@ void loop() {
       enter_idle('D');
     }
   }
+
+  // ---- Opto windows (armed or idle) ------------------------------------------
+  if (g_nopto) apply_opto((uint64_t)esp_timer_get_time());
 }

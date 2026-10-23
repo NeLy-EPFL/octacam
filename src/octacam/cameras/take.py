@@ -136,6 +136,7 @@ class CameraTake:
         self.frame_size: tuple[int, int] | None = None
         self._backend = camera.backend
         self._display = camera.frame_for_display
+        self._tap = camera.frame_tap
         self._transform = camera.display_transform
         self._bake = record_form == "display" and not self._transform.is_identity
         self._pixel_format = camera.pixel_format
@@ -343,6 +344,7 @@ class CameraTake:
                 _format_pulses(assignment.missed),
             )
         self._anchor = (stamp, pulse, not timestamp)
+        self._tap.put(array, stamp, pulse)
         result = self._write(array, pulse)
         if result is not WriteResult.SKIPPED:  # a skipped frame has no video frame
             self._append_row(

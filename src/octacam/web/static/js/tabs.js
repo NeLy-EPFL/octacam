@@ -112,7 +112,10 @@ export class TabBar {
 
 // Import each plugin's UI module (advertised in /api/system), give it a tab
 // and build it there (see SerialTab in serial.js for what a tab receives and
-// implements). One broken module must not blank the page. Returns {name: tab}.
+// implements). A class with `static embedIn = "<plugin>"` is built in a panel
+// that plugin's tab makes with embed(name, label) when it is loaded first,
+// else in a tab of its own. One broken module must not blank the page.
+// Returns {name: tab}.
 export async function loadPluginTabs(plugins, tabBar, ctx) {
   const tabs = new Map();
   for (const [name, status] of Object.entries(plugins)) {
@@ -120,7 +123,10 @@ export async function loadPluginTabs(plugins, tabBar, ctx) {
     try {
       if (status.web.css) loadCss(status.web.css);
       const Tab = (await import(status.web.module)).default;
-      const panel = tabBar.add(name, Tab.label, Tab.title);
+      const host = tabs.get(Tab.embedIn);
+      const panel = host?.embed
+        ? host.embed(name, Tab.label)
+        : tabBar.add(name, Tab.label, Tab.title);
       tabs.set(name, new Tab({ ...ctx, name, panel, status }));
     } catch (e) {
       console.warn(`plugin ${name}: UI module failed to load`, e);

@@ -42,11 +42,35 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   Arming, a run's end and a cancel never change it, and the board refuses an
   arm that uses a dimmed pin (`Eu`). The level a recording started under goes
   into its config snapshot. `triggerbox_send.py --dim PIN,percent` sets one on
-  the bench. **The firmware speaks protocol v4** (`TRIGGERBOX 4`): reflash the
+  the bench. **The firmware speaks protocol v5** (`TRIGGERBOX 5`): reflash the
   board (octacam offers it, and `record --yes` does it unasked). The board
   remembers its dim pins and holds them at full from power-up until octacam
   sets their level, so flies see full white (about 5,000 lux, mind CsChrimson
   flies) until octacam connects; an arm that drives such a pin takes it over.
+- **Closed-loop optogenetics for ball pushing** (`closedloop` plugin) — tracks
+  the tracked corridors' balls in real time (~0.2 ms per ball per 2048² frame) and,
+  while recording, lights a corridor pair's opto LED when its fly pushes the
+  ball: for at least `min_on_s`, and while the ball keeps moving; the pair's
+  control corridor shares the light. A **Closed loop** tab shows the balls, the
+  pushes and the light, edits the push rule, tests each light, and has a
+  **Light in preview (test)** switch to try the loop without recording, and
+  a per-pair choice of which corridor (left or right) is tracked. Each
+  recording logs every tracked frame and every push to `octacam_recording/`.
+- The closed loop draws on the tracked camera's preview: each tracked ball,
+  its pair's LED state (the corridors tinted red while lit) and pushes as they
+  land. Plugin tabs can draw on any camera preview (`overlays`).
+- **`opto` plugin: an optogenetic LED board** — a second Nano ESP32 running the
+  triggerbox sketch, whose opto outputs (up to six lines switched on for a
+  window, steady or pulsed; firmware protocol v5, with the dim outputs) the
+  closed loop drives; the board ends each window itself. An opto output, an
+  arm's output and a dim output never share a pin (`Eu`/`ou`). Its **Opto
+  LEDs** panel (in the Closed loop tab) holds any LED on until released (an
+  override the closed loop logs and never switches off). A plugin tab can host
+  another's panel (`static embedIn`).
+- A camera's `frame_tap` hands every grabbed frame (with its pulse while
+  recording) to an in-process consumer without ever stalling the grab.
+- `OCTACAM_FAKE_VIDEO=<video>` makes the fake cameras replay a recording, to
+  rehearse on real footage.
 - **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
   its cells down; with its own faster `ffmpeg_params` a grid builds several
   times faster (see Configuration).
@@ -140,9 +164,12 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Changed
 
-- **Breaking: the triggerbox firmware speaks protocol v4** (dim outputs): a
-  board on v2 firmware, or on the v3 opto firmware of the unmerged
-  closed-loop branch, is not driven until it is reflashed.
+- **Breaking: the triggerbox firmware speaks protocol v5** (dim and opto
+  outputs): a board on v2 firmware, or on the v3 (opto only) or v4 (dim only)
+  firmware of the earlier closed-loop and dim branches, is not driven until it
+  is reflashed.
+- Flashing a Nano ESP32 names its USB serial number to the DFU uploader, so a
+  rig with two of them (triggerbox + opto) can flash either.
 - The triggerbox no longer sends `off` light channels in its arm packet: an off
   channel drives nothing, and its record claimed the pin (a dimmed one too).
 - **Breaking: `octacam record --output` is now `--out`** (`-o` is unchanged), as

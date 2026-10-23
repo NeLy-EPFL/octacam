@@ -1,0 +1,6 @@
+/* Opto tab styles; the colors are core style.css's :root variables. */
+.opto-channels { width: 100%; border-collapse: collapse; font-size: 12px; }
+.opto-channels th { color: var(--text-dim); font-weight: 500; text-align: left; }
+.opto-channels td, .opto-channels th { padding: 2px 4px; }
+.opto-override { min-width: 52px; }
+.opto-override.on { background: var(--red); border-color: var(--red); color: #fff; font-weight: 600; }

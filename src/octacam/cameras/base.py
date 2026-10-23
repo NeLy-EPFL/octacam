@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import numpy as np
 
@@ -352,6 +352,42 @@ class LatestFrame:
         self.fps = (last - start) * 1e9 / span if span > 0 else 0.0
 
 
+class TapFrame(NamedTuple):
+    array: np.ndarray
+    timestamp_ns: int  # the camera's timestamp, else host time
+    pulse: int | None  # the recording's pulse it exposed; None for a preview frame
+    arrival_ns: int  # time.monotonic_ns() when the grab loop handed it over
+
+
+class FrameTap:
+    """Every frame the grab loop delivers, for an in-process consumer that must
+    see each as it arrives (a closed loop): the newest replaces an unread one,
+    so a slow consumer skips frames and never stalls the grab. Off until the
+    consumer enables it.
+    """
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._frame: TapFrame | None = None
+        self.enabled = False
+
+    def put(self, array: np.ndarray, timestamp_ns: int, pulse: int | None) -> None:
+        if not self.enabled:
+            return
+        frame = TapFrame(array, timestamp_ns, pulse, time.monotonic_ns())
+        with self._cond:
+            self._frame = frame
+            self._cond.notify()
+
+    def get(self, timeout_s: float) -> TapFrame | None:
+        """The newest unread frame, waiting up to `timeout_s` for one."""
+        with self._cond:
+            if self._frame is None:
+                self._cond.wait(timeout_s)
+            frame, self._frame = self._frame, None
+            return frame
+
+
 class Camera:
     """Vendor-neutral camera: parameters, node map, preview and recordings.
 
@@ -374,6 +410,7 @@ class Camera:
         # saved config, so this is its power-on default: the reset's fallback.
         self._default_cache: dict[str, object] = {}
         self.frame_for_display = LatestFrame()
+        self.frame_tap = FrameTap()
         # The recording the camera runs, or its last until the preview restarts
         # (so the preview never shows a stale recording's counts).
         self.take: CameraTake | None = None
@@ -761,14 +798,19 @@ class Camera:
         # un-gated fetch (not retrieve_external, whose wait for a software pulse
         # would freeze a managed preview).
         retrieve = backend.retrieve if mode == "software" else backend.retrieve_freerun
+        display, tap = self.frame_for_display, self.frame_tap
         while not self._stop_flag.is_set() and backend.is_grabbing():
-            # Copy the array only when the display slot is free.
+            # Copy the array only when the display slot is free or a tap wants it.
             frame = retrieve(
-                GRAB_TIMEOUT_MS, lambda: self.frame_for_display.wants_frame
+                GRAB_TIMEOUT_MS, lambda: display.wants_frame or tap.enabled
             )
             if frame is not None:
                 array, timestamp = frame
-                self.preview_timestamps.append(timestamp or time.time_ns())
-                if array is not None and self.frame_for_display.push(array):
-                    self.frame_for_display.refresh_fps(self.preview_timestamps)
+                timestamp = timestamp or time.time_ns()
+                self.preview_timestamps.append(timestamp)
+                if array is None:
+                    continue
+                tap.put(array, timestamp, None)
+                if display.push(array):
+                    display.refresh_fps(self.preview_timestamps)
         backend.stop_grab()

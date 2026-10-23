@@ -61,6 +61,24 @@ FLYWHEEL_JS = (
     / "web"
     / "flywheel.js"
 )
+OPTO_JS = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "octacam"
+    / "plugins"
+    / "opto"
+    / "web"
+    / "opto.js"
+)
+CLOSEDLOOP_JS = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "octacam"
+    / "plugins"
+    / "closedloop"
+    / "web"
+    / "closedloop.js"
+)
 
 # The save-method dropdown is populated from these (mirrors writer.FORMATS as the
 # server serializes it). NVENC_FORMATS adds the GPU method for the nvenc tests.
@@ -2237,6 +2255,500 @@ def test_users_are_picked_and_added_from_the_record_tab(static_server, browser):
         )
         assert page.eval_on_selector(
             "#user-dialog", "e => e.classList.contains('hidden')"
+        )
+    finally:
+        page.close()
+
+
+def _closedloop_status(**changes):
+    xs = (190, 520, 850, 1175, 1500, 1835)
+    status = {
+        "ready": True,
+        "camera": "top",
+        "corridors": 6,
+        "message": None,
+        "recording": False,
+        "frame_size": [2048, 2048],
+        "rate_fps": 80.0,
+        "latency_ms": 0.9,
+        "corridor_x": list(xs),
+        "balls": [
+            {
+                "corridor": k + 1,
+                "x": xs[k],
+                "y": 900.0,
+                "score": 0.8,
+                "lost": k == 4,
+                "progress_px": 0,
+            }
+            for k in (0, 2, 4)
+        ],
+        "pairs": [
+            {
+                "corridor": 1,
+                "control": 2,
+                "channel": 1,
+                "pushes": 4,
+                "stims": 2,
+                "light": False,
+                "ready_in_s": 0,
+            },
+            {
+                "corridor": 3,
+                "control": 4,
+                "channel": 2,
+                "pushes": 1,
+                "stims": 1,
+                "light": True,
+                "ready_in_s": 5,
+            },
+            {
+                "corridor": 5,
+                "control": 6,
+                "channel": 3,
+                "pushes": 0,
+                "stims": 0,
+                "light": False,
+                "ready_in_s": 0,
+            },
+        ],
+        "rule": {
+            "direction": "up",
+            "push_px": 10.0,
+            "min_on_s": 1.0,
+            "refractory_s": 0.0,
+            "enabled": True,
+        },
+        "web": {"module": "/plugins/closedloop/closedloop.js"},
+    }
+    status.update(changes)
+    return status
+
+
+def test_closedloop_tab_shows_the_loop_and_sends_its_controls(static_server, browser):
+    """The Closed loop tab draws every corridor's ball, each pair's counts and
+    light, seeds the push rule, and its controls reach their routes; a recording
+    locks the rule and the re-detection.
+    """
+    page = browser.new_page()
+    sent: list[tuple[str, str, dict | None]] = []
+
+    def api(route):
+        request = route.request
+        body = json.loads(request.post_data) if request.post_data else None
+        sent.append((request.method, request.url.split("/api/")[1], body))
+        if "preview" in request.url:
+            reply = {"preview_live": body["on"]}
+        elif "test" in request.url:
+            reply = {"ok": True}
+        else:
+            reply = body or {}
+        route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(reply)
+        )
+
+    page.route("**/api/**", api)
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                _system_payload(
+                    ready=True, plugins={"closedloop": _closedloop_status()}
+                )
+            ),
+        ),
+    )
+    page.route(
+        "**/api/state",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_state_payload(ready=True)),
+        ),
+    )
+    page.route(
+        "**/plugins/closedloop/closedloop.js",
+        lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=CLOSEDLOOP_JS.read_text()
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => document.querySelectorAll('#closedloop-map circle').length === 3",
+            timeout=5000,
+        )
+        page.wait_for_function(
+            "() => !document.getElementById('closedloop-rule').disabled", timeout=5000
+        )
+        assert (
+            page.eval_on_selector_all(
+                "#tabs button[data-tab]", "els => els.map(e => e.textContent)"
+            )[-1]
+            == "Closed loop"
+        )
+        assert page.eval_on_selector_all(
+            "#closedloop-map circle",
+            "els => els.map(e => e.classList.contains('lost'))",
+        ) == [False, False, True]
+        # Every corridor is drawn, the tracked ones outlined.
+        assert page.eval_on_selector_all(
+            "#closedloop-map rect",
+            "els => els.map(e => e.classList.contains('tracked'))",
+        ) == [True, False, True, False, True, False]
+        rows = page.eval_on_selector_all(
+            "#closedloop-pair-rows tr",
+            "els => els.map(r => [...r.cells].map(c => c.textContent))",
+        )
+        # The side picker lists each pair's corridors left to right.
+        assert [r[:4] for r in rows] == [
+            ["12", "1", "4", "2"],
+            ["34", "2", "1", "1"],
+            ["56", "3", "0", "0"],
+        ]
+        tracked = page.eval_on_selector_all(
+            ".closedloop-side button",
+            "els => els.map(e => e.getAttribute('aria-pressed'))",
+        )
+        assert tracked == ["true", "false"] * 3
+        assert page.eval_on_selector_all(
+            ".closedloop-light", "els => els.map(e => e.classList.contains('on'))"
+        ) == [False, True, False]
+        assert page.input_value("#closedloop-push-px") == "10"
+        assert page.input_value("#closedloop-direction") == "up"
+
+        # Plugin tabs may sit in the overflow menu: open this one as a click would.
+        page.eval_on_selector("#tabs button[data-tab='closedloop']", "e => e.click()")
+        page.click("#closedloop-pair-rows tr:nth-child(2) td:last-child button")
+        page.fill("#closedloop-push-px", "6")
+        page.dispatch_event("#closedloop-push-px", "change")
+        page.click("#closedloop-detect")
+        page.wait_for_timeout(300)
+        calls = [c for c in sent if c[1].startswith("closedloop/")]
+        assert ("POST", "closedloop/test", {"channel": 2, "duration_s": 1}) in calls
+        assert (
+            "PUT",
+            "closedloop/rule",
+            {
+                "direction": "up",
+                "push_px": 6,
+                "min_on_s": 1,
+                "refractory_s": 0,
+                "enabled": True,
+            },
+        ) in calls
+        assert ("POST", "closedloop/detect", None) in calls
+        page.click(
+            "#closedloop-pair-rows tr:nth-child(3) .closedloop-side button:nth-child(2)"
+        )
+        page.wait_for_timeout(300)
+        assert ("PUT", "closedloop/pair", {"pair": 2, "tracked": 6}) in sent
+        assert not page.is_checked("#closedloop-preview-live")
+        page.check("#closedloop-preview-live")
+        page.wait_for_timeout(300)
+        assert ("PUT", "closedloop/preview", {"on": True}) in sent
+        assert page.is_checked("#closedloop-preview-live")
+
+        page.evaluate(
+            "(msg) => window.__pushWs(msg)",
+            {"type": "closedloop_state", **_closedloop_status(recording=True)},
+        )
+        page.wait_for_function(
+            "() => document.getElementById('closedloop-rule').disabled", timeout=5000
+        )
+        assert page.eval_on_selector("#closedloop-detect", "e => e.disabled")
+    finally:
+        page.close()
+
+
+def test_opto_tab_lists_the_channels_and_toggles_the_override(static_server, browser):
+    page = browser.new_page()
+    status = {
+        "ready": True,
+        "device": "/dev/ttyACM1",
+        "firmware": "TRIGGERBOX 3 abc1234",
+        "firmware_ok": True,
+        "firmware_state": "current",
+        "needs_flash": False,
+        "error": None,
+        "arduino_state": "idle",
+        "forced": [2],
+        "channels": [
+            {"pin": "D7", "freq_hz": 0, "pulse_ms": 10},
+            {"pin": "D9", "freq_hz": 20, "pulse_ms": 10},
+        ],
+        "web": {"module": "/plugins/opto/opto.js"},
+    }
+    sent = []
+    forced = {2}
+
+    def override(route):
+        body = json.loads(route.request.post_data)
+        sent.append(body)
+        (forced.add if body["on"] else forced.discard)(body["channel"])
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"ok": True, "forced": sorted(forced)}),
+        )
+
+    page.route(
+        "**/api/**",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body="{}"
+        ),
+    )
+    page.route("**/api/opto/override", override)
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_system_payload(ready=True, plugins={"opto": status})),
+        ),
+    )
+    page.route(
+        "**/api/state",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_state_payload(ready=True)),
+        ),
+    )
+    page.route(
+        "**/plugins/opto/opto.js",
+        lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=OPTO_JS.read_text()
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+    buttons = "#opto-rows button"
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => document.querySelectorAll('#opto-rows tr').length === 2",
+            timeout=5000,
+        )
+        rows = page.eval_on_selector_all(
+            "#opto-rows tr", "els => els.map(r => [...r.cells].map(c => c.textContent))"
+        )
+        assert rows == [
+            ["1", "D7", "steady", "On"],
+            ["2", "D9", "10 ms at 20 Hz", "ON"],
+        ]
+        assert (
+            page.eval_on_selector_all(
+                "#tabs button[data-tab]", "els => els.map(e => e.textContent)"
+            )[-1]
+            == "Opto LEDs"
+        )
+        page.eval_on_selector("#tabs button[data-tab='opto']", "e => e.click()")
+        page.wait_for_function(
+            "(s) => [...document.querySelectorAll(s)].every(b => !b.disabled)",
+            arg=buttons,
+            timeout=5000,
+        )
+        page.click("#opto-rows tr:nth-child(1) button")  # force LED 1 on
+        page.wait_for_function(
+            "(s) => document.querySelector(s).getAttribute('aria-pressed') === 'true'",
+            arg="#opto-rows tr:nth-child(1) button",
+            timeout=5000,
+        )
+        page.click("#opto-rows tr:nth-child(2) button")  # release LED 2
+        page.wait_for_function(
+            "(s) => document.querySelector(s).getAttribute('aria-pressed') === 'false'",
+            arg="#opto-rows tr:nth-child(2) button",
+            timeout=5000,
+        )
+        assert sent == [{"channel": 1, "on": True}, {"channel": 2, "on": False}]
+    finally:
+        page.close()
+
+
+def _jpeg(width, height, value=0) -> bytes:
+    import cv2
+    import numpy as np
+
+    ok, buf = cv2.imencode(".jpg", np.full((height, width), value, np.uint8))
+    assert ok
+    return buf.tobytes()
+
+
+_OVERLAY_GRID = """async ({serial, state, frame}) => {
+    const { CameraGrid } = await import('./js/grid.js');
+    const host = document.getElementById('grid');
+    host.style.cssText = 'position:fixed; left:0; top:0; width:600px; height:600px';
+    host.replaceChildren();
+    const overlays = new Map();
+    window.__views = [];
+    overlays.set('probe', (ctx, view) => window.__views.push({
+        camera: view.camera, x0: view.x(frame.cropX),
+        x1: view.x(frame.cropX + frame.cropW), y0: view.y(frame.cropY),
+        scale: view.scale, canvasW: ctx.canvas.width}));
+    if (state) {
+        const Tab = (await import('/plugins/closedloop/closedloop.js')).default;
+        const panel = document.createElement('div');
+        document.body.appendChild(panel);
+        const tab = new Tab({ panel, status: {}, notify: () => {}, overlays });
+        tab.applyState(state);
+    }
+    const grid = new CameraGrid(host, [{
+        index: 0, serial, name: 'top', width: 2048, height: 2048,
+        layout: {window_x: -1, window_y: -1, window_width: -1, window_height: -1},
+        transform: {scale_x: 1, scale_y: 1, rotation_deg: 0},
+        center_x: false, center_y: false}],
+        {overlays});
+    const jpeg = await (await fetch('/frame.jpg')).arrayBuffer();
+    grid.handleFrame({cameraIndex: 0, jpeg, fps: 80, dropped: 0, recording: false,
+        sensorW: 2048, sensorH: 2048, ...frame});
+    for (let i = 0; i < 50 && !window.__views.length; i++) {
+        await new Promise(r => setTimeout(r, 20));
+    }
+    const canvas = host.querySelector('canvas');
+    const px = (x, y) => [...canvas.getContext('2d').getImageData(x, y, 1, 1).data];
+    return {
+        views: window.__views, lit: px(frame.litX, 128), dark: px(frame.darkX, 128),
+    };
+}"""
+
+
+def _overlay_page(page, frame_bytes):
+    page.route(
+        "**/frame.jpg",
+        lambda r: r.fulfill(status=200, content_type="image/jpeg", body=frame_bytes),
+    )
+    page.route(
+        "**/plugins/closedloop/closedloop.js",
+        lambda r: r.fulfill(
+            status=200, content_type="text/javascript", body=CLOSEDLOOP_JS.read_text()
+        ),
+    )
+
+
+def test_preview_overlays_draw_in_sensor_coordinates(page):
+    """A plugin overlay draws on each preview frame through a sensor->canvas
+    mapping that follows the server's crop and decimation (a zoomed tile).
+    """
+    _overlay_page(page, _jpeg(256, 256))
+    frame = {
+        "cropX": 512,
+        "cropY": 256,
+        "cropW": 1024,
+        "cropH": 1024,
+        "litX": 0,
+        "darkX": 0,
+    }
+    out = page.evaluate(_OVERLAY_GRID, {"serial": "S1", "state": None, "frame": frame})
+    (view,) = out["views"]
+    assert view["camera"] == {"name": "top", "serial": "S1"}
+    assert (view["x0"], view["x1"], view["y0"]) == (0, 256, 0)
+    assert view["scale"] == 0.25 and view["canvasW"] == 256
+
+
+def test_closedloop_overlay_tints_the_lit_pair_on_the_tracked_camera(page):
+    _overlay_page(page, _jpeg(512, 512))
+    state = {
+        **_closedloop_status(),
+        "camera_serial": "17475187",
+        "ball_radius_px": 30,
+        "corridor_x": [190, 520, 850, 1175, 1500, 1835],
+    }
+    # Pair 3+4 is lit (see _closedloop_status); the canvas is 1/4 of the sensor.
+    frame = {
+        "cropX": 0,
+        "cropY": 0,
+        "cropW": 2048,
+        "cropH": 2048,
+        "litX": round(1175 / 4),
+        "darkX": round(1835 / 4),
+    }
+    lit = page.evaluate(
+        _OVERLAY_GRID, {"serial": "17475187", "state": state, "frame": frame}
+    )
+    r, g, b, _ = lit["lit"]
+    assert r > 40 and r > 2 * g and r > 2 * b  # the red tint over corridor 4
+    assert max(lit["dark"][:3]) < 20  # corridor 6: its pair is off
+    other = page.evaluate(
+        _OVERLAY_GRID, {"serial": "OTHER", "state": state, "frame": frame}
+    )
+    assert max(other["lit"][:3]) < 20  # another camera: nothing drawn
+
+
+def test_opto_leds_live_in_the_closed_loop_tab(static_server, browser):
+    """With the closed loop loaded, the LED board's panel is a section of its
+    tab (no tab of its own), and still gets its own pushes.
+    """
+    page = browser.new_page()
+    opto = {
+        "ready": True,
+        "device": "/dev/ttyACM1",
+        "firmware": "TRIGGERBOX 3 abc1234",
+        "firmware_ok": True,
+        "firmware_state": "current",
+        "needs_flash": False,
+        "error": None,
+        "arduino_state": "idle",
+        "forced": [],
+        "channels": [{"pin": "D7", "freq_hz": 0, "pulse_ms": 10}],
+        "web": {"module": "/plugins/opto/opto.js"},
+    }
+    plugins = {"closedloop": _closedloop_status(), "opto": opto}
+    page.route(
+        "**/api/**",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body="{}"
+        ),
+    )
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_system_payload(ready=True, plugins=plugins)),
+        ),
+    )
+    page.route(
+        "**/api/state",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_state_payload(ready=True)),
+        ),
+    )
+
+    def serve(js):
+        return lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=js.read_text()
+        )
+
+    for name, js in (("closedloop", CLOSEDLOOP_JS), ("opto", OPTO_JS)):
+        page.route(f"**/plugins/{name}/{name}.js", serve(js))
+    page.add_init_script(_WS_STUB)
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => document.querySelectorAll('#opto-rows tr').length === 1",
+            timeout=5000,
+        )
+        tabs = page.eval_on_selector_all(
+            "#tabs button[data-tab]", "els => els.map(e => e.textContent)"
+        )
+        assert "Closed loop" in tabs and "Opto LEDs" not in tabs
+        assert page.eval_on_selector(
+            "#opto-rows", "e => !!e.closest('#tab-closedloop')"
+        )
+        # Its state pushes still reach it.
+        page.evaluate(
+            "(msg) => window.__pushWs(msg)",
+            {"type": "opto_state", **opto, "forced": [1]},
+        )
+        page.wait_for_function(
+            "() => document.querySelector('#opto-rows button')"
+            ".getAttribute('aria-pressed') === 'true'",
+            timeout=5000,
         )
     finally:
         page.close()
