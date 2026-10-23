@@ -39,6 +39,8 @@
     <div id="rig-alert" class="hidden" role="alert"></div>
 
     <section id="tab-record" class="tab active">
+      <!-- "Ready?": what the rig needs before recording (js/ready.js). -->
+      <div id="ready-strip" class="ready-strip" hidden></div>
       <fieldset id="record-fields" disabled>
         <!-- Essentials: always visible. Everything else lives under the
              Advanced-options switch below (see record.js). -->
@@ -64,44 +66,63 @@
         <label class="row" title="Target capture rate in frames per second (applies to every camera)"><span>FPS:</span>
           <input id="fps" type="number" min="0.01" max="1000" step="1">
         </label>
-        <div class="col">
-          <label class="col-label" for="record-dir"
-            title="Base folder on the rig that recordings are written under">Directory:</label>
-          <textarea id="record-dir" rows="2" spellcheck="false"
-            title="Base folder on the rig that recordings are written under"></textarea>
-          <div class="save-dir-foot">
-            <button type="button" id="browse-dir-btn" class="btn"
-              title="Browse the rig's filesystem to pick the base folder">Browse…</button>
-            <span id="disk-free" title="Free space available on the base folder's drive"></span>
+        <!-- Who records and the recording's name; their folders (Paths, below)
+             follow the user. -->
+        <label class="row" id="user-row"
+          title="Who is recording: your data goes to your own folders (set when you add yourself). Kept in this rig's config, so everyone on this rig sees the same users."><span>User:</span>
+          <select id="user-select"></select>
+        </label>
+        <span id="user-hint" class="hint" hidden></span>
+        <div class="col" id="take-name" hidden>
+          <label class="col-label"
+            title="This recording's folder: experiment / fly / take. Also its place on the transfer destination.">Recording:</label>
+          <input id="take-experiment" type="text" spellcheck="false"
+            title="Experiment folder, e.g. 261016_PAM7xCI80 (a %y%m%d code in the config fills in the date)">
+          <div class="take-parts">
+            <input id="take-fly" type="text" spellcheck="false" class="take-short"
+              title="Fly folder, e.g. Fly2">
+            <span class="take-sep">/</span>
+            <input id="take-take" type="text" spellcheck="false" class="take-short"
+              title="Take folder, e.g. 001; it counts up by itself after each recording">
+            <button type="button" id="next-fly-btn" class="btn"
+              title="Move on to the next fly: Fly number +1, take back to 001">Next fly</button>
           </div>
         </div>
-        <div class="col">
+        <div class="col" id="relative-row">
           <label class="col-label" for="relative-dir"
             title="Sub-path under the base directory for this recording; also mirrored onto the destination by the transfer step">Relative directory:</label>
           <textarea id="relative-dir" rows="2" spellcheck="false"
             title="Sub-path under the base directory for this recording; also mirrored onto the destination by the transfer step"></textarea>
         </div>
-        <div class="col">
-          <label class="col-label" for="transfer-dir"
-            title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs.">Transfer directory:</label>
-          <textarea id="transfer-dir" rows="2" spellcheck="false"
-            title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs."></textarea>
-        </div>
 
-        <!-- Binary on/off switch that reveals the less-common recording,
-             encoding, and post-processing knobs (wired in record.js). -->
-        <label class="adv-toggle" title="Show the less-common recording, encoding, and post-processing options">
-          <span>Advanced options</span>
-          <span class="switch">
-            <input id="record-advanced-toggle" type="checkbox"
-              title="Show the less-common recording, encoding, and post-processing options">
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </span>
-        </label>
-
-        <div id="record-advanced" hidden>
-          <div class="adv-group">
-            <div class="adv-group-head">Triggering</div>
+        <!-- Everything not needed to start a recording, in sections collapsed by
+             default (each remembers whether it was opened: record.js). -->
+        <div id="record-advanced">
+          <details class="adv-group" data-section="paths">
+            <summary class="adv-group-head" title="Where recordings are written and transferred">Paths <span id="paths-source" class="adv-source"></span></summary>
+            <span id="paths-note" class="hint" hidden></span>
+            <button type="button" id="paths-reset" class="btn" hidden
+              title="Go back to the chosen user's folders">Use the user's folders</button>
+          <div class="col">
+            <label class="col-label" for="record-dir"
+              title="Base folder on the rig that recordings are written under">Directory:</label>
+            <textarea id="record-dir" rows="2" spellcheck="false"
+              title="Base folder on the rig that recordings are written under"></textarea>
+            <div class="save-dir-foot">
+              <button type="button" id="browse-dir-btn" class="btn"
+                title="Browse the rig's filesystem to pick the base folder">Browse…</button>
+              <span id="disk-free" title="Free space available on the base folder's drive"></span>
+            </div>
+          </div>
+          <div class="col">
+            <label class="col-label" for="transfer-dir"
+              title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs.">Transfer directory:</label>
+            <textarea id="transfer-dir" rows="2" spellcheck="false"
+              title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs."></textarea>
+          </div>
+          </details>
+          <details class="adv-group" data-section="triggering">
+            <summary class="adv-group-head">Triggering</summary>
             <label class="row"
               title="software: the server starts each frame on a timer. managed: octacam drives an external hardware trigger via a plugin (e.g. the triggerbox). external: every frame is driven by a hardware trigger octacam does not control."><span>Trigger source:</span>
               <select id="trigger-source">
@@ -118,10 +139,10 @@
                 <option value="free_running">free running</option>
               </select>
             </label>
-          </div>
+          </details>
 
-          <div class="adv-group">
-            <div class="adv-group-head">Encoding &amp; output</div>
+          <details class="adv-group" data-section="encoding">
+            <summary class="adv-group-head">Encoding &amp; output</summary>
             <label class="row"
               title="How the saved video files are written. ffmpeg: encode now on the CPU (libx264). nvenc: encode now on an NVIDIA GPU (H.264 NVENC). raw: store Mono8 to transcode later."><span>Save method:</span>
               <select id="format"></select>
@@ -164,11 +185,11 @@
               title="Per-camera frame buffer between the grab loop and its encoder, in frames. A deeper queue absorbs transient encoder stalls (a full queue is the only source of a dropped frame) at the cost of peak RAM (frame bytes × queue × cameras). Default 64."><span>Writer queue size:</span>
               <input id="writer-queue-size" type="number" min="1" max="4096" step="1">
             </label>
-          </div>
+          </details>
 
-          <div class="adv-group">
-            <div class="adv-group-head"
-              title="Post-recording pipeline, run later by `octacam process`. These values are baked into this recording's config snapshot; the rig config file is left untouched.">Post-processing</div>
+          <details class="adv-group" data-section="postprocessing">
+            <summary class="adv-group-head"
+              title="Post-recording pipeline, run later by `octacam process`. These values are baked into this recording's config snapshot; the rig config file is left untouched.">Post-processing</summary>
             <div class="col">
               <label class="col-label" for="transcode-ffmpeg-params"
                 title="Verbatim ffmpeg output/encoder arguments `octacam process` uses to transcode the recordings">Transcode ffmpeg parameters:</label>
@@ -179,7 +200,7 @@
               title="Content-verify each transferred file with a checksum before promoting it (safer but slower); off = size-only comparison"><span>Verify transfer (checksum):</span>
               <input id="transfer-checksum" type="checkbox">
             </label>
-          </div>
+          </details>
         </div>
       </fieldset>
       <button type="button" id="record-button" class="start" disabled
@@ -336,6 +357,36 @@
         <button type="button" id="shutdown-cancel" class="btn">Cancel</button>
         <button type="button" id="shutdown-plain" class="btn">Shut down</button>
         <button type="button" id="shutdown-process" class="btn" title="Shut down, then transcode/grid/transfer this session in the background">Shut down &amp; process</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="user-dialog" class="modal hidden">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="user-dialog-title">
+      <h3 id="user-dialog-title">Add yourself</h3>
+      <p class="hint">Users are kept in this rig's config: everyone on this rig sees
+        them, and you only do this once. octacam suggests your folders from the
+        other users'; check them, or browse to yours.</p>
+      <label class="row" title="2 to 4 capital letters, as your folder on the lab's NAS is named"><span>Initials:</span>
+        <input id="user-initials" type="text" maxlength="4" spellcheck="false" placeholder="MD" autocomplete="off">
+      </label>
+      <label class="row" title="Shown in the user list; optional"><span>Name:</span>
+        <input id="user-name" type="text" spellcheck="false" placeholder="optional">
+      </label>
+      <div class="col">
+        <label class="col-label" for="user-transfer"
+          title="Where `octacam process` copies your recordings (verified) before freeing the rig's disk">Your transfer destination (NAS):</label>
+        <div class="path-pick">
+          <input id="user-transfer" type="text" spellcheck="false">
+          <button type="button" class="btn" data-browse="user-transfer" title="Browse to the folder">Browse…</button>
+          <span class="path-status" data-status-for="user-transfer"></span>
+        </div>
+      </div>
+      <div id="user-plugin-fields"></div>
+      <div id="user-error" class="modal-error"></div>
+      <div class="modal-actions">
+        <button type="button" id="user-cancel" class="btn">Cancel</button>
+        <button type="button" id="user-create" class="btn" title="Add this user to the rig's config and switch to it">Add user</button>
       </div>
     </div>
   </div>

@@ -46,6 +46,8 @@ class AppState:
     config_dir: str
     raw_config: dict
     plugin_web: dict[str, Path]
+    # The config keys the launch's --set gave: choosing a user keeps them.
+    pinned: frozenset[str] = frozenset()
     # The update banner's notice; None until the background check returns.
     update_notice: updates.UpdateNotice | None = None
     # Set by POST /api/shutdown ("Shut down & process"); cli.gui's teardown then

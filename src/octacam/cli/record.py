@@ -13,7 +13,9 @@ from octacam.cli._common import (
     EnabledPlugins,
     NoPlugins,
     Sets,
+    User,
     Verbose,
+    check_user,
     command,
     open_rig,
     resolve_config_arg,
@@ -25,6 +27,38 @@ from octacam.cli._common import (
 from octacam.cli.flash import preflight_firmware
 
 log = logging.getLogger("octacam")
+
+
+def _say_who_records(
+    name: str,
+    initials: str,
+    settings,
+    user: str | None,
+    plugin_options: dict[str, dict] | None = None,
+) -> None:
+    """Log whose take this is and where its data goes, the user's plugin
+    options (their 2P share) included: a warning when the user is the last one
+    remembered on this machine rather than `--user`, so a different person at
+    the keyboard notices before their data lands in someone else's folders.
+    """
+    who = f"{initials} ({name})" if name else initials
+    where = (
+        f"saving to {settings.save_dir}, transfer to "
+        f"{settings.transfer_directory or '(none)'}"
+    )
+    for plugin, options in sorted((plugin_options or {}).items()):
+        shown = ", ".join(f"{k} {v}" for k, v in sorted(options.items()))
+        if shown:
+            where += f", {plugin} {shown}"
+    if user:
+        log.info("Recording as %s: %s", who, where)
+    else:
+        log.warning(
+            "Recording as %s, the last user on this machine (pass --user to "
+            "record as someone else): %s",
+            who,
+            where,
+        )
 
 
 def _confirm_gate(question: str, *, force: bool, forced: str, headless: str) -> None:
@@ -166,6 +200,7 @@ def record(
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
     sets: Sets = None,
+    user: User = None,
     verbose: Verbose = False,
 ) -> None:
     """Record videos headlessly from the cameras in `config_dir`.
@@ -176,20 +211,35 @@ def record(
     `--set`.
     """
     from octacam import session_cache
-    from octacam.config import RecordingSettings, load_config_dir
+    from octacam.config import RecordingSettings, load_config_dir, override_keys
     from octacam.controller import RecordingController
     from octacam.plugins import build_plugins
+    from octacam.users import recording_user, settings_for_user
 
     config_dir = resolve_config_arg(config_dir)
     config = with_sets(load_config_dir(config_dir), sets)
 
+    check_user(config, user)
     settings = RecordingSettings.from_config(config, fps=fps)
+    initials = recording_user(config, config_dir, user)
+    if initials:
+        settings = settings.updated(
+            **settings_for_user(config, initials, pinned=override_keys(sets))
+        )
     if duration is not None:
         settings.duration_s = duration
     if out is not None:
         # Bypasses the template; the summary's relative_directory falls back to
         # the folder name.
         settings = settings.with_save_dir(str(out))
+    if initials:
+        _say_who_records(
+            config.users[initials].name,
+            initials,
+            settings,
+            user,
+            config.users[initials].plugins,
+        )
 
     warn_if_transcoding()
 
@@ -225,6 +275,8 @@ def record(
             )
 
         plugins = build_plugins(config, resolve_enabled(enabled_plugins, no_plugins))
+        if initials:
+            plugins.on_user(config.users[initials].plugins)
         plugins.setup_all()
 
         # Wrong firmware would record against the wrong protocol, or get no

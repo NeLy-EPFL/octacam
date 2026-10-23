@@ -19,9 +19,11 @@ from octacam.cli._common import (
     EnabledPlugins,
     NoPlugins,
     Sets,
+    User,
     Verbose,
     browser_skip_reason,
     camera_open_error,
+    check_user,
     command,
     pick_port,
     resolve_config_arg,
@@ -189,6 +191,7 @@ def gui(
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
     sets: Sets = None,
+    user: User = None,
     verbose: Verbose = False,
 ) -> None:
     """Launch the octacam web GUI for the cameras in `config_dir`."""
@@ -196,7 +199,7 @@ def gui(
 
     from octacam import locks, session_cache
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
-    from octacam.config import RecordingSettings, load_config_dir
+    from octacam.config import RecordingSettings, load_config_dir, override_keys
     from octacam.controller import RecordingController
     from octacam.plugins import build_plugins
     from octacam.web.app import create_app
@@ -220,6 +223,7 @@ def gui(
     port = pick_port(host, port, DEFAULT_PORT)
 
     config = with_sets(load_config_dir(config_dir), sets)
+    check_user(config, user)
     warn_if_transcoding()
 
     plugins = build_plugins(config, resolve_enabled(enabled_plugins, no_plugins))
@@ -295,7 +299,7 @@ def gui(
     app = None
     init_thread: threading.Thread | None = None
     try:
-        app = create_app(controller, config)
+        app = create_app(controller, config, user=user, pinned=override_keys(sets))
         init_thread = threading.Thread(
             target=_initialize_rig,
             args=(app.state.app_state,),

@@ -115,11 +115,25 @@ def _dumps(data: dict) -> str:
         _emit_table(lines, header, table, array=array)
         blocks.append("\n".join(lines))
 
-    # Top-level keys (`backend`) must precede every table header.
+    known = {"record", "transcode", "gui", "cameras", "plugins", "visualization"}
+    known.add("transfer")
+
+    def table_array(value: object) -> bool:
+        return (
+            isinstance(value, list)
+            and bool(value)
+            and all(isinstance(v, dict) for v in value)
+        )
+
+    # Top-level keys (`backend`, or one a newer octacam reads: a date, a list)
+    # must precede every table header.
     scalars = {
         key: value
         for key, value in data.items()
-        if isinstance(value, (str, int, float, bool))
+        if key not in known
+        and value is not None
+        and not isinstance(value, dict)
+        and not table_array(value)
     }
     if scalars:
         blocks.append("\n".join(f"{k} = {_toml_value(v)}" for k, v in scalars.items()))
@@ -142,6 +156,16 @@ def _dumps(data: dict) -> str:
     transfer = data.get("transfer")
     if isinstance(transfer, dict) and transfer:
         block("transfer", transfer)
+    # Every other table or array of tables ([users], or one a newer octacam
+    # reads): a rewrite must never drop what it does not know.
+    for header, table in data.items():
+        if header in known:
+            continue
+        if isinstance(table, dict):  # empty too: `[emptytable]` is a key
+            block(header, table)
+        elif table_array(table):
+            for item in table:
+                block(header, item, array=True)
 
     return "\n\n".join(blocks) + "\n" if blocks else ""
 

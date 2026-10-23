@@ -32,7 +32,19 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 - **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
   its cells down; with its own faster `ffmpeg_params` a grid builds several
   times faster (see Configuration).
-
+- **Users**: `[users.<initials>]` in the rig config says who records and where
+  their data goes (their transfer destination, and plugin folders such as the
+  2P share). The Record tab picks the user from a list and adds a new one in a
+  dialog that suggests and checks their folders (also `octacam users
+  list|add`, and `--user` on `gui` and `record`); each user gets their last
+  folder name back, and summaries name who recorded. `record` without
+  `--user` warns that it records as the last user and says where the data
+  goes.
+- **Experiment / Fly / Take fields with Next fly** in the Record tab (one
+  folder name each; a deeper recording folder keeps the raw field), and a
+  **Ready?** strip saying what to fix before recording (cameras, boards, disk,
+  destination, and each plugin's own checks). An explicit
+  `--set transfer.directory=...` wins over the chosen user's destination.
 - **`octacam process` transfers the data before building grids**, so a day's
   videos are on the destination hours earlier; grids are built and transferred
   after. **Plugins can add processing steps** (`Plugin.process_steps`, a
@@ -216,6 +228,9 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 - **The transfer copies every file of a recording's `octacam_recording`
   folder**, a plugin's own included (it copied only the files it knew by name,
   so with a delete after transfer a plugin's facts were lost).
+- **Saving the rig config from the GUI kept only the tables it knew**: any
+  other table (now `[users]`), array of tables or top-level key in the file
+  was dropped by the rewrite.
 - **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
   error, which made a request for a missing feature or command a 500; it is a
   clean "no such node" again.

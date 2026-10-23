@@ -5,7 +5,39 @@ import { api, clamp, clampInput, el, formatBytes, formatHMS, request, store } fr
 const BUSY_STATES = new Set(["waiting", "recording", "finishing"]);
 
 // The Advanced-options switch is remembered per browser; off by default.
-const ADV_KEY = "octacam.record.advanced";
+// Each collapsible section's open state, per browser: `${SECTION_KEY}<name>`.
+const SECTION_KEY = "octacam.record.section.";
+
+// A recording folder `<experiment>/<fly>/<take>` as its three parts, or null
+// for any other depth (then the raw field is shown): each part is one folder,
+// the layout the 2P processing walks (<day>/<fly>/<take>).
+export function splitRecording(relative) {
+  const parts = (relative || "").split("/").filter(Boolean);
+  if (parts.length !== 3) return null;
+  const [experiment, fly, take] = parts;
+  return { experiment, fly, take };
+}
+
+// The next fly: its number +1 (Fly2 -> Fly3, else "<fly>2"), the take's number
+// back to 1 at the same width (005 -> 001). The fly's number is the one right
+// after "Fly", else a number standing alone between "_"/"-" (a line name keeps
+// its digits: R57C10_1 -> R57C10_2), else its first: a genotype after it stays
+// (Fly1_GCaMP6s -> Fly2_GCaMP6s, not Fly1_GCaMP7s).
+export function nextFly({ experiment, fly, take }) {
+  const bump = (text, pattern, to) =>
+    text.replace(pattern, (whole, head, digits) =>
+      head + String(to(Number(digits))).padStart(digits.length, "0")
+    );
+  const alone = /(^|[_-])(\d+)(?=$|[_-])/;
+  const flyNumber = /fly\d/i.test(fly)
+    ? /(fly)(\d+)/i
+    : alone.test(fly)
+      ? alone
+      : /()(\d+)/;
+  const nextFlyName = /\d/.test(fly) ? bump(fly, flyNumber, (n) => n + 1) : `${fly}2`;
+  const firstTake = /\d/.test(take) ? bump(take, /()(\d+)(?!.*\d)/, () => 1) : take;
+  return { experiment, fly: nextFlyName, take: firstTake };
+}
 
 function trimNum(v) {
   return String(Math.round(v * 1000) / 1000);
@@ -109,9 +141,25 @@ export class RecordTab {
     // The server composes save_dir from these two halves.
     this.recordDir = document.getElementById("record-dir");
     this.relativeDir = document.getElementById("relative-dir");
+    this.relativeRow = document.getElementById("relative-row");
+    this.takeName = document.getElementById("take-name");
+    this.takeParts = {
+      experiment: document.getElementById("take-experiment"),
+      fly: document.getElementById("take-fly"),
+      take: document.getElementById("take-take"),
+    };
+    for (const input of Object.values(this.takeParts)) {
+      input.addEventListener("change", () => this._commitTakeName());
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") input.blur();
+      });
+    }
+    document.getElementById("next-fly-btn").addEventListener("click", () => {
+      const parts = splitRecording(this.settings?.relative_directory);
+      if (parts) this._commitTakeName(nextFly(parts));
+    });
     this.diskFree = document.getElementById("disk-free");
-    this.advancedToggle = document.getElementById("record-advanced-toggle");
-    this.advancedSection = document.getElementById("record-advanced");
+    this.sections = [...document.querySelectorAll("#record-advanced details[data-section]")];
     this.trigger = document.getElementById("trigger-source");
     this.format = document.getElementById("format");
     // One encoder-params box per save method (see _syncSaveMethodFields).
@@ -180,7 +228,7 @@ export class RecordTab {
       )
     );
     this.button.addEventListener("click", () => this._onButton());
-    this._initAdvancedToggle();
+    this._initSections();
 
     // Re-render between telemetry updates; this only reads `this.deadline`.
     setInterval(() => {
@@ -191,15 +239,13 @@ export class RecordTab {
   }
 
   // The rows inside keep their own `hidden` state (_syncSaveMethodFields).
-  _initAdvancedToggle() {
-    const open = store.get(ADV_KEY) === "1";
-    this.advancedToggle.checked = open;
-    this.advancedSection.hidden = !open;
-    this.advancedToggle.addEventListener("change", () => {
-      const shown = this.advancedToggle.checked;
-      this.advancedSection.hidden = !shown;
-      store.set(ADV_KEY, shown ? "1" : "0");
-    });
+  _initSections() {
+    // Closed by default: only what a recording needs shows at first.
+    for (const section of this.sections) {
+      const key = SECTION_KEY + section.dataset.section;
+      section.open = store.get(key) === "1";
+      section.addEventListener("toggle", () => store.set(key, section.open ? "1" : "0"));
+    }
   }
 
   // ------------------------------------------------------ server -> UI
@@ -237,6 +283,7 @@ export class RecordTab {
     ]) {
       if (KINDS.path.accepts(s[key]) && canSet(input)) input.value = s[key];
     }
+    this._showTakeName(s.relative_directory, canSet);
     // max_nvenc_sessions is null when auto-detecting the GPU cap, else an int cap.
     if (
       "max_nvenc_sessions" in s &&
@@ -526,6 +573,39 @@ export class RecordTab {
     if (this.settings && path === this.settings.record_directory) return;
     const ok = await this._put({ record_directory: path }, [this.recordDir]);
     if (ok) this._validateRecordDir();
+  }
+
+  // Experiment / fly / take fields when the folder has those three levels,
+  // else the raw relative-directory field.
+  _showTakeName(relative, canSet = () => true) {
+    const parts = splitRecording(relative);
+    this.takeName.hidden = !parts;
+    this.relativeRow.hidden = Boolean(parts);
+    if (!parts) return;
+    for (const [key, input] of Object.entries(this.takeParts)) {
+      if (canSet(input)) input.value = parts[key];
+    }
+  }
+
+  _commitTakeName(parts) {
+    const p = parts || {
+      experiment: this.takeParts.experiment.value.trim(),
+      fly: this.takeParts.fly.value.trim(),
+      take: this.takeParts.take.value.trim(),
+    };
+    if (!p.experiment || !p.fly || !p.take) {
+      this.notify("warning", "Experiment, fly and take all need a name");
+      this._showTakeName(this.settings?.relative_directory);
+      return;
+    }
+    if ([p.experiment, p.fly, p.take].some((part) => /[\\/]/.test(part))) {
+      this.notify("warning", "Experiment, fly and take are each one folder name (no /)");
+      this._showTakeName(this.settings?.relative_directory);
+      return;
+    }
+    const rel = `${p.experiment}/${p.fly}/${p.take}`;
+    if (this.settings && rel === this.settings.relative_directory) return;
+    this._put({ relative_directory: rel }, Object.values(this.takeParts));
   }
 
   _commitRelativeDir() {

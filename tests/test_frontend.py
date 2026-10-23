@@ -337,14 +337,14 @@ def test_max_nvenc_sessions_change_rounds_to_int(page):
 # --- advanced-options toggle ----------------------------------------------- #
 
 
-def _flip_advanced(page, on: bool) -> None:
+def _toggle_section(page, name: str, on: bool) -> None:
     page.evaluate(
-        """(on) => {
-            const t = document.getElementById('record-advanced-toggle');
-            t.checked = on;
-            t.dispatchEvent(new Event('change'));
+        """([name, on]) => {
+            const d = document.querySelector(`details[data-section="${name}"]`);
+            d.open = on;
+            d.dispatchEvent(new Event('toggle'));
         }""",
-        on,
+        [name, on],
     )
 
 
@@ -352,8 +352,21 @@ def _flip_advanced(page, on: bool) -> None:
 # regression that pushes an essential into the advanced block (or leaves an
 # advanced knob among the essentials) fails a named case -- not just the two-field
 # spot-check the toggle test would otherwise give.
-ESSENTIAL_IDS = ["duration-value", "fps", "record-dir", "relative-dir", "transfer-dir"]
+# The base and transfer directories come from the rig and the user: they sit
+# under Advanced, for a one-session change.
+ESSENTIAL_IDS = [
+    "user-select",
+    "duration-value",
+    "fps",
+    "take-experiment",
+    "take-fly",
+    "take-take",
+    "next-fly-btn",
+    "relative-dir",
+]
 ADVANCED_IDS = [
+    "record-dir",
+    "transfer-dir",
     "trigger-source",
     "preview-trigger-source",
     "format",
@@ -369,11 +382,18 @@ ADVANCED_IDS = [
 ]
 
 
-def test_advanced_section_hidden_by_default(page):
-    """The advanced knobs start collapsed and the switch is off."""
+def test_every_section_starts_collapsed(page):
+    """Only what a recording needs shows at first: each section is closed."""
     make_tab(page)
-    assert prop(page, "#record-advanced-toggle", "e => e.checked") is False
-    assert prop(page, "#record-advanced", "e => e.hidden") is True
+    opened = page.eval_on_selector_all(
+        "#record-advanced details", "els => els.map(e => [e.dataset.section, e.open])"
+    )
+    assert opened == [
+        ["paths", False],
+        ["triggering", False],
+        ["encoding", False],
+        ["postprocessing", False],
+    ]
 
 
 @pytest.mark.parametrize("field_id", ESSENTIAL_IDS)
@@ -595,25 +615,18 @@ def test_grid_keyboard_helpers_drive_selection_and_zoom(page):
     assert result["views"] > 0  # zoom/maximize pushed a fresh view spec
 
 
-def test_advanced_toggle_reveals_and_hides_and_persists(page):
-    """Flipping the switch shows/hides the advanced block and remembers the
-    choice in localStorage.
-    """
+def test_a_section_remembers_being_opened(page):
+    """Opening a section is remembered per browser, and restored."""
     make_tab(page)
-    _flip_advanced(page, True)
-    assert prop(page, "#record-advanced", "e => e.hidden") is False
-    assert page.evaluate("() => localStorage.getItem('octacam.record.advanced')") == "1"
-    _flip_advanced(page, False)
-    assert prop(page, "#record-advanced", "e => e.hidden") is True
-    assert page.evaluate("() => localStorage.getItem('octacam.record.advanced')") == "0"
-
-
-def test_advanced_state_restored_from_storage(page):
-    """A remembered "open" choice is restored when the tab is (re)constructed."""
-    page.evaluate("() => localStorage.setItem('octacam.record.advanced', '1')")
+    _toggle_section(page, "encoding", True)
+    key = "octacam.record.section.encoding"
+    assert page.evaluate(f"() => localStorage.getItem('{key}')") == "1"
+    _toggle_section(page, "encoding", False)
+    assert page.evaluate(f"() => localStorage.getItem('{key}')") == "0"
+    page.evaluate(f"() => localStorage.setItem('{key}', '1')")
     make_tab(page)
-    assert prop(page, "#record-advanced-toggle", "e => e.checked") is True
-    assert prop(page, "#record-advanced", "e => e.hidden") is False
+    assert prop(page, 'details[data-section="encoding"]', "e => e.open") is True
+    assert prop(page, 'details[data-section="paths"]', "e => e.open") is False
 
 
 # --- update-available banner (update.js) ----------------------------------- #
@@ -1805,3 +1818,265 @@ def test_jobs_notice_counts_warnings_and_reports_them_at_the_end(page):
         "Background processing finished with 2 warnings \u2014 first: WARNING: ThorSync"
     )
     assert "octacam jobs attach j1" in message
+
+
+# --- users, recording name, readiness ---------------------------------------- #
+
+
+def test_the_recording_name_is_experiment_fly_take_with_next_fly(page):
+    sent = []
+    page.route(
+        "**/api/settings",
+        lambda route: (
+            sent.append(json.loads(route.request.post_data or "{}")),
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"relative_directory": sent[-1]["relative_directory"]}),
+            ),
+        ),
+    )
+    make_tab(page)
+    shown = page.evaluate(
+        """() => {
+            window.__tab.setConnected(true);
+            window.__tab.applySettings({relative_directory: '261016_Exp/Fly2/005'});
+            const v = (id) => document.getElementById(id).value;
+            return {
+                parts: [v('take-experiment'), v('take-fly'), v('take-take')],
+                split: !document.getElementById('take-name').hidden,
+                raw: !document.getElementById('relative-row').hidden,
+            };
+        }"""
+    )
+    assert shown == {
+        "parts": ["261016_Exp", "Fly2", "005"],
+        "split": True,
+        "raw": False,
+    }
+    page.click("#next-fly-btn")
+    page.wait_for_function("() => document.getElementById('take-fly').value === 'Fly3'")
+    assert sent[-1] == {"relative_directory": "261016_Exp/Fly3/001"}
+    # A folder without three levels keeps the raw field.
+    raw = page.evaluate(
+        """() => {
+            window.__tab.applySettings({relative_directory: 'test_take'});
+            return !document.getElementById('relative-row').hidden
+                && document.getElementById('take-name').hidden;
+        }"""
+    )
+    assert raw
+
+
+def test_next_fly_logic(page):
+    page.goto(page.url)
+    result = page.evaluate(
+        """async () => {
+            const m = await import('./js/record.js');
+            return [
+                m.nextFly({experiment: 'E', fly: 'Fly9', take: '012'}),
+                m.nextFly({experiment: 'E', fly: 'fly', take: 'take3'}),
+                m.splitRecording('E/Fly1/001'),
+                m.splitRecording('a/b/Fly1/001'),
+            ];
+        }"""
+    )
+    assert result == [
+        {"experiment": "E", "fly": "Fly10", "take": "001"},
+        {"experiment": "E", "fly": "fly2", "take": "take1"},
+        {"experiment": "E", "fly": "Fly1", "take": "001"},
+        # Deeper: the raw field (Tommy's review: the 2P walk expects
+        # <day>/<fly>/<take>, so the Experiment field holds one folder).
+        None,
+    ]
+
+
+def test_experiment_fly_and_take_are_one_folder_each(page):
+    make_tab(page)
+    warned = page.evaluate(
+        """() => {
+            const tab = window.__tab;
+            tab.applySettings({relative_directory: 'E/Fly1/001'});
+            const notes = [];
+            tab.notify = (level, message) => notes.push(message);
+            let put = null;
+            tab._put = (partial) => { put = partial; };
+            tab._commitTakeName({experiment: 'a/b', fly: 'Fly1', take: '001'});
+            return {notes, put};
+        }"""
+    )
+    assert warned["put"] is None
+    assert any("one folder name" in n for n in warned["notes"])
+
+
+def test_next_fly_bumps_the_fly_number_not_a_genotype_after_it(page):
+    page.goto(page.url)
+    flies = page.evaluate(
+        """async () => {
+            const m = await import('./js/record.js');
+            const next = (fly) => m.nextFly({experiment: 'E', fly, take: '3'}).fly;
+            return ['Fly1_GCaMP6s', 'Fly2_MDN3', 'R57C10_Fly03', 'P9_fly2',
+                    'Larva1_x2', 'R57C10_1', 'R57C10-07', '3_MDN'].map(next);
+        }"""
+    )
+    assert flies == [
+        "Fly2_GCaMP6s",
+        "Fly3_MDN3",
+        "R57C10_Fly04",
+        "P9_fly3",
+        "Larva2_x2",
+        # A Janelia line name keeps its digits (Tommy's review).
+        "R57C10_2",
+        "R57C10-08",
+        "4_MDN",
+    ]
+
+
+_USERS = {
+    "users": [
+        {
+            "initials": "MD",
+            "name": "Matthias",
+            "transfer_directory": "/nas/MD/BallPushing",
+            "plugins": {"twophoton": {"source": "/share/MD"}},
+        }
+    ],
+    "active": "",
+    "discovered": ["MA"],
+    "user_options": {"twophoton": {"source": "Your 2P data on the share"}},
+}
+
+
+def test_users_are_picked_and_added_from_the_record_tab(static_server, browser):
+    page = browser.new_page()
+    calls = []
+    state = {"users": json.loads(json.dumps(_USERS))}
+
+    def json_route(builder):
+        def handle(route):
+            calls.append((route.request.method, route.request.url.split("/api/")[1]))
+            body = builder(route)
+            route.fulfill(
+                status=200, content_type="application/json", body=json.dumps(body)
+            )
+
+        return handle
+
+    def select(route):
+        active = json.loads(route.request.post_data)["initials"]
+        state["users"]["active"] = active
+        own = {u["initials"]: u["transfer_directory"] for u in state["users"]["users"]}
+        settings = {"user": active, "transfer_directory": own.get(active, "")}
+        return {**state["users"], "settings": settings}
+
+    def add(route):
+        new = json.loads(route.request.post_data)
+        state["users"]["users"].append({**new, "name": new["name"]})
+        state["users"]["discovered"] = []
+        state["users"]["active"] = new["initials"]
+        return {**state["users"], "settings": {"user": new["initials"]}}
+
+    page.route("**/api/**", json_route(lambda r: {}))
+    page.route("**/api/system", json_route(lambda r: _system_payload(ready=True)))
+    page.route("**/api/state", json_route(lambda r: _state_payload(ready=True)))
+    page.route(
+        "**/api/users",
+        json_route(lambda r: add(r) if r.request.method == "POST" else state["users"]),
+    )
+    page.route("**/api/users/select", json_route(select))
+    page.route(
+        "**/api/users/suggest*",
+        json_route(
+            lambda r: {
+                "transfer_directory": "/nas/MA",
+                "transfer_status": "ok",
+                "plugins": {
+                    "twophoton": {"source": {"path": "/share/MA", "status": "ok"}}
+                },
+            }
+        ),
+    )
+    page.route("**/api/paths/status*", json_route(lambda r: {"status": "ok"}))
+    page.route(
+        "**/api/ready*",
+        json_route(
+            lambda r: {
+                "checks": [
+                    {"status": "ok", "label": "Cameras", "detail": "1 open"},
+                    {
+                        "status": "warn",
+                        "label": "twophoton",
+                        "detail": "ThorSync stops after 320 s",
+                    },
+                ]
+            }
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => document.querySelectorAll('#user-select option').length > 2"
+        )
+        labels = page.eval_on_selector_all(
+            "#user-select option", "els => els.map(e => e.textContent)"
+        )
+        assert labels == [
+            "Choose who you are\N{HORIZONTAL ELLIPSIS}",
+            "MD \N{EM DASH} Matthias",
+            "MA (on the NAS \N{EM DASH} set up\N{HORIZONTAL ELLIPSIS})",
+            "+ Add yourself\N{HORIZONTAL ELLIPSIS}",
+        ]
+        # The strip says what needs attention before recording.
+        page.wait_for_function("() => !document.getElementById('ready-strip').hidden")
+        strip = page.text_content("#ready-strip")
+        assert "1 thing to check before recording" in strip
+        assert "ThorSync stops after 320 s" in strip
+
+        page.select_option("#user-select", "MD")
+        page.wait_for_function(
+            "() => document.getElementById('user-hint').title === '/nas/MD/BallPushing'"
+        )
+        assert ("POST", "users/select") in calls
+        # Paths say they follow the user, and when they were changed.
+        assert page.text_content("#paths-source") == "\N{EM DASH} from MD"
+        assert page.eval_on_selector("#paths-reset", "e => e.hidden")
+        page.evaluate(
+            """() => window.__pushWs({type: 'settings', user: 'MD',
+                transfer_directory: '/elsewhere', relative_directory: 'a/b/001'})"""
+        )
+        page.wait_for_function(
+            "() => document.getElementById('paths-source').textContent"
+            ".includes('changed for this session')"
+        )
+        assert not page.eval_on_selector("#paths-reset", "e => e.hidden")
+        page.evaluate("() => document.getElementById('paths-reset').click()")
+        page.wait_for_function(
+            "() => document.getElementById('paths-source').textContent"
+            ".includes('from MD')"
+        )
+
+        # A NAS folder not set up yet opens the dialog with its folders guessed.
+        page.evaluate(
+            "() => { document.getElementById('record-fields').disabled = false; }"
+        )
+        page.select_option("#user-select", "__new__:MA")
+        page.wait_for_function(
+            "() => document.getElementById('user-transfer').value === '/nas/MA'"
+        )
+        assert page.input_value("#user-initials") == "MA"
+        assert page.input_value("#user-twophoton-source") == "/share/MA"
+        page.wait_for_function(
+            "() => document.querySelector('[data-status-for=user-transfer]')"
+            ".textContent === '\N{CHECK MARK}'"
+        )
+        page.fill("#user-name", "Someone")
+        page.click("#user-create")
+        page.wait_for_function(
+            "() => document.getElementById('user-select').value === 'MA'"
+        )
+        assert page.eval_on_selector(
+            "#user-dialog", "e => e.classList.contains('hidden')"
+        )
+    finally:
+        page.close()

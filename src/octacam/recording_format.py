@@ -321,6 +321,8 @@ def build_recording_summary(
         "record_form": settings.record_form,
         # Resolved now, so a transfer on a later day never re-templates the date.
         "relative_directory": settings.relative_save_dir(),
+        # Who recorded it (the rig config's [users] key), or None.
+        "user": settings.user or None,
         "pulse_train": (
             {**pulse_clock.to_dict(), "primed": primed_pulses}
             if pulse_clock is not None

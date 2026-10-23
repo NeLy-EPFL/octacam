@@ -18,6 +18,7 @@ from octacam.cli import (
     gui,
     process,
     record,
+    users,
     wizard,
 )
 from octacam.cli._common import stderr_console
@@ -125,6 +126,16 @@ cache_app.command("path")(admin.cache_path)
 cache_app.command("info")(admin.cache_info)
 cache_app.command("clear")(admin.cache_clear)
 app.add_typer(cache_app, name="cache")
+
+users_app = typer.Typer(
+    no_args_is_help=True,
+    rich_markup_mode="markdown",
+    help="The rig's users: who records and where their data goes.",
+    context_settings=_SETTINGS,
+)
+users_app.command("list")(users.users_list)
+users_app.command("add")(users.users_add)
+app.add_typer(users_app, name="users")
 
 for _name, _group in plugins.command_groups():
     app.add_typer(_group, name=_name)
