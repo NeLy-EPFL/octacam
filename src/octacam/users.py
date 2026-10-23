@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import tomllib
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -217,10 +218,16 @@ def save_memory(config_dir: str | Path, memory: UserMemory) -> None:
 
 
 def settings_for_user(
-    config: OctacamConfig, initials: str, relative_directory: str | None = None
+    config: OctacamConfig,
+    initials: str,
+    relative_directory: str | None = None,
+    *,
+    pinned: Collection[str] = (),
 ) -> dict:
     """The settings changes choosing *initials* makes: the user, their
     transfer directory (else the rig's), and their remembered folder name.
+    *pinned*: the config keys the launch's `--set` gave; those win over the
+    user's (`transfer.directory`: a test take to /tmp stays there).
     ValueError for an unknown user ("" clears the choice).
     """
     if initials and initials not in config.users:
@@ -228,10 +235,11 @@ def settings_for_user(
         raise ValueError(f"unknown user {initials!r} (users: {known})")
     user = config.users.get(initials)
     rig_transfer = config.transfer.directory if config.transfer else ""
-    changes: dict = {
-        "user": initials,
-        "transfer_directory": (user.transfer_directory if user else "") or rig_transfer,
-    }
+    changes: dict = {"user": initials}
+    if "transfer.directory" not in pinned:
+        changes["transfer_directory"] = (
+            user.transfer_directory if user else ""
+        ) or rig_transfer
     if relative_directory:
         changes["relative_directory"] = relative_directory
     return changes

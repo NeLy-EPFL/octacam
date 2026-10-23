@@ -2093,6 +2093,7 @@ def test_next_fly_logic(page):
             return [
                 m.nextFly({experiment: 'E', fly: 'Fly9', take: '012'}),
                 m.nextFly({experiment: 'E', fly: 'fly', take: 'take3'}),
+                m.splitRecording('E/Fly1/001'),
                 m.splitRecording('a/b/Fly1/001'),
             ];
         }"""
@@ -2100,8 +2101,29 @@ def test_next_fly_logic(page):
     assert result == [
         {"experiment": "E", "fly": "Fly10", "take": "001"},
         {"experiment": "E", "fly": "fly2", "take": "take1"},
-        {"experiment": "a/b", "fly": "Fly1", "take": "001"},
+        {"experiment": "E", "fly": "Fly1", "take": "001"},
+        # Deeper: the raw field (Tommy's review: the 2P walk expects
+        # <day>/<fly>/<take>, so the Experiment field holds one folder).
+        None,
     ]
+
+
+def test_experiment_fly_and_take_are_one_folder_each(page):
+    make_tab(page)
+    warned = page.evaluate(
+        """() => {
+            const tab = window.__tab;
+            tab.applySettings({relative_directory: 'E/Fly1/001'});
+            const notes = [];
+            tab.notify = (level, message) => notes.push(message);
+            let put = null;
+            tab._put = (partial) => { put = partial; };
+            tab._commitTakeName({experiment: 'a/b', fly: 'Fly1', take: '001'});
+            return {notes, put};
+        }"""
+    )
+    assert warned["put"] is None
+    assert any("one folder name" in n for n in warned["notes"])
 
 
 def test_next_fly_bumps_the_fly_number_not_a_genotype_after_it(page):
@@ -2111,7 +2133,7 @@ def test_next_fly_bumps_the_fly_number_not_a_genotype_after_it(page):
             const m = await import('./js/record.js');
             const next = (fly) => m.nextFly({experiment: 'E', fly, take: '3'}).fly;
             return ['Fly1_GCaMP6s', 'Fly2_MDN3', 'R57C10_Fly03', 'P9_fly2',
-                    'Larva1_x2'].map(next);
+                    'Larva1_x2', 'R57C10_1', 'R57C10-07', '3_MDN'].map(next);
         }"""
     )
     assert flies == [
@@ -2120,6 +2142,10 @@ def test_next_fly_bumps_the_fly_number_not_a_genotype_after_it(page):
         "R57C10_Fly04",
         "P9_fly3",
         "Larva2_x2",
+        # A Janelia line name keeps its digits (Tommy's review).
+        "R57C10_2",
+        "R57C10-08",
+        "4_MDN",
     ]
 
 

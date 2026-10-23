@@ -199,7 +199,7 @@ def gui(
 
     from octacam import locks, session_cache
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
-    from octacam.config import RecordingSettings, load_config_dir
+    from octacam.config import RecordingSettings, load_config_dir, override_keys
     from octacam.controller import RecordingController
     from octacam.plugins import build_plugins
     from octacam.web.app import create_app
@@ -299,7 +299,7 @@ def gui(
     app = None
     init_thread: threading.Thread | None = None
     try:
-        app = create_app(controller, config, user=user)
+        app = create_app(controller, config, user=user, pinned=override_keys(sets))
         init_thread = threading.Thread(
             target=_initialize_rig,
             args=(app.state.app_state,),

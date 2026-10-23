@@ -161,7 +161,7 @@ def _dumps(data: dict) -> str:
     for header, table in data.items():
         if header in known:
             continue
-        if isinstance(table, dict) and table:
+        if isinstance(table, dict):  # empty too: `[emptytable]` is a key
             block(header, table)
         elif table_array(table):
             for item in table:

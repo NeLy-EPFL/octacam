@@ -2,16 +2,24 @@
 
 import json
 import logging
+import time
 import tomllib
 
 import pytest
 from fastapi.testclient import TestClient
+from helpers import wait_until
 from typer.testing import CliRunner
 
 from octacam import users
 from octacam.cameras import CameraSystem
 from octacam.cli import app
-from octacam.config import RecordingSettings, find_config_file, parse_config
+from octacam.config import (
+    RecordingSettings,
+    apply_overrides,
+    find_config_file,
+    override_keys,
+    parse_config,
+)
 from octacam.controller import RecordingController
 from octacam.web.app import create_app
 
@@ -109,6 +117,10 @@ def test_choosing_a_user_sets_their_destination(rig):
     assert users.settings_for_user(config, "")["transfer_directory"] == f"{nas}/default"
     with pytest.raises(ValueError, match="unknown user 'XY'"):
         users.settings_for_user(config, "XY")
+    # An explicit --set transfer.directory wins over the user's (Tommy's review:
+    # a test take to /tmp went to the user's NAS folder).
+    pinned = users.settings_for_user(config, "MD", pinned={"transfer.directory"})
+    assert pinned == {"user": "MD"}
 
 
 @pytest.fixture
@@ -291,7 +303,7 @@ def test_headless_record_says_who_it_records_as(rig, monkeypatch, caplog, explic
 
     import octacam.cli.record as record_cli
 
-    config_dir, nas, _ = rig
+    config_dir, nas, share = rig
     users.save_memory(config_dir, users.UserMemory(last_user="MD"))
 
     def no_rig(*args, **kwargs):
@@ -308,4 +320,71 @@ def test_headless_record_says_who_it_records_as(rig, monkeypatch, caplog, explic
     message = said.getMessage()
     assert "Matthias Durrieu" in message
     assert f"transfer to {nas / 'MD' / 'BallPushing_Imaging'}" in message
+    assert f"twophoton source {share / 'MD'}" in message
     assert ("the last user on this machine" in message) is not explicit
+
+
+def test_headless_record_keeps_an_explicit_transfer_directory(
+    rig, monkeypatch, caplog, tmp_path
+):
+    import typer
+
+    import octacam.cli.record as record_cli
+
+    config_dir, _nas, _ = rig
+
+    def no_rig(*args, **kwargs):
+        raise typer.Exit(3)
+
+    monkeypatch.setattr(record_cli, "open_rig", no_rig)
+    monkeypatch.setattr("octacam.cli._setup_logging", lambda: None)
+    caplog.set_level(logging.INFO, logger="octacam")
+    test_dest = tmp_path / "test-dest"
+    argv = ["record", str(config_dir), "--user", "MD"]
+    argv += ["--set", f"transfer.directory={test_dest}"]
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 3, result.output
+    (said,) = [r for r in caplog.records if "Recording as MD" in r.getMessage()]
+    assert f"transfer to {test_dest}," in said.getMessage()
+
+
+def test_the_gui_keeps_an_explicit_transfer_directory(rig, tmp_path):
+    config_dir, _nas, _share = rig
+    test_dest = str(tmp_path / "test-dest")
+    sets = [f"transfer.directory={test_dest}"]
+    config = apply_overrides(parse_config(find_config_file(config_dir)), sets)
+    controller = RecordingController(
+        CameraSystem.pending(),
+        RecordingSettings.from_config(config),
+        config_dir=config_dir,
+    )
+    application = create_app(controller, config, user="MD", pinned=override_keys(sets))
+    with TestClient(application) as test_client:
+        assert controller.get_settings().user == "MD"
+        assert controller.get_settings().transfer_directory == test_dest
+        picked = test_client.post("/api/users/select", json={"initials": "MD"})
+        assert picked.json()["settings"]["transfer_directory"] == test_dest
+    controller.close()
+
+
+def test_a_hung_nas_does_not_stall_the_user_list(client, monkeypatch):
+    # Tommy's review: the cache bounded how often the scan ran, not whether a
+    # request waited on it; a hung CIFS mount blocked one request every 20 s.
+    import threading
+
+    import octacam.web.users as web_users
+
+    monkeypatch.setattr(web_users, "DISCOVER_WAIT_S", 0.2)
+    release = threading.Event()
+
+    def hung(_users):
+        release.wait(10)
+        return ["ZZ"]
+
+    monkeypatch.setattr(users, "discover_initials", hung)
+    started = time.monotonic()
+    listing = client.get("/api/users").json()
+    assert time.monotonic() - started < 2.0
+    assert listing["discovered"] == []  # no scan finished yet
+    release.set()
+    wait_until(lambda: client.get("/api/users").json()["discovered"] == ["ZZ"])

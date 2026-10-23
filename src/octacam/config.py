@@ -795,6 +795,15 @@ class ConfigError(Exception):
 _OVERRIDE = re.compile(r"([A-Za-z_][\w.]*)=(.*)", re.DOTALL)
 
 
+def override_keys(overrides: Sequence[str] | None) -> frozenset[str]:
+    """The dotted keys `KEY=VALUE` overrides set (malformed ones left out)."""
+    return frozenset(
+        match.group(1)
+        for item in overrides or ()
+        if (match := _OVERRIDE.fullmatch(item)) is not None
+    )
+
+
 def apply_overrides(config: OctacamConfig, overrides: Sequence[str]) -> OctacamConfig:
     """A copy of `config` with `KEY=VALUE` overrides applied, validated as a whole.
 
