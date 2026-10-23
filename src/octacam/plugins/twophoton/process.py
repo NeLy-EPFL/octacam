@@ -32,7 +32,9 @@ from octacam.plugins.twophoton.settings import TwoPhotonSettings, settings_for
 from octacam.plugins.twophoton.takes import (
     current_take_dest,
     is_armed,
+    match_record,
     match_start_s,
+    pending_record,
     start_s,
     stop_idle_s,
     stopped_early,
@@ -246,6 +248,14 @@ class TwoPhotonSteps(ProcessSteps):
         for folder in target.folders:
             summary = summary_of(folder)
             if not is_armed(folder, summary):
+                continue
+            if match_record(folder).get("matched") and pending_record(folder) is None:
+                # Paired by an earlier run (a resumed or repeated one): its
+                # share folders are gone, so re-pairing would find nothing and
+                # mark it pending. Only its render may still be missing.
+                dest = ctx.dests.get(folder)
+                if dest is not None:
+                    self._renders.append(_Render(dest, start_s(summary), settings))
                 continue
             start = match_start_s(folder, summary)
             duration_s = summary.get("duration_s")

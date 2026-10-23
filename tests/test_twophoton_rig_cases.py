@@ -364,6 +364,35 @@ def test_process_verifies_twophoton_match_via_real_signal(tmp_path):
     assert record["matched"][0]["confidence"] == "verified"
 
 
+def test_a_repeated_process_run_keeps_a_paired_take_as_it_is(tmp_path):
+    # Real 2026-10-23: the 10-22 job was cancelled during its grids and resumed.
+    # Its share folders were gone, so re-pairing found nothing and would have
+    # marked every take pending, still waiting for 2P data.
+    import shutil
+
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    sync = _make_verifiable_sync_folder_2p(
+        source_root, "MB247_CI63", "SyncData102", mtime=take_start + 1, camera_frames=42
+    )
+    folder = _armed_recording(
+        tmp_path / "rec",
+        source_root=source_root,
+        dest_root=dest_root,
+        take_start=take_start,
+        summary={"cameras": [{"name": "camera_LF", "frames": 42}]},
+    )
+    assert _process(folder).exit_code == 0
+    record = (dest_root / folder.name / "twophoton_match.json").read_text()
+    shutil.rmtree(sync)  # the share cleared after the verified copy
+    result = _process(folder)
+    assert result.exit_code == 0, result.output
+    assert "no 2P data found" not in result.output
+    assert not list(folder.rglob("twophoton_pending.json"))
+    assert (dest_root / folder.name / "twophoton_match.json").read_text() == record
+
+
 def test_process_skips_twophoton_when_explicitly_not_armed(tmp_path):
     # Schema 4 with the checkbox recorded unchecked skips outright, unlike a
     # pre-feature recording that never had the chance to say "armed".
