@@ -1,5 +1,6 @@
-"""triggerbox plugin (protocol v2): wire format, resolve, hooks, REST, link."""
+"""triggerbox plugin (protocol v4): wire format, resolve, hooks, REST, link."""
 
+import importlib.util
 import logging
 import queue
 import re
@@ -23,16 +24,22 @@ from octacam.plugins.base import PluginManager
 from octacam.plugins.triggerbox import protocol
 from octacam.plugins.triggerbox.plugin import TriggerboxPlugin
 from octacam.plugins.triggerbox.protocol import (
+    BANNER,
+    DIM_FULL_SCALE,
     PIN_LABELS,
     PROTOCOL_VERSION,
+    REJECT_REASONS,
     ArmSpec,
     LightChannel,
     TriggerboxLink,
+    dim_duty,
+    dim_frame,
     pin_id,
 )
 from octacam.plugins.triggerbox.train import period_us, plan_train, pulse_count
 
 ARM_MAGIC = 0xA5
+DIM_MAGIC = 0xD1
 CANCEL_MAGIC = 0xCA
 IDENTIFY_MAGIC = 0x3F
 DEVICE = "/dev/ttyACM0"
@@ -41,6 +48,9 @@ _HDR = struct.Struct("<BBH")
 _FIXED = struct.Struct("<HIBB")
 _CAM = struct.Struct("<BHH")
 _LIGHT = struct.Struct("<BBIIII")
+_DIM = struct.Struct("<BH")
+
+FIRMWARE_DIR = Path(__file__).resolve().parents[1] / "arduino" / "triggerbox"
 
 
 class _Broadcasts:
@@ -92,6 +102,19 @@ def _decode_frame(raw: bytes) -> dict:
     }
 
 
+def _decode_dim(raw: bytes) -> tuple[str, int]:
+    """A dim frame's `(pin label, duty)`, checking its framing and checksum."""
+    magic, version, payload_len = _HDR.unpack_from(raw, 0)
+    assert (magic, version, payload_len) == (DIM_MAGIC, PROTOCOL_VERSION, 3)
+    assert len(raw) == 4 + payload_len + 1
+    checksum = 0
+    for b in raw[1:-1]:
+        checksum ^= b
+    assert checksum == raw[-1], "checksum mismatch"
+    pid, duty = _DIM.unpack_from(raw, 4)
+    return PIN_LABELS[pid], duty
+
+
 # ---------------------------------------------------------------------------
 # FakeLink -- stands in for TriggerboxLink without any serial port
 # ---------------------------------------------------------------------------
@@ -100,7 +123,8 @@ def _decode_frame(raw: bytes) -> dict:
 class FakeLink(TriggerboxLink):
     """The real link over no port: it records what is written and answers like
     the board, 'R' to an arm (`E<reject_code>` when that is set), 'D' once a
-    finite run is over, 'C' to a cancel, and `banner` to identify. Answers come
+    finite run is over, 'P' to a dim (`E<dim_reject_code>`), 'C' to a cancel,
+    and `banner` to identify. Answers come
     at once, or from a timer `delay_s` later ('D' after the run's real
     duration); `acks = False` silences the board.
     """
@@ -113,6 +137,7 @@ class FakeLink(TriggerboxLink):
         self.fail_writes = False  # simulate a wedged link (write returns False)
         self.acks = True
         self.reject_code: str | None = None
+        self.dim_reject_code: str | None = None
         self.banner: str | None = None
         self.delay_s = delay_s
         self.opens = 0
@@ -158,6 +183,9 @@ class FakeLink(TriggerboxLink):
                 duration_ms = _decode_frame(data)["duration_ms"]
                 if duration_ms:
                     self._answer("D", duration_ms / 1000)
+        elif data[0] == DIM_MAGIC:
+            code = self.dim_reject_code
+            self._answer("P" if code is None else "E" + code)
         elif data == bytes([CANCEL_MAGIC]):
             self._answer("C")
         return True
@@ -201,6 +229,14 @@ def _last_arm(link: FakeLink) -> dict:
     frames = [f for f in link.snapshot() if f and f[0] == ARM_MAGIC]
     assert frames, "no arm packet was sent"
     return _decode_frame(frames[-1])
+
+
+def _arms(link: FakeLink) -> list[bytes]:
+    return [f for f in link.snapshot() if f and f[0] == ARM_MAGIC]
+
+
+def _dims(link: FakeLink) -> list[tuple[str, int]]:
+    return [_decode_dim(f) for f in link.snapshot() if f and f[0] == DIM_MAGIC]
 
 
 # ===========================================================================
@@ -251,6 +287,72 @@ def test_pin_labels_match_firmware_table():
         t.strip() for t in m.group(1).replace("\n", " ").split(",") if t.strip()
     )
     assert tokens == PIN_LABELS
+
+
+def _ino_constant(ino: str, name: str) -> str:
+    m = re.search(rf"constexpr\s+\w+\s+{name}(?:\[\])?\s*=\s*([^;]+);", ino)
+    assert m, f"{name} not found in triggerbox.ino"
+    return m.group(1).strip()
+
+
+def test_protocol_constants_match_firmware():
+    """The framing, version, dim scale and reject codes in protocol.py mirror
+    triggerbox.ino, and triggerbox_send.py builds the same frames.
+    """
+    ino = (FIRMWARE_DIR / "triggerbox.ino").read_text()
+    assert int(_ino_constant(ino, "kProtocolVersion")) == PROTOCOL_VERSION
+    assert _ino_constant(ino, "kVersion") == f'"{BANNER} {PROTOCOL_VERSION}"'
+    assert int(_ino_constant(ino, "kArmMagic"), 16) == protocol._ARM_MAGIC
+    assert int(_ino_constant(ino, "kDimMagic"), 16) == protocol._DIM_MAGIC
+    assert int(_ino_constant(ino, "kCancelMagic"), 16) == protocol._CANCEL_MAGIC
+    assert int(_ino_constant(ino, "kDimFull")) == DIM_FULL_SCALE
+    assert int(_ino_constant(ino, "kDimPayload")) == _DIM.size
+    # Every code the firmware sends has a reason the GUI can show.
+    assert set(re.findall(r"reject\('(.)'\)", ino)) == set(REJECT_REASONS)
+
+    spec = importlib.util.spec_from_file_location(
+        "triggerbox_send", FIRMWARE_DIR / "triggerbox_send.py"
+    )
+    assert spec and spec.loader
+    send = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(send)
+    assert send.PIN_LABELS == list(PIN_LABELS)
+    arm = ArmSpec(80, 1000, [(11, 500, 0)], [(3, 1, 0, 2500, 0, 0)])
+    assert send.build_arm(arm.fps, arm.duration_ms, arm.cameras, arm.lights) == (
+        arm.to_bytes()
+    )
+    assert send.build_dim(*send.parse_dim("D9,40")) == dim_frame("D9", dim_duty(40))
+
+
+def test_dim_frame_layout_and_checksum():
+    raw = dim_frame("D9", 1638)
+    assert raw[0] == DIM_MAGIC and raw[1] == PROTOCOL_VERSION
+    assert _decode_dim(raw) == ("D9", 1638)
+    with pytest.raises(ValueError):
+        dim_frame("D99", 0)
+
+
+@pytest.mark.parametrize(
+    ("percent", "duty"),
+    [
+        (0, 0),
+        (100, DIM_FULL_SCALE),
+        (50, 2048),
+        (-5, 0),
+        (250, DIM_FULL_SCALE),
+        (0.01, 0),
+        (0.02, 1),
+        (99.98, 4094),
+    ],
+)
+def test_dim_duty_clamps_and_rounds_to_12_bits(percent, duty):
+    assert dim_duty(percent) == duty
+
+
+@pytest.mark.parametrize("bad", [None, "bright", float("nan"), float("inf")])
+def test_dim_duty_refuses_a_level_that_is_not_a_number(bad):
+    with pytest.raises(ValueError):
+        dim_duty(bad)
 
 
 def test_pin_id_maps_known_pins():
@@ -879,14 +981,14 @@ def test_link_arms_are_serialized():
     t.start()
     try:
         assert in_send.wait(1.0)  # arm A is inside the locked send window
-        # A holds _arm_lock across the whole send+wait, so a concurrent acquire fails.
-        assert link._arm_lock.acquire(blocking=False) is False
+        # A holds the command lock across its send+wait: a concurrent acquire fails.
+        assert link._command_lock.acquire(blocking=False) is False
     finally:
         gate.set()
     t.join(timeout=2.0)
     # Once A finished the lock is free again.
-    assert link._arm_lock.acquire(blocking=False) is True
-    link._arm_lock.release()
+    assert link._command_lock.acquire(blocking=False) is True
+    link._command_lock.release()
 
 
 def test_on_recording_start_no_warning_when_ack_arrives(caplog):
@@ -1058,10 +1160,10 @@ def test_link_parses_status_and_reject_tokens(monkeypatch):
     link = TriggerboxLink(states.append, _noop)
     link.open(DEVICE, 115200)
     try:
-        fake.feed(b"R\nTRIGGERBOX 2\nEp\nD\nC\n")
+        fake.feed(b"R\nTRIGGERBOX 4\nEp\nD\nC\n")
         assert wait_until(lambda: states == ["R", "D", "C"])
         assert link.reject == "p"
-        assert link.identity == "TRIGGERBOX 2"
+        assert link.identity == "TRIGGERBOX 4"
     finally:
         link.close()
 
@@ -1104,11 +1206,11 @@ def test_link_is_open_false_when_never_opened():
 # ===========================================================================
 
 
-def test_verify_identity_accepts_triggerbox_v2():
+def test_verify_identity_accepts_triggerbox_v3():
     plugin, link = _plugin_with_fake()
-    link.banner = "TRIGGERBOX 2"
+    link.banner = "TRIGGERBOX 4"
     plugin._identify()
-    assert plugin.banner == "TRIGGERBOX 2" and plugin.firmware_ok is True
+    assert plugin.banner == "TRIGGERBOX 4" and plugin.firmware_ok is True
 
 
 def test_verify_identity_refuses_foreign_board(caplog):
@@ -1157,10 +1259,10 @@ def test_open_no_reset_for_healthy_board(monkeypatch):
         sp, "reset_usb_device", lambda device: (calls.append(device), (True, "x"))[1]
     )
     plugin, link = _plugin_with_fake()
-    link.banner = "TRIGGERBOX 2"
+    link.banner = "TRIGGERBOX 4"
     plugin._open()
     assert calls == []  # a healthy identify never triggers a reset
-    assert plugin.banner == "TRIGGERBOX 2"
+    assert plugin.banner == "TRIGGERBOX 4"
 
 
 # ===========================================================================
@@ -1197,7 +1299,7 @@ def _verify_with_banner(plugin: TriggerboxPlugin, link: FakeLink, banner):
 
 def test_identify_current_build_is_up_to_date():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, f"TRIGGERBOX 2 {plugin.needed_build}")
+    _verify_with_banner(plugin, link, f"TRIGGERBOX 4 {plugin.needed_build}")
     assert plugin.firmware_ok
     prov = plugin.firmware_provisioning()
     assert prov["state"] == "current"
@@ -1207,7 +1309,7 @@ def test_identify_current_build_is_up_to_date():
 def test_identify_outdated_build_still_arms():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(
-        plugin, link, "TRIGGERBOX 2"
+        plugin, link, "TRIGGERBOX 4"
     )  # no build tag = pre-fingerprint flash
     assert plugin.firmware_ok  # OUTDATED is still wire-compatible; arming stays enabled
     prov = plugin.firmware_provisioning()
@@ -1215,9 +1317,10 @@ def test_identify_outdated_build_still_arms():
     assert prov["needs_flash"] is True
 
 
-def test_identify_wrong_version_disables_arming():
+@pytest.mark.parametrize("banner", ["TRIGGERBOX 1 abc1234", "TRIGGERBOX 3 3b651cd9"])
+def test_identify_wrong_version_disables_arming(banner):
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "TRIGGERBOX 1 abc1234")
+    _verify_with_banner(plugin, link, banner)
     assert plugin.firmware_ok is False
     assert plugin.firmware_provisioning()["state"] == "wrong_version"
 
@@ -1254,7 +1357,7 @@ def no_source_checkout(monkeypatch):
 def test_no_source_falls_back_to_banner_compatibility(no_source_checkout):
     plugin, link = _plugin_with_fake()
     assert plugin.firmware_provisioning()["needed_build"] is None
-    _verify_with_banner(plugin, link, "TRIGGERBOX 2")
+    _verify_with_banner(plugin, link, "TRIGGERBOX 4")
     assert plugin.firmware_ok  # name+version compatible; no flash offer
     assert plugin.firmware_check is None
     _verify_with_banner(plugin, link, "TRIGGERBOX 1")
@@ -1265,7 +1368,7 @@ def test_broadcast_includes_firmware_state():
     plugin, link = _plugin_with_fake()
     bc = _Broadcasts()
     PluginManager([plugin]).attach(broadcast=bc)
-    _verify_with_banner(plugin, link, "TRIGGERBOX 2")
+    _verify_with_banner(plugin, link, "TRIGGERBOX 4")
     plugin._push_state()
     last = bc.msgs[-1]
     assert last["firmware_state"] == "outdated"
@@ -1274,9 +1377,9 @@ def test_broadcast_includes_firmware_state():
 
 def test_flash_firmware_success_updates_state():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "TRIGGERBOX 2")  # start out of date
+    _verify_with_banner(plugin, link, "TRIGGERBOX 4")  # start out of date
     # After the (faked) upload the board reports the current build on re-identify.
-    link.banner = f"TRIGGERBOX 2 {plugin.needed_build}"
+    link.banner = f"TRIGGERBOX 4 {plugin.needed_build}"
     result = plugin.flash_firmware()
     assert result.ok
     assert plugin.firmware_ok
@@ -1311,7 +1414,7 @@ def test_flash_firmware_without_source(no_source_checkout):
 
 def test_flash_firmware_failure_is_reported(monkeypatch):
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "TRIGGERBOX 2")
+    _verify_with_banner(plugin, link, "TRIGGERBOX 4")
     monkeypatch.setattr(
         fw_mod,
         "flash",
@@ -1326,7 +1429,7 @@ def test_flash_firmware_failure_is_reported(monkeypatch):
 
 def test_firmware_endpoint():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "TRIGGERBOX 2")
+    _verify_with_banner(plugin, link, "TRIGGERBOX 4")
     body = _test_client(plugin).get("/api/triggerbox/firmware").json()
     assert body["state"] == "outdated"
     assert body["needs_flash"] is True
@@ -1336,8 +1439,8 @@ def test_firmware_endpoint():
 
 def test_flash_endpoint():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "TRIGGERBOX 2")
-    link.banner = f"TRIGGERBOX 2 {plugin.needed_build}"
+    _verify_with_banner(plugin, link, "TRIGGERBOX 4")
+    link.banner = f"TRIGGERBOX 4 {plugin.needed_build}"
     body = _test_client(plugin).post("/api/triggerbox/flash", json={}).json()
     assert body["ok"] is True
     assert body["provisioning"]["needs_flash"] is False
@@ -1754,3 +1857,154 @@ def test_status_tokens_arrive_without_waiting_for_the_port_timeout(monkeypatch):
         assert seen[0][1] == "R" and seen[0][0] - sent < 0.1
     finally:
         link.close()
+
+
+# ===========================================================================
+# Dim outputs: config, connect, conflicts with arms, REST, snapshot
+# ===========================================================================
+
+
+def _dim_plugin(dim=None, **options) -> tuple[TriggerboxPlugin, FakeLink]:
+    """A plugin with `dim` levels configured, on a board identified as the
+    current firmware.
+    """
+    plugin, link = _plugin_with_fake(
+        dim=[{"pin": "D9", "percent": 40}] if dim is None else dim, **options
+    )
+    _verify_with_banner(plugin, link, f"TRIGGERBOX {PROTOCOL_VERSION} abc")
+    return plugin, link
+
+
+def test_build_parses_dim_levels_and_skips_bad_entries(caplog):
+    plugin = TriggerboxPlugin.from_options(
+        {
+            "dim": [
+                {"pin": "d9", "percent": 40},
+                {"pin": "A0", "percent": 150},  # clamped
+                {"pin": "D3", "percent": 10},  # status LED
+                {"pin": "D99", "percent": 10},
+                {"pin": "D10", "percent": "bright"},
+                {"pin": "D9", "percent": 5},  # repeated
+                "D11",
+            ]
+        }
+    )
+    assert plugin._dim == {"D9": 40.0, "A0": 100.0}
+    assert len([r for r in caplog.records if "dim" in r.getMessage()]) == 5
+
+
+def test_build_warns_when_a_dim_pin_is_also_an_output(caplog):
+    TriggerboxPlugin.from_options(
+        {"cameras": [{"pin": "D9"}], "dim": [{"pin": "D9", "percent": 40}]}
+    )
+    assert any("D9 is both a dim output" in m for m in caplog.messages)
+
+
+def test_open_sets_the_dim_levels_on_a_current_board():
+    plugin, link = _plugin_with_fake(
+        dim=[{"pin": "D9", "percent": 40}, {"pin": "A0", "percent": 0}]
+    )
+    link.banner = f"TRIGGERBOX {PROTOCOL_VERSION} abc"
+    plugin._open()
+    assert _dims(link) == [("D9", dim_duty(40)), ("A0", 0)]
+    assert plugin.status()["dim"] == [
+        {"pin": "D9", "percent": 40.0},
+        {"pin": "A0", "percent": 0.0},
+    ]
+
+
+@pytest.mark.parametrize(
+    "banner", [None, "TRIGGERBOX 2 abc", "TRIGGERBOX 3 3b651cd9", "FLYWHEEL 1 abc"]
+)
+def test_open_sends_no_dim_to_a_board_not_known_to_speak_it(banner):
+    """Other firmware would read a dim frame's bytes as commands of its own
+    (0xCA cancels a run), so only a board identified as this protocol gets one.
+    `TRIGGERBOX 3` is the closed-loop branch's opto firmware.
+    """
+    plugin, link = _plugin_with_fake(dim=[{"pin": "D9", "percent": 40}])
+    link.banner = banner
+    plugin._open()
+    assert _dims(link) == []
+    assert plugin.set_dim("D9", 50) is not None
+    assert _dims(link) == []
+
+
+def test_usb_recovery_restores_the_live_dim_levels(monkeypatch):
+    import octacam.serial_ports as sp
+
+    monkeypatch.setattr(sp, "reset_usb_device", lambda device: (True, "reset"))
+    monkeypatch.setattr(sp, "wait_for_device", lambda device, timeout: True)
+    plugin, link = _dim_plugin()
+    assert plugin.set_dim("D9", 70) is None
+    assert plugin._recover_usb("test")
+    assert _dims(link)[-1] == ("D9", dim_duty(70))  # the tab's level, not the config's
+
+
+def test_an_arm_on_a_dimmed_pin_is_refused_with_its_name():
+    plugin, link = _dim_plugin(cameras=[{"pin": "D9", "pulse_us": 500}])
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
+    assert _arms(link) == []
+    assert plugin.last_error and "D9" in plugin.last_error
+    # Dimmed to 0 the pin is free again.
+    assert plugin.set_dim("D9", 0) is None
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
+    assert _last_arm(link)["cams"] == [(pin_id("D9"), 500, 0)]
+
+
+def test_an_off_light_does_not_claim_its_pin():
+    # The tab always holds three channels; an off one on the dimmed pin must not
+    # make the board refuse the arm, so off channels are not sent at all.
+    plugin, link = _dim_plugin(
+        lights=[
+            {"channel": 1, "mode": "strobe", "duty_percent": 20},
+            {"channel": 3, "pin": "D9", "mode": "off"},
+        ]
+    )
+    plugin.on_preview_start(plugin.default_start_params(80.0, 10.0))
+    assert [rec[0] for rec in _last_arm(link)["lights"]] == [pin_id("D5")]
+    assert plugin.last_error is None
+
+
+def test_run_end_cancel_and_teardown_leave_the_dim_levels_alone():
+    plugin, link = _dim_plugin()
+    plugin.on_preview_start(plugin.default_start_params(80.0, 10.0))
+    plugin.on_preview_stop()
+    plugin.on_recording_start(plugin.default_start_params(80.0, 1.0))
+    plugin.on_recording_stop(aborted=True)
+    plugin.teardown()
+    assert _dims(link) == []
+    assert plugin._dim == {"D9": 40.0}
+
+
+def test_dim_endpoint_sets_the_level_and_tells_every_tab():
+    plugin, link = _dim_plugin()
+    pushes = _Broadcasts()
+    plugin.broadcast = pushes
+    client = _test_client(plugin)
+
+    body = client.post("/api/triggerbox/dim", json={"pin": "D9", "percent": 55})
+    assert body.status_code == 200
+    assert body.json()["dim"] == [{"pin": "D9", "percent": 55.0}]
+    assert _dims(link) == [("D9", dim_duty(55))]
+    assert pushes.msgs[-1]["dim"] == [{"pin": "D9", "percent": 55.0}]
+
+    # A new pin joins the list; the board's refusal keeps the old level.
+    added = client.post("/api/triggerbox/dim", json={"pin": "A1", "percent": 5})
+    assert added.status_code == 200
+    link.dim_reject_code = "u"
+    refused = client.post("/api/triggerbox/dim", json={"pin": "D9", "percent": 10})
+    assert refused.status_code == 409
+    assert "in use" in refused.json()["detail"]
+    assert plugin._dim == {"D9": 55.0, "A1": 5.0}
+
+    for bad in ({"pin": "D3", "percent": 10}, {"pin": "D9"}, {"percent": 10}):
+        assert client.post("/api/triggerbox/dim", json=bad).status_code == 422
+
+
+def test_snapshot_options_carry_changed_dim_levels():
+    plugin, _link = _dim_plugin()
+    assert plugin.snapshot_options(None) is None
+    assert plugin.set_dim("D9", 25) is None
+    options = plugin.snapshot_options(None)
+    assert options == {"dim": [{"pin": "D9", "percent": 25.0}]}
+    assert TriggerboxPlugin.from_options(options)._dim == {"D9": 25.0}

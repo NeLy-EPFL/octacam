@@ -649,11 +649,23 @@ and `doctor` read from the class, plus `reconnect_path`, `state_topic`,
 ESP32), in `plugins/triggerbox/`: `protocol.py` (wire format, `PIN_LABELS`, and
 `TriggerboxLink`, whose `arm()`/`cancel()`/`wait_done()` own the acks and
 serialize arms), `train.py` (`plan_train`, `TrainPlan.warnings()`) and
-`plugin.py`. Self-describing wire protocol v2: `0xA5 | ver=2 | len u16 | payload |
+`plugin.py`. Self-describing wire protocol v4 (v3 is taken: the unmerged
+`feat/closed-loop` opto firmware, flashed on coxa's boards; never reuse a
+number another build answers with): `0xA5 | ver=4 | len u16 | payload |
 xor`; payload = fps, duration_ms, N camera lines `{pin, pulse_us, delay_us}`, and
-3 symmetric light channels (`off`/`strobe`/`continuous`/`pulse_train`).
-`PIN_LABELS` is the single source of truth, mirrored in `triggerbox.ino` and
-asserted equal by a unit test. Server-side **auto strobe duty** sizes the LED
+3 symmetric light channels (`strobe`/`continuous`/`pulse_train`; an `off` one is
+not sent). A **dim** command (`0xD1`, same framing, payload `pin_id u8 | duty
+u16`, ack `P`) holds a pin at a 12-bit LEDC PWM level outside the arm/run/idle
+state machine: arms, run ends and cancels never touch it, an arm on a pin dimmed
+above 0 and a dim on a pin the live or staged spec drives are rejected (`Eu`).
+The plugin sends dims only to a board identified as v4 (other firmware reads
+the frame's bytes as commands) and re-sends the live levels on every open, flash
+and USB recovery. The board remembers every pin a dim ever set (NVS
+`triggerbox/dim_pins`, written only when the set changes and only while idle)
+and holds it at full from power-up until the host sets it; such a boot-default
+pin yields to an arm (taken over and forgotten) instead of rejecting it. `PIN_LABELS` is the single source of truth, mirrored in
+`triggerbox.ino` and asserted equal by a unit test, as are the magics, version,
+dim scale and reject codes. Server-side **auto strobe duty** sizes the LED
 on-time to the longest live camera exposure (`Camera.trigger_window_us()`: delay
 + exposure). A same-fps re-arm while the board runs **keeps the frame clock's
 phase and lands on the next frame edge** (staged in `g_pend_*`, committed in

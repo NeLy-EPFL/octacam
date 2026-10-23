@@ -1,15 +1,20 @@
-"""The triggerbox wire protocol v2 (must match `arduino/triggerbox`) and the
+"""The triggerbox wire protocol v4 (must match `arduino/triggerbox`) and the
 serial link that speaks it.
 
 Host -> board (little-endian):
-  [0xA5][version u8 = 2][payload_len u16][payload][xor u8]  arm
+  [0xA5][version u8 = 4][payload_len u16][payload][xor u8]  arm
+  [0xD1][version u8 = 4][payload_len u16 = 3][pin_id u8][duty u16][xor u8]  dim
   [0xCA]                                                    cancel
   [0x3F] '?'                                                identify
-  payload = fps u16 | duration_ms u32 | n_cam u8 | n_light u8
+  arm payload = fps u16 | duration_ms u32 | n_cam u8 | n_light u8
             | n_cam x (pin_id u8, pulse_us u16, delay_us u16)
             | n_light x (pin_id u8, mode u8, p0 u32, p1 u32, p2 u32, p3 u32)
 Board -> host, newline-terminated: "R" running, "D" done, "C" cancelled or
-idle, "E<c>" rejected, "TRIGGERBOX <version> <build>" the identify reply.
+idle, "P" dim applied, "E<c>" rejected, "TRIGGERBOX <version> <build>" the
+identify reply.
+
+A dim output holds a pin at a 12-bit PWM duty (0 drives it LOW, 4095 steadily
+HIGH) whatever the board's run state; arms and dims may not share a pin.
 """
 
 from __future__ import annotations
@@ -22,12 +27,16 @@ from dataclasses import dataclass
 
 from octacam.plugins.serial import SerialLink
 
-PROTOCOL_VERSION = 2
+# v3 is the closed-loop branch's opto firmware (flashed on coxa's boards): a
+# board answering 3 must never be sent a v4 dim frame, so v3 is never reused.
+PROTOCOL_VERSION = 4
 BANNER = "TRIGGERBOX"
 MAX_FPS = 5000
 MAX_CAM = 12
 MAX_LIGHT = 3
 DEFAULT_DUTY_PERCENT = 20.0
+# A dim output's 12-bit duty at 100 %: the board holds the pin HIGH.
+DIM_FULL_SCALE = 4095
 
 # How long an arm waits for the board's 'R' (or 'E').
 ACK_TIMEOUT_S = 1.0
@@ -36,11 +45,12 @@ ACK_TIMEOUT_S = 1.0
 CANCEL_ACK_TIMEOUT_S = 0.3
 
 _ARM_MAGIC = 0xA5
+_DIM_MAGIC = 0xD1
 _CANCEL_MAGIC = 0xCA
-_HDR = struct.Struct("<BBH")  # magic u8, version u8, payload_len u16
 _FIXED = struct.Struct("<HIBB")  # fps u16, duration_ms u32, n_cam u8, n_light u8
 _CAM = struct.Struct("<BHH")  # pin_id u8, pulse_us u16, delay_us u16
 _LIGHT = struct.Struct("<BBIIII")  # pin_id u8, mode u8, p0 u32, p1 u32, p2 u32, p3 u32
+_DIM = struct.Struct("<BH")  # pin_id u8, duty u16
 
 # The wire's pin ids (by index): the single source of truth, mirrored by kPinTable
 # in triggerbox.ino (a test keeps them equal). D2/D3/D4 drive the status LED and
@@ -86,6 +96,8 @@ REJECT_REASONS = {
     "r": "reserved pin (D2/D3/D4)",
     "d": "duplicate pin",
     "m": "unknown light mode",
+    "u": "pin in use (dimmed, or driven by the running arm)",
+    "w": "no free PWM channel for the dim output",
 }
 
 
@@ -100,6 +112,37 @@ def _u32(v) -> int:
 def pin_id(label: str) -> int:
     """Index of a pin label in PIN_LABELS. Raises ValueError if unknown."""
     return PIN_LABELS.index(str(label).upper())
+
+
+def _frame(magic: int, payload: bytes) -> bytes:
+    """A framed command: magic, version, payload length, payload and the XOR of
+    version + length + payload (a framing/desync guard).
+    """
+    body = bytes([PROTOCOL_VERSION]) + struct.pack("<H", len(payload)) + payload
+    checksum = 0
+    for byte in body:
+        checksum ^= byte
+    return bytes([magic]) + body + bytes([checksum])
+
+
+def dim_duty(percent: float) -> int:
+    """The 12-bit duty of a dim level in percent, clamped to 0..100. Raises
+    ValueError when it is not a number.
+    """
+    try:
+        value = float(percent)
+    except TypeError:
+        value = math.nan
+    if not math.isfinite(value):
+        raise ValueError(f"dim level must be a number, got {percent!r}")
+    return round(max(0.0, min(100.0, value)) / 100.0 * DIM_FULL_SCALE)
+
+
+def dim_frame(pin: str, duty: int) -> bytes:
+    """The dim command holding *pin* at *duty* (0..DIM_FULL_SCALE). Raises
+    ValueError for an unknown pin.
+    """
+    return _frame(_DIM_MAGIC, _DIM.pack(pin_id(pin), max(0, min(DIM_FULL_SCALE, duty))))
 
 
 @dataclass
@@ -179,22 +222,18 @@ class ArmSpec:
             payload += _CAM.pack(*rec)
         for rec in self.lights:
             payload += _LIGHT.pack(*rec)
-        # Checksum spans version + payload_len + payload (framing/desync guard).
-        body = bytes([PROTOCOL_VERSION]) + struct.pack("<H", len(payload)) + payload
-        checksum = 0
-        for byte in body:
-            checksum ^= byte
-        return (
-            _HDR.pack(_ARM_MAGIC, PROTOCOL_VERSION, len(payload))
-            + payload
-            + bytes([checksum])
-        )
+        return _frame(_ARM_MAGIC, payload)
+
+    def pin_ids(self) -> set[int]:
+        """The pin ids of every output the arm drives."""
+        return {rec[0] for rec in self.cameras} | {rec[0] for rec in self.lights}
 
 
 class TriggerboxLink(SerialLink):
-    """The serial link to the triggerbox. It owns the board's answers: arms and
-    cancels are serialized, ack wait included, so concurrent ones (a preview
-    re-arm and a recording arm) cannot take each other's answer.
+    """The serial link to the triggerbox. It owns the board's answers: arms,
+    dims and cancels are serialized, ack wait included, so concurrent ones (a
+    preview re-arm, a recording arm, a dim from the tab) cannot take each
+    other's answer.
     """
 
     name = "triggerbox"
@@ -203,32 +242,47 @@ class TriggerboxLink(SerialLink):
     def __init__(self, on_state: Callable[[str], None], on_broken: Callable[[], None]):
         super().__init__(on_broken)
         self._on_state = on_state  # 'R', 'D' or 'C', after its event is set
-        self._arm_lock = threading.Lock()
-        self._answered = threading.Event()  # 'R' or 'E<c>' to the last arm
+        self._command_lock = threading.Lock()
+        # 'R' to the last arm, 'P' to the last dim, or 'E<c>' to either.
+        self._answered = threading.Event()
         self._done = threading.Event()  # 'D': the last arm's run is over
         self._idle = threading.Event()  # 'C' to the last cancel
         self._events = {"R": self._answered, "D": self._done, "C": self._idle}
-        self.reject: str | None = None  # the last arm's reject code
+        self.reject: str | None = None  # the last arm's or dim's reject code
 
     def arm(self, spec: ArmSpec) -> str:
         """Send an arm: `"ok"` ('R'), `"reject"` ('E<c>', code in
         `reject`), `"timeout"` or `"write_failed"` (a wedged or closed link).
         """
-        with self._arm_lock:
-            self._answered.clear()
+        with self._command_lock:
             self._done.clear()
-            self.reject = None
-            if not self._write(spec.to_bytes()):
-                return "write_failed"
-            if not self._answered.wait(ACK_TIMEOUT_S):
-                return "timeout"
-            return "reject" if self.reject is not None else "ok"
+            return self._command(spec.to_bytes())
+
+    def dim(self, pin: str, percent: float) -> str:
+        """Hold *pin* at *percent* (clamped to 0..100, rounded to the 12-bit
+        duty; 0 drives it LOW, 100 steadily HIGH) until the next dim of it,
+        whatever the run state. Answers as `arm`, with 'P' for `"ok"`. Raises
+        ValueError for an unknown pin or a level that is not a number.
+        """
+        frame = dim_frame(pin, dim_duty(percent))
+        with self._command_lock:
+            return self._command(frame)
+
+    def _command(self, frame: bytes) -> str:
+        """Write a framed command and wait for its answer (under the lock)."""
+        self._answered.clear()
+        self.reject = None
+        if not self._write(frame):
+            return "write_failed"
+        if not self._answered.wait(ACK_TIMEOUT_S):
+            return "timeout"
+        return "reject" if self.reject is not None else "ok"
 
     def cancel(self) -> bool:
         """Cancel the run and wait (bounded) for the board's 'C'; True if it
         answered or the link is closed.
         """
-        with self._arm_lock:
+        with self._command_lock:
             self._idle.clear()
             self.send_cancel()
             if not self.is_open:
@@ -251,6 +305,8 @@ class TriggerboxLink(SerialLink):
             if event is not None:
                 event.set()
                 self._dispatch(self._on_state, token)
+            elif token == "P":
+                self._answered.set()
             elif token[0] == "E":
                 self.reject = token[1:]
                 self._answered.set()

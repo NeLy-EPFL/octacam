@@ -34,6 +34,19 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   plugin overriding the hook must accept the new keyword). Its tab can offer a
   checkbox in place of the Record tab's Duration (`setDurationSync` in a
   plugin tab's context).
+- **triggerbox dim outputs**: any free pin can be held at a 0–100 % PWM level
+  (12-bit, ~19.5 kHz, in hardware) whatever the board is doing, for a white
+  ambient light driven by the lab's LED driver board in place of the CCS
+  controller. Configure `dim = [{ pin = "D9", percent = 40 }]`; set it live from
+  the triggerbox tab's **Dimmed outputs** slider or `POST /api/triggerbox/dim`.
+  Arming, a run's end and a cancel never change it, and the board refuses an
+  arm that uses a dimmed pin (`Eu`). The level a recording started under goes
+  into its config snapshot. `triggerbox_send.py --dim PIN,percent` sets one on
+  the bench. **The firmware speaks protocol v4** (`TRIGGERBOX 4`): reflash the
+  board (octacam offers it, and `record --yes` does it unasked). The board
+  remembers its dim pins and holds them at full from power-up until octacam
+  sets their level, so flies see full white (about 5,000 lux, mind CsChrimson
+  flies) until octacam connects; an arm that drives such a pin takes it over.
 - **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
   its cells down; with its own faster `ffmpeg_params` a grid builds several
   times faster (see Configuration).
@@ -127,6 +140,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Changed
 
+- **Breaking: the triggerbox firmware speaks protocol v4** (dim outputs): a
+  board on v2 firmware, or on the v3 opto firmware of the unmerged
+  closed-loop branch, is not driven until it is reflashed.
+- The triggerbox no longer sends `off` light channels in its arm packet: an off
+  channel drives nothing, and its record claimed the pin (a dimmed one too).
 - **Breaking: `octacam record --output` is now `--out`** (`-o` is unchanged), as
   in deeperfly and spintrack.
 - **Breaking: the root `-l`/`--log-level` option is gone**; logging is INFO, and
@@ -236,6 +254,9 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 - **Saving the rig config from the GUI kept only the tables it knew**: any
   other table (now `[users]`), array of tables or top-level key in the file
   was dropped by the rewrite.
+- The triggerbox tab kept every light channel on its CCS pin (D5/D6/D7), so a
+  GUI recording armed a channel configured on another `pin` on the wrong line;
+  it now keeps the configured pin.
 - **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
   error, which made a request for a missing feature or command a 500; it is a
   clean "no such node" again.

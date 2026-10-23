@@ -97,7 +97,15 @@ Every output is chosen at run time from the config — no reflashing to rewire:
   on-time to bracket the longest live camera exposure + `strobe_guard_us`, or a
   `manual` `duty_percent`), `continuous`, or an optogenetic `pulse_train`
   (`freq_hz`, `pulse_us`, `start_delay_ms`, `train_ms`). All three channels are
-  electrically identical, so any channel can play any role.
+  electrically identical, so any channel can play any role. A channel's `pin`
+  defaults to its CCS line but can be any broken-out line.
+- **Dim outputs** — `{ pin, percent }`: a pin held at a 0–100 % PWM level
+  whatever the board is doing, e.g. the white ambient light of an arena. Each
+  level is set when octacam connects to the board and stays until you change it
+  in the tab's **Dimmed outputs** slider (or with `POST /api/triggerbox/dim`);
+  starting, ending or cancelling a recording or a preview never touches it. A
+  dimmed pin can't also be a camera line or light: the board refuses such an
+  arm while the level is above 0.
 
 ```toml
 [[plugins]]
@@ -117,6 +125,20 @@ lights = [
 Omitting `cameras`/`lights` defaults to the classic rig: one `D13` line plus
 channels 1 and 2 strobing. The firmware and wiring notes are in
 [arduino/triggerbox/](https://github.com/NeLy-EPFL/octacam/tree/main/arduino/triggerbox).
+
+With the lab's LED driver board in place of the CCS controller, its two inputs take raw 3.3 V lines: strobe the IR LEDs from a light channel moved to a free pin, and dim the white LEDs with a dim output:
+
+```toml
+[plugins.options]
+device = "auto"
+cameras = [ { pin = "D13", pulse_us = 500 } ]
+lights = [ { channel = 1, pin = "D10", mode = "strobe", duty_mode = "auto" } ]
+dim = [ { pin = "D9", percent = 40 } ]
+```
+
+The level a recording started under is saved in its config snapshot. Dim outputs need the protocol v4 firmware (`TRIGGERBOX 4`); octacam offers to flash an older board as usual.
+
+The board remembers its dim pins and drives them at full from power-up until octacam connects and sets their level, so the white LEDs are on at full as soon as the trigger board has power: flies in the arena see full white (about 5,000 lux) until then, which matters for CsChrimson flies.
 
 With `trigger_source = "managed"` the board also drives the cameras during live
 preview, strobing exactly as the recording will. When a recording starts,

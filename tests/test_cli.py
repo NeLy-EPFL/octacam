@@ -2224,7 +2224,7 @@ def fake_triggerbox(monkeypatch):
     """
     from octacam.plugins.triggerbox.protocol import TriggerboxLink
 
-    board = SimpleNamespace(open=False, banner="TRIGGERBOX 2 oldbuild", devices=[])
+    board = SimpleNamespace(open=False, banner="TRIGGERBOX 4 oldbuild", devices=[])
 
     def open_(self, device, baud):
         board.devices.append(device)
@@ -2309,7 +2309,7 @@ def test_flash_yes_still_warns_of_an_unidentified_board(fake_triggerbox):
 
 
 def test_flash_leaves_a_current_board_alone(fake_triggerbox):
-    fake_triggerbox.banner = f"TRIGGERBOX 2 {_current_triggerbox_build()}"
+    fake_triggerbox.banner = f"TRIGGERBOX 4 {_current_triggerbox_build()}"
     result = runner.invoke(
         app,
         [
@@ -2378,7 +2378,7 @@ def test_flash_without_the_sketch_never_calls_a_board_up_to_date(
     # A flash can't happen; --check fails only on a board known to be out of date.
     assert result.exit_code == (0 if flags == ["--check"] else 1), result.output
     flat = " ".join(result.output.split())
-    assert "board firmware: TRIGGERBOX 2 oldbuild" in flat
+    assert "board firmware: TRIGGERBOX 4 oldbuild" in flat
     assert "source build: (not available)" in flat
     assert "? unknown \N{EM DASH} the sketch source was not found" in flat
     assert "up to date" not in flat
@@ -2388,7 +2388,7 @@ def test_flash_without_the_sketch_never_calls_a_board_up_to_date(
 
 
 @pytest.mark.parametrize("flags", [["--yes"], ["--check"]], ids=["yes", "check"])
-@pytest.mark.parametrize("banner", ["FLYWHEEL 1 abc", "TRIGGERBOX 3 x"])
+@pytest.mark.parametrize("banner", ["FLYWHEEL 1 abc", "TRIGGERBOX 2 x"])
 def test_flash_without_the_sketch_names_a_foreign_board_incompatible(
     fake_triggerbox, no_sketch, flags, banner
 ):
@@ -2408,7 +2408,7 @@ def test_flash_without_the_sketch_names_a_foreign_board_incompatible(
     flat = " ".join(result.output.split())
     assert (
         "\N{BALLOT X} incompatible firmware \N{EM DASH} the board does not run "
-        "TRIGGERBOX v2 firmware "
+        "TRIGGERBOX v4 firmware "
         "(arming is disabled); the sketch source was not found"
     ) in flat
     assert "? unknown" not in flat
@@ -2457,7 +2457,7 @@ def test_flash_without_a_flashable_plugin(tmp_path, plugin, exit_code):
 @pytest.mark.parametrize(
     ("banner", "line"),
     [
-        ("TRIGGERBOX 2 oldbuild", "triggerbox firmware needs flashing"),
+        ("TRIGGERBOX 4 oldbuild", "triggerbox firmware needs flashing"),
         ("FLYWHEEL 1 abc", "triggerbox firmware needs flashing"),
         (None, "triggerbox firmware up to date"),
     ],
@@ -2466,14 +2466,14 @@ def test_flash_without_a_flashable_plugin(tmp_path, plugin, exit_code):
 def test_doctor_probe_classifies_a_configured_board(
     emulated_rig, monkeypatch, tmp_path, banner, line
 ):
-    banner = banner or f"TRIGGERBOX 2 {_current_triggerbox_build()}"
+    banner = banner or f"TRIGGERBOX 4 {_current_triggerbox_build()}"
     flat = _doctor_probe_triggerbox(monkeypatch, tmp_path, banner)
     assert "plugin 'triggerbox' device /dev/ttyACM0 is connected" in flat
     assert line in flat
 
 
 @pytest.mark.parametrize(
-    ("banner", "foreign"), [("FLYWHEEL 1 abc", True), ("TRIGGERBOX 2 x", False)]
+    ("banner", "foreign"), [("FLYWHEEL 1 abc", True), ("TRIGGERBOX 4 x", False)]
 )
 def test_doctor_probe_without_the_sketch_checks_the_banner_name(
     emulated_rig, monkeypatch, tmp_path, banner, foreign

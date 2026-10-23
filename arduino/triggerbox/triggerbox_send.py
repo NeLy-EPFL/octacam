@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Standalone driver for the triggerbox firmware (protocol v2).
+"""Standalone driver for the triggerbox firmware (protocol v4).
 
 Sends an arm packet to the Arduino Nano ESP32 running `triggerbox.ino` and
-prints its status tokens, so you can bench-test camera triggering and the light
-channels without launching octacam. Ctrl-C sends a cancel.
+prints its status tokens, so you can bench-test camera triggering, the light
+channels and the dimmed (PWM) outputs without launching octacam. Ctrl-C sends a
+cancel.
 
 Camera lines and light channels are specified with repeatable flags. A light
 channel is 1/2/3 (CCS ch1/ch2/ch3 = D5/D6/D7); all three are interchangeable.
@@ -21,6 +22,9 @@ Examples::
     # continuous illumination on ch1, nothing else
     python triggerbox_send.py --light 1,continuous
 
+    # hold a white light on D9 at 40 % (no arm); it stays until changed or reset
+    python triggerbox_send.py --dim D9,40
+
     # just check what's on the port
     python triggerbox_send.py --identify
 
@@ -29,6 +33,9 @@ Light spec:   CH,off
               CH,strobe,on_us[,delay_us]
               CH,continuous
               CH,pulse,pulse_us,interval_us[,start_delay_us[,train_us]]
+Dim spec:     PIN,percent                       (0 = LOW, 100 = steadily HIGH)
+
+Dims are sent before the arm; with only --dim given, nothing is armed.
 """
 
 from __future__ import annotations
@@ -44,9 +51,11 @@ except ImportError:
     sys.exit("pyserial is required: pip install pyserial")
 
 ARM_MAGIC = 0xA5
+DIM_MAGIC = 0xD1
 CANCEL_MAGIC = 0xCA
 IDENTIFY_MAGIC = 0x3F
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 4
+DIM_FULL_SCALE = 4095  # 12-bit PWM duty; full scale holds the pin HIGH
 
 # Canonical pin-label table -- must match kPinTable in triggerbox.ino (and
 # PIN_LABELS in the octacam plugin). Index on the wire; D2/D3/D4 are the status
@@ -80,10 +89,10 @@ MAX_FPS = 5000
 U16 = 0xFFFF
 U32 = 0xFFFFFFFF
 
-_HDR = struct.Struct("<BBH")  # magic, version, payload_len
 _FIXED = struct.Struct("<HIBB")  # fps, duration_ms, n_cam, n_light
 _CAM = struct.Struct("<BHH")  # pin_id, pulse_us, delay_us
 _LIGHT = struct.Struct("<BBIIII")  # pin_id, mode, p0, p1, p2, p3
+_DIM = struct.Struct("<BH")  # pin_id, duty
 
 
 def pin_id(label: str) -> int:
@@ -95,6 +104,15 @@ def pin_id(label: str) -> int:
         ) from None
 
 
+def frame(magic: int, payload: bytes) -> bytes:
+    """A framed command: magic, version, payload_len, payload, XOR checksum."""
+    body = bytes([PROTOCOL_VERSION]) + struct.pack("<H", len(payload)) + payload
+    checksum = 0
+    for byte in body:
+        checksum ^= byte
+    return bytes([magic]) + body + bytes([checksum])
+
+
 def build_arm(
     fps: int, duration_ms: int, cams: list[tuple], lights: list[tuple]
 ) -> bytes:
@@ -103,15 +121,11 @@ def build_arm(
         payload += _CAM.pack(pid, pulse, delay)
     for pid, mode, p0, p1, p2, p3 in lights:
         payload += _LIGHT.pack(pid, mode, p0, p1, p2, p3)
-    body = bytes([PROTOCOL_VERSION]) + struct.pack("<H", len(payload)) + payload
-    checksum = 0
-    for byte in body:
-        checksum ^= byte
-    return (
-        _HDR.pack(ARM_MAGIC, PROTOCOL_VERSION, len(payload))
-        + payload
-        + bytes([checksum])
-    )
+    return frame(ARM_MAGIC, payload)
+
+
+def build_dim(pid: int, duty: int) -> bytes:
+    return frame(DIM_MAGIC, _DIM.pack(pid, duty))
 
 
 def parse_camera(spec: str) -> tuple[int, int, int]:
@@ -151,9 +165,19 @@ def parse_light(spec: str) -> tuple[int, int, int, int, int, int]:
     return (pid, mode, p[0], p[1], p[2], p[3])
 
 
+def parse_dim(spec: str) -> tuple[int, int]:
+    label, _, percent = spec.partition(",")
+    try:
+        level = float(percent)
+    except ValueError:
+        raise SystemExit(f"dim spec {spec!r} needs PIN,percent") from None
+    level = max(0.0, min(100.0, level))
+    return pin_id(label), round(level / 100.0 * DIM_FULL_SCALE)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Drive the triggerbox camera-trigger + light firmware (v2).",
+        description="Drive the triggerbox camera-trigger + light firmware (v4).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -181,6 +205,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="a light channel (repeatable)",
     )
     p.add_argument(
+        "--dim",
+        action="append",
+        default=[],
+        metavar="PIN,percent",
+        help="hold a pin at a PWM level (repeatable)",
+    )
+    p.add_argument(
         "--identify",
         action="store_true",
         help="just query the board's identity and exit",
@@ -188,7 +219,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def read_tokens(port: serial.Serial, deadline: float) -> None:
+def read_tokens(port: serial.Serial, deadline: float, stop: str = "D") -> None:
+    """Print the board's tokens until `stop` (done, by default), a reject or
+    the deadline.
+    """
     buf = bytearray()
     while time.monotonic() < deadline:
         chunk = port.read(64)
@@ -201,7 +235,7 @@ def read_tokens(port: serial.Serial, deadline: float) -> None:
             text = line.decode("ascii", "replace").strip()
             if text:
                 print(f"  <- {text}")
-            if text == "D":  # done
+            if text == stop or text.startswith("E"):
                 return
 
 
@@ -222,6 +256,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.identify:
             port.write(bytes([IDENTIFY_MAGIC]))
             read_tokens(port, time.monotonic() + 1.0)
+            return 0
+
+        for pid, duty in (parse_dim(s) for s in args.dim):
+            print(f"-> dim: {PIN_LABELS[pid]} duty={duty}/{DIM_FULL_SCALE}")
+            port.write(build_dim(pid, duty))
+            read_tokens(port, time.monotonic() + 1.0, stop="P")
+        if args.dim and not (args.camera or args.light):
             return 0
 
         cams = [parse_camera(s) for s in args.camera] or [parse_camera("D13")]
