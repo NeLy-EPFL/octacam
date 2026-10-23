@@ -372,6 +372,66 @@ def test_flash_reports_failure_from_nonzero_exit(real_spec, monkeypatch):
     assert "boom" in result.log
 
 
+_NANO_ESP32_PROPS = (
+    "upload.tool=dfu-util\n"
+    'tools.dfu-util.upload.pattern="{path}/{cmd}" --device {vid.0}:{pid.0} '
+    '-D "{build.path}/{build.project_name}.bin" -Q\n'
+)
+
+
+def _board_details(monkeypatch, out: str) -> None:
+    monkeypatch.setattr(
+        fw.subprocess,
+        "run",
+        lambda cmd, **kw: fw.subprocess.CompletedProcess(cmd, 0, stdout=out),
+    )
+
+
+def test_dfu_select_property_pins_dfu_util_to_the_serial(monkeypatch):
+    # Two Nano ESP32s share 2341:0070, and the core's pattern selects by that
+    # alone: dfu-util must be told the board's serial.
+    _board_details(monkeypatch, _NANO_ESP32_PROPS)
+    prop = fw._dfu_select_property("cli", "arduino:esp32:nano_nora", "744DBDA08F18")
+    assert prop == (
+        'tools.dfu-util.upload.pattern="{path}/{cmd}" -S 744DBDA08F18 '
+        '--device {vid.0}:{pid.0} -D "{build.path}/{build.project_name}.bin" -Q'
+    )
+
+
+@pytest.mark.parametrize(
+    ("props", "serial"),
+    [
+        ("upload.tool=avrdude\n", "744DBDA08F18"),
+        (_NANO_ESP32_PROPS, "74 4D; rm -rf"),
+    ],
+)
+def test_dfu_select_property_leaves_other_uploads_alone(monkeypatch, props, serial):
+    _board_details(monkeypatch, props)
+    assert fw._dfu_select_property("cli", "fqbn", serial) is None
+
+
+def test_flash_uploads_to_the_ports_board_when_dfu_needs_selecting(
+    real_spec, monkeypatch
+):
+    cmds: list[list[str]] = []
+    monkeypatch.setattr(fw, "core_installed", lambda cli, fqbn: True)
+    monkeypatch.setattr(fw, "_usb_serial", lambda port: "744DBDA08F18")
+    _board_details(monkeypatch, _NANO_ESP32_PROPS)
+    monkeypatch.setattr(
+        fw, "_run_streaming", lambda cmd, timeout, on_line: cmds.append(cmd) or (0, "")
+    )
+    result = fw.flash(real_spec, "/dev/ttyACM0", "beefcafe", cli="/x/arduino-cli")
+
+    assert result.ok
+    compile_cmd, upload_cmd = cmds
+    assert compile_cmd[1] == "compile" and "--upload" not in compile_cmd
+    assert upload_cmd[1] == "upload" and "/dev/ttyACM0" in upload_cmd
+    out_dir = compile_cmd[compile_cmd.index("--output-dir") + 1]
+    assert upload_cmd[upload_cmd.index("--input-dir") + 1] == out_dir
+    prop = upload_cmd[upload_cmd.index("--upload-property") + 1]
+    assert "-S 744DBDA08F18" in prop
+
+
 def test_flash_short_circuits_on_preflight(real_spec, monkeypatch):
     """No cli -> preflight fails and _run_streaming is never called."""
     called = {"run": False}
