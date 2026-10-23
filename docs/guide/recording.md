@@ -192,7 +192,7 @@ actually used:
   trigger source, save method and encoder args, …), even when they were changed
   in the **Record** tab and never saved to the rig config.
 - **`[[plugins]]`** holds each plugin's live settings, e.g. the triggerbox camera
-  lines and light channels as set in its tab.
+  lines, light channels and dim levels as set in its tab.
 - **`[[cameras]]`** holds each camera's rotation and flips as set in the
   **View** tab, which a display-form recording bakes into its video. (Only
   cameras the rig config already lists are updated. Tile layout is saved only by

@@ -1,8 +1,9 @@
 // triggerbox tab: camera trigger lines, 3 light channels (off / strobe /
-// continuous / pulse train), arm-with-recording, and a frame-timing diagram of
-// the live camera exposures.
+// continuous / pulse train), dimmed outputs (a PWM level held whatever the
+// board does), arm-with-recording, and a frame-timing diagram of the live
+// camera exposures.
 import { SerialTab } from "/js/serial.js";
-import { clamp, request } from "/js/util.js";
+import { clamp, clampInput, request } from "/js/util.js";
 
 const STATE_LABELS = {
   idle: "Idle — waiting for arm command",
@@ -71,6 +72,15 @@ const MARKUP = `
       <div id="triggerbox-lights"></div>
     </div>
 
+    <div id="triggerbox-dim-section" class="triggerbox-section hidden">
+      <div class="row triggerbox-section-head"><span>Dimmed outputs</span></div>
+      <div id="triggerbox-dims"></div>
+      <p class="hint">
+        Each holds its level whatever the board is doing, recording or not.
+        An arm may not use a dimmed pin.
+      </p>
+    </div>
+
     <div class="triggerbox-timing">
       <div class="row triggerbox-timing-head">
         <span>Frame timing</span>
@@ -110,6 +120,9 @@ export default class TriggerboxTab extends SerialTab {
     this.arduinoState = "idle";
     this.guardUs = Number.isFinite(status.guard_us) ? status.guard_us : DEFAULT_GUARD_US;
     this.exposures = []; // [{index, name, exposure_us, trigger_delay_us}] from /exposures
+    this.dims = []; // [{pin, percent}]: the levels the board holds
+    this._dimWanted = {}; // pin -> the newest level the operator asked for
+    this._dimBusy = new Set(); // pins with a dim request in flight
 
     this._seedCameras(status.cameras);
     this._seedLights(status.lights);
@@ -122,6 +135,8 @@ export default class TriggerboxTab extends SerialTab {
     this.timingViz = document.getElementById("triggerbox-timing-viz");
     this.timingSummary = document.getElementById("triggerbox-timing-summary");
     this.armWithRec = document.getElementById("triggerbox-arm-with-recording");
+    this.dimSection = document.getElementById("triggerbox-dim-section");
+    this.dimsEl = document.getElementById("triggerbox-dims");
 
     this.addCameraBtn.addEventListener("click", () => this._addCamera());
     document.addEventListener("tab-shown", (e) => {
@@ -172,7 +187,8 @@ export default class TriggerboxTab extends SerialTab {
       const d = byCh[ch] || {};
       this.lights[ch] = {
         channel: ch,
-        pin: LIGHT_PIN[ch],
+        // A configured pin (e.g. a driver board on D10) wins over the channel's.
+        pin: CAMERA_PINS.includes(d.pin) ? d.pin : LIGHT_PIN[ch],
         mode: LIGHT_MODES.some(([v]) => v === d.mode) ? d.mode : "off",
         duty_mode: d.duty_mode === "auto" ? "auto" : "manual",
         duty_percent: Number.isFinite(d.duty_percent) ? d.duty_percent : 20,
@@ -208,6 +224,7 @@ export default class TriggerboxTab extends SerialTab {
   applyLink(msg) {
     if (msg.arduino_state) this.arduinoState = msg.arduino_state;
     if (typeof msg.firmware_ok === "boolean") this.firmwareOk = msg.firmware_ok;
+    if (Array.isArray(msg.dim)) this._setDims(msg.dim);
     super.applyLink(msg);
   }
 
@@ -298,7 +315,7 @@ export default class TriggerboxTab extends SerialTab {
       const card = this._el(
         `<div class="tb-light-card">
            <div class="tb-light-head">
-             <span>Channel ${ch} · ${LIGHT_PIN[ch]}</span>
+             <span>Channel ${ch} · ${esc(l.pin)}</span>
              <select class="tb-light-mode">${modeOpts}</select>
            </div>
            <div class="tb-light-fields"></div>
@@ -370,6 +387,90 @@ export default class TriggerboxTab extends SerialTab {
     }
   }
 
+  // --------------------------------------------------------- dimmed outputs
+
+  // Adopt the board's levels (a status, a push, a dim reply). A row the
+  // operator is still editing keeps its value.
+  _setDims(list) {
+    const dims = list
+      .filter((d) => typeof d?.pin === "string" && Number.isFinite(d?.percent))
+      .map((d) => ({ pin: d.pin, percent: clamp(d.percent, 0, 100) }));
+    const samePins =
+      dims.length === this.dims.length && dims.every((d, i) => d.pin === this.dims[i].pin);
+    this.dims = dims;
+    if (samePins) this._showDimLevels();
+    else this._renderDims();
+    this._renderSummary(this._timingModel());
+  }
+
+  _renderDims() {
+    this.dimSection.classList.toggle("hidden", !this.dims.length);
+    this.dimsEl.innerHTML = "";
+    for (const { pin, percent } of this.dims) {
+      const row = this._el(
+        `<div class="tb-dim-row" data-pin="${esc(pin)}">
+           <span class="tb-dim-pin">${esc(pin)}</span>
+           <input type="range" class="tb-dim-range" min="0" max="100" step="1"
+             value="${percent}" title="Level of the PWM output on ${esc(pin)}">
+           <label class="tb-field tb-dim-field">%
+             <input type="number" class="tb-dim-number" min="0" max="100" step="0.1"
+               value="${percent}"></label>
+         </div>`
+      );
+      const range = row.querySelector(".tb-dim-range");
+      const number = row.querySelector(".tb-dim-number");
+      range.addEventListener("input", () => {
+        number.value = range.value;
+        this._queueDim(pin, parseFloat(range.value));
+      });
+      number.addEventListener("change", () => {
+        const value = clampInput(number);
+        range.value = value;
+        this._queueDim(pin, value);
+      });
+      this.dimsEl.appendChild(row);
+    }
+    this._applyDisabled();
+  }
+
+  // Show the board's levels, except in a row being edited (unless `force`).
+  _showDimLevels(force = false) {
+    for (const row of this.dimsEl.querySelectorAll(".tb-dim-row")) {
+      const pin = row.dataset.pin;
+      const number = row.querySelector(".tb-dim-number");
+      const editing = this._dimBusy.has(pin) || number === document.activeElement;
+      const dim = this.dims.find((d) => d.pin === pin);
+      if (!dim || (editing && !force)) continue;
+      row.querySelector(".tb-dim-range").value = dim.percent;
+      number.value = dim.percent;
+    }
+  }
+
+  // One request in flight per pin; a slider drag sends its newest level as
+  // soon as the previous one is answered, so the light follows the drag.
+  _queueDim(pin, percent) {
+    this._dimWanted[pin] = percent;
+    if (!this._dimBusy.has(pin)) this._flushDim(pin);
+  }
+
+  async _flushDim(pin) {
+    this._dimBusy.add(pin);
+    let failed = false;
+    while (pin in this._dimWanted && !failed) {
+      const percent = this._dimWanted[pin];
+      delete this._dimWanted[pin];
+      const d = await request("POST", "/api/triggerbox/dim", { pin, percent }, {
+        action: `Dim ${pin}`,
+        notify: this.notify,
+      });
+      if (d && Array.isArray(d.dim)) this._setDims(d.dim);
+      else failed = true; // already notified; the rest of a drag would fail too
+    }
+    delete this._dimWanted[pin];
+    this._dimBusy.delete(pin);
+    this._showDimLevels(failed); // a refused level snaps back to the board's
+  }
+
   // --------------------------------------------------------- render / gating
 
   linkMessage() {
@@ -394,7 +495,7 @@ export default class TriggerboxTab extends SerialTab {
     const disabled = !this.ready || !this.connected || !this.firmwareOk;
     this.armWithRec.disabled = disabled;
     this.addCameraBtn.disabled = disabled;
-    for (const root of [this.camerasEl, this.lightsEl]) {
+    for (const root of [this.camerasEl, this.lightsEl, this.dimsEl]) {
       for (const el of root.querySelectorAll("input, select, button")) el.disabled = disabled;
     }
   }
@@ -533,8 +634,11 @@ export default class TriggerboxTab extends SerialTab {
     }
     const pins = [...this.cameras.map((c) => c.pin), ...m.rows.filter((r) => r.kind === "led" || r.kind === "pulse").map((r) => r.label.split(" ")[1])];
     const dup = pins.find((p, i) => pins.indexOf(p) !== i);
+    const dimmed = pins.find((p) => this.dims.some((d) => d.pin === p && d.percent > 0));
     let note = "";
     if (dup) note = ` — ⚠ two outputs share pin ${dup}; the board will reject the arm.`;
+    else if (dimmed)
+      note = ` \u2014 \u26a0 pin ${dimmed} is dimmed; the board will reject the arm.`;
     else if (m.maxCoverage == null && m.rows.some((r) => r.kind === "led"))
       note = " — no camera exposures yet; Auto strobes fall back to their manual duty.";
     this.timingSummary.textContent = parts.join(" · ") + note;

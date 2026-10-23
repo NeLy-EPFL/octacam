@@ -1,9 +1,10 @@
 #include <Arduino.h>
+#include <Preferences.h>
 #include "esp_timer.h"
 #include "fw_build_info.h"  // TRIGGERBOX_FW_BUILD — source fingerprint (auto-generated)
 
 // =============================================================================
-//  triggerbox — configurable camera-trigger + light controller (protocol v2)
+//  triggerbox — configurable camera-trigger + light controller (protocol v4)
 //
 //  Target board: Arduino Nano ESP32 (ESP32-S3), mounted on the EPFL
 //  "common CCS light and camera trigger circuit" (common-trigger-circuit).
@@ -44,9 +45,32 @@
 //  Light polarity: each CCS channel drives an NPN sink transistor, so an Arduino
 //  pin HIGH sinks the channel to GND -> light ON.
 //
+//  Dimmed outputs: a dim command holds a pin at a level between 0 and full
+//  scale with hardware PWM (LEDC, 11-bit at ~19.5 kHz), e.g. a driver board's
+//  white ambient light. It is independent of the arm/run/idle state machine:
+//  arming, a run's end, a cancel and idle parking never touch a dimmed pin,
+//  and the PWM costs the frame clock nothing (LEDC runs in hardware). Level 0
+//  drives the pin LOW and full scale HIGH, both as plain GPIO; a pin is
+//  "dimmed" while its level is above 0. An arm that uses a dimmed pin is
+//  rejected, and so is a dim command on a pin the running spec (or a staged
+//  re-arm) drives. Applying a dim command takes one loop iteration, like an
+//  arm: a few register writes for a level change, longer (not yet measured)
+//  when the PWM is attached or detached, so a frame-locked edge due then is
+//  emitted that much late.
+//
+//  Boot default: the board remembers in NVS (namespace "triggerbox", key
+//  "dim_pins", a pin-index mask) every pin a dim command has set, and drives
+//  them steadily HIGH (full) from power-up until the host sets their level, so
+//  a white ambient light is on before the host connects. A boot-default pin
+//  yields to an arm instead of rejecting it: an arm that drives it takes the
+//  pin over, and it is forgotten (it was rewired). Any dim command for it, 0
+//  included, makes it an ordinary dimmed pin for the session and keeps it
+//  remembered. NVS is written only when that set changes, and only while idle,
+//  so a level change never touches flash and a write never stalls a run.
+//
 //  ---- Host -> Arduino wire protocol (little-endian) -------------------------
 //    Arm:      [0xA5]                                     magic
-//              [version : u8 = 2]
+//              [version : u8 = 4]
 //              [payload_len : u16]                        bytes that follow, pre-checksum
 //              --- payload (payload_len bytes) ---
 //              [fps : u16]                                1..5000
@@ -56,8 +80,11 @@
 //              n_light x light_record  (18 B): [pin_id u8][mode u8][p0 u32][p1 u32][p2 u32][p3 u32]
 //              --- end payload ---
 //              [checksum : u8]                            XOR over version+len+payload
+//    Dim:      [0xD1] [version : u8 = 4] [payload_len : u16 = 3]
+//              [pin_id : u8] [duty : u16]                 0..4095 (4095 = steady HIGH)
+//              [checksum : u8]                            as for arm
 //    Cancel:   [0xCA]
-//    Identify: [0x3F] '?'   -> replies "TRIGGERBOX 2 <build>\n" (build = source hash)
+//    Identify: [0x3F] '?'   -> replies "TRIGGERBOX 4 <build>\n" (build = source hash)
 //
 //    light mode fields:
 //      0 off        : hold LOW
@@ -70,11 +97,14 @@
 //    "R\n"  running    — arm accepted, clocks started
 //    "D\n"  done       — requested duration elapsed, back to idle
 //    "C\n"  cancelled  — cancel received (or a valid re-arm superseded a run)
-//    "E<c>\n" rejected — arm refused; <c> is a reason code:
+//    "P\n"  dimmed     - dim command applied
+//    "E<c>\n" rejected - arm or dim refused; <c> is a reason code:
 //                          v version   c checksum   o oversize/count
 //                          l length    f fps        p bad pin id
 //                          r reserved pin            d duplicate pin   m bad mode
-//    "TRIGGERBOX 2 <build>\n" reply to identify (build = short source hash)
+//                          u pin in use (dimmed, or driven by the run)
+//                          w no free PWM (LEDC) channel
+//    "TRIGGERBOX 4 <build>\n" reply to identify (build = short source hash)
 // =============================================================================
 
 // ---- Canonical pin-label table (SINGLE SOURCE OF TRUTH) --------------------
@@ -96,12 +126,13 @@ constexpr uint8_t kLedBlue  = D4;
 
 // ---- Serial protocol constants ---------------------------------------------
 constexpr uint8_t  kArmMagic        = 0xA5;
+constexpr uint8_t  kDimMagic        = 0xD1;
 constexpr uint8_t  kCancelMagic     = 0xCA;
 constexpr uint8_t  kIdentifyMagic   = 0x3F;  // '?'
-constexpr uint8_t  kProtocolVersion = 2;
+constexpr uint8_t  kProtocolVersion = 4;
 constexpr uint32_t kArmStaleMs      = 250;   // discard a partial packet after this
 constexpr long     kBaudRate        = 115200;
-constexpr char     kVersion[]       = "TRIGGERBOX 2";
+constexpr char     kVersion[]       = "TRIGGERBOX 4";
 
 constexpr uint16_t kMaxFps   = 5000;
 constexpr uint8_t  kMaxCam   = 12;
@@ -114,6 +145,18 @@ constexpr uint16_t kBufSize = 3 + kMaxPayload + 1;                  // 126
 constexpr uint32_t kDefaultCamPulseUs = 500;
 constexpr uint32_t kMinCamPulseUs     = 5;
 constexpr uint32_t kMinLedOnUs        = 1;
+
+// ---- Dimmed outputs --------------------------------------------------------
+constexpr char     kPrefsNamespace[] = "triggerbox";  // NVS: normally kept on reflash
+constexpr char     kPrefsDimPins[]   = "dim_pins";    // u32 pin-index mask
+constexpr uint16_t kDimPayload = 3;      // pin_id u8, duty u16
+constexpr uint8_t  kDimBits    = 12;     // levels on the wire
+constexpr uint16_t kDimFull    = 4095;   // full scale: the pin is held HIGH
+// The LEDC runs 11 bits at ~19.5 kHz: on core 2.x its clock is the 40 MHz
+// crystal, so 12 bits tops out at 9765 Hz (ledcSetup(ch, 19531, 12) returns 0,
+// measured on a Nano ESP32), and 40 MHz / 2048 is exact on either clock.
+constexpr uint8_t  kPwmBits    = 11;
+constexpr uint32_t kDimFreqHz  = 19531;
 
 // ---- Light modes -----------------------------------------------------------
 constexpr uint8_t kModeOff        = 0;
@@ -164,9 +207,27 @@ static uint32_t g_run_start_ms  = 0;
 static uint32_t g_frame_t0_us   = 0;           // micros() at current frame edge
 static uint64_t g_run_start_us  = 0;           // esp_timer_get_time() at arm (64-bit)
 
+// Pin-index masks of the pins the live spec drives and the ones a staged
+// same-fps re-arm will drive: a dim command must leave both alone.
+static uint32_t g_run_mask  = 0;
+static uint32_t g_pend_mask = 0;
+
+// ---- Dimmed outputs (by pin index) -----------------------------------------
+static uint16_t g_dim_duty[kNumPins];  // level; 0 = LOW / not dimmed
+static uint32_t g_dim_mask = 0;        // pins dimmed above 0: arms may not use them
+static uint32_t g_dim_pwm  = 0;        // pins attached to LEDC (0 < level < full)
+static uint32_t g_dim_boot = 0;        // pins at their boot default (full), not yet
+                                       // set by the host: an arm takes them over
+// Pins remembered as dim outputs: the set NVS should hold, and the set it holds.
+static uint32_t g_dim_known  = 0;
+static uint32_t g_dim_stored = 0;
+static Preferences g_prefs;
+static bool g_prefs_ok = false;
+
 // ---- Non-blocking packet reassembly ----------------------------------------
 enum class Rx : uint8_t { CMD, COLLECT };
 static Rx       g_rx          = Rx::CMD;
+static uint8_t  g_cmd         = 0;    // magic of the frame being collected
 static uint8_t  g_buf[kBufSize];
 static uint16_t g_got         = 0;
 static uint16_t g_need        = 0;    // total bytes to collect for the frame
@@ -380,6 +441,8 @@ static void enter_idle(char reason) {
   g_ncam = 0;
   g_nlight = 0;
   g_pending = false;
+  g_run_mask = 0;
+  g_pend_mask = 0;
   g_state = State::IDLE;
   set_status(false, true, false);  // green = idle / ready
   if (reason) emit(reason);
@@ -392,10 +455,14 @@ static void commit_pending() {
   install_outputs(g_pend_cam, g_pend_ncam, g_pend_lt, g_pend_nlight, /*carry=*/true);
   start_run_clock(g_pend_duration_ms);
   g_pending = false;
+  g_run_mask = g_pend_mask;
+  g_pend_mask = 0;
 }
 
+// `used` is the pin-index mask of the spec's outputs.
 static void enter_running(uint16_t fps, uint32_t duration_ms, const Cam *cams,
-                          uint8_t ncam, const Light *lts, uint8_t nlight) {
+                          uint8_t ncam, const Light *lts, uint8_t nlight,
+                          uint32_t used) {
   const bool was_running = (g_state == State::RUNNING);
   uint32_t period_us = (1000000UL + fps / 2) / fps;
   if (period_us < 2) period_us = 2;
@@ -409,6 +476,7 @@ static void enter_running(uint16_t fps, uint32_t duration_ms, const Cam *cams,
     g_pend_ncam = ncam;
     g_pend_nlight = nlight;
     g_pend_duration_ms = duration_ms;
+    g_pend_mask = used;
     g_duration_ms = 0;
     g_pending = true;
     emit('C');  // the superseded run ended...
@@ -421,6 +489,8 @@ static void enter_running(uint16_t fps, uint32_t duration_ms, const Cam *cams,
   Light next_lt[kMaxLight];
   prepare_outputs(period_us, cams, ncam, lts, nlight, next_cam, next_lt);
   g_pending = false;
+  g_pend_mask = 0;
+  g_run_mask = used;
   g_period_us = period_us;
   install_outputs(next_cam, ncam, next_lt, nlight, /*carry=*/false);
   start_run_clock(duration_ms);
@@ -430,6 +500,21 @@ static void enter_running(uint16_t fps, uint32_t duration_ms, const Cam *cams,
   apply_outputs(0, 0);             // emit the first frame's edges immediately
   if (was_running) emit('C');
   emit('R');
+}
+
+// An accepted arm drives the pins in `used`: one at its boot default yields
+// (driven LOW, no longer dimmed) for the spec to take over, and none of them
+// is remembered as a dim output any more, since it now drives something else.
+static void release_boot_dims(uint32_t used) {
+  const uint32_t taken = used & g_dim_boot;
+  for (uint8_t idx = 0; idx < kNumPins; idx++) {
+    if (!(taken & (1u << idx))) continue;
+    digitalWrite(kPinTable[idx], LOW);  // a boot default is plain GPIO, never PWM
+    g_dim_duty[idx] = 0;
+  }
+  g_dim_boot &= ~taken;
+  g_dim_mask &= ~taken;
+  g_dim_known &= ~used;
 }
 
 // ---- Arm parse + validate (staging; commits only on full success) ----------
@@ -452,6 +537,7 @@ static void parse_and_validate(const uint8_t *payload, uint16_t len) {
     uint8_t idx = p[0];
     if (idx >= kNumPins) { reject('p'); return; }
     if ((1u << idx) & kReservedMask) { reject('r'); return; }
+    if ((1u << idx) & g_dim_mask & ~g_dim_boot) { reject('u'); return; }
     if (used & (1u << idx)) { reject('d'); return; }
     used |= (1u << idx);
     tmpc[i].gpio = kPinTable[idx];
@@ -465,6 +551,7 @@ static void parse_and_validate(const uint8_t *payload, uint16_t len) {
     uint8_t mode = p[1];
     if (idx >= kNumPins) { reject('p'); return; }
     if ((1u << idx) & kReservedMask) { reject('r'); return; }
+    if ((1u << idx) & g_dim_mask & ~g_dim_boot) { reject('u'); return; }
     if (used & (1u << idx)) { reject('d'); return; }
     if (mode > kModePulseTrain) { reject('m'); return; }
     used |= (1u << idx);
@@ -479,7 +566,117 @@ static void parse_and_validate(const uint8_t *payload, uint16_t len) {
     p += 18;
   }
 
-  enter_running(fps, duration_ms, tmpc, ncam, tmpl, nlight);
+  release_boot_dims(used);
+  enter_running(fps, duration_ms, tmpc, ncam, tmpl, nlight, used);
+}
+
+// ---- Hardware PWM (LEDC), on either Arduino-ESP32 core ----------------------
+// A wire level (kDimBits) in LEDC counts (kPwmBits), rounded.
+static uint32_t pwm_counts(uint16_t duty) {
+  return (duty + (1u << (kDimBits - kPwmBits - 1))) >> (kDimBits - kPwmBits);
+}
+// Core 3.x picks a free LEDC channel per pin itself; core 2.x (which the
+// arduino:esp32 Nano ESP32 package has shipped) takes one chosen here. Both
+// route the pin through the Nano's Arduino-pin remap like digitalWrite.
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+static bool pwm_attach(uint8_t idx) {
+  return ledcAttach(kPinTable[idx], kDimFreqHz, kPwmBits);
+}
+static void pwm_write(uint8_t idx, uint16_t duty) {
+  ledcWrite(kPinTable[idx], pwm_counts(duty));
+}
+static void pwm_detach(uint8_t idx) { ledcDetach(kPinTable[idx]); }
+#else
+constexpr uint8_t kLedcChannels = 8;  // ESP32-S3
+static uint8_t g_pwm_chan[kNumPins];  // channel of each pin in g_dim_pwm
+
+static bool pwm_attach(uint8_t idx) {
+  for (uint8_t ch = 0; ch < kLedcChannels; ch++) {
+    bool taken = false;
+    for (uint8_t k = 0; k < kNumPins; k++) {
+      if ((g_dim_pwm & (1u << k)) && g_pwm_chan[k] == ch) taken = true;
+    }
+    if (taken) continue;
+    if (ledcSetup(ch, kDimFreqHz, kPwmBits) == 0) return false;
+    ledcAttachPin(kPinTable[idx], ch);
+    g_pwm_chan[idx] = ch;
+    return true;
+  }
+  return false;
+}
+static void pwm_write(uint8_t idx, uint16_t duty) {
+  ledcWrite(g_pwm_chan[idx], pwm_counts(duty));
+}
+static void pwm_detach(uint8_t idx) { ledcDetachPin(kPinTable[idx]); }
+#endif
+
+// Hold pin `idx` at `duty` / kDimFull: LOW at 0 and steadily HIGH at full scale
+// (plain GPIO, LEDC detached), hardware PWM in between. False, with the pin
+// left at its previous level, when no LEDC channel could be attached.
+static bool set_dim(uint8_t idx, uint16_t duty) {
+  const uint32_t bit = 1u << idx;
+  const uint8_t gpio = kPinTable[idx];
+  if (duty != 0 && duty == g_dim_duty[idx]) return true;  // unchanged: no edge
+  if (duty == 0 || duty == kDimFull) {
+    if (g_dim_pwm & bit) {
+      pwm_detach(idx);
+      g_dim_pwm &= ~bit;
+    }
+    pinMode(gpio, OUTPUT);
+    digitalWrite(gpio, duty ? HIGH : LOW);
+  } else {
+    if (!(g_dim_pwm & bit)) {
+      if (!pwm_attach(idx)) {
+        // A failed attach may already have released the pin from GPIO.
+        pinMode(gpio, OUTPUT);
+        digitalWrite(gpio, g_dim_duty[idx] == kDimFull ? HIGH : LOW);
+        return false;
+      }
+      g_dim_pwm |= bit;
+    }
+    pwm_write(idx, duty);
+  }
+  g_dim_duty[idx] = duty;
+  if (duty) {
+    g_dim_mask |= bit;
+  } else {
+    g_dim_mask &= ~bit;
+  }
+  return true;
+}
+
+// ---- Dim parse + validate (independent of the run state) --------------------
+static void parse_dim(const uint8_t *payload, uint16_t len) {
+  if (len != kDimPayload) { reject('l'); return; }
+  const uint8_t idx = payload[0];
+  uint16_t duty = rd16(payload + 1);
+  if (idx >= kNumPins) { reject('p'); return; }
+  if ((1u << idx) & kReservedMask) { reject('r'); return; }
+  if ((1u << idx) & (g_run_mask | g_pend_mask)) { reject('u'); return; }
+  if (duty > kDimFull) duty = kDimFull;
+  if (!set_dim(idx, duty)) { reject('w'); return; }
+  g_dim_boot &= ~(1u << idx);   // the host owns its level from now on
+  g_dim_known |= (1u << idx);   // and it comes up at full on the next boot
+  emit('P');
+}
+
+// Bring the remembered dim pins up at full (their boot default).
+static void restore_boot_dims() {
+  g_prefs_ok = g_prefs.begin(kPrefsNamespace, /*readOnly=*/false);
+  if (!g_prefs_ok) return;
+  const uint32_t valid = ((1u << kNumPins) - 1) & ~kReservedMask;
+  g_dim_known = g_dim_stored = g_prefs.getUInt(kPrefsDimPins, 0) & valid;
+  for (uint8_t idx = 0; idx < kNumPins; idx++) {
+    if ((g_dim_known & (1u << idx)) && set_dim(idx, kDimFull)) g_dim_boot |= 1u << idx;
+  }
+}
+
+// Write the remembered set to NVS when it changed, only while idle: a flash
+// write takes milliseconds the frame clock cannot spare. Not retried on failure.
+static void store_dim_pins() {
+  if (!g_prefs_ok || g_dim_known == g_dim_stored || g_state != State::IDLE) return;
+  g_prefs.putUInt(kPrefsDimPins, g_dim_known);
+  g_dim_stored = g_dim_known;
 }
 
 // ---- setup / loop ----------------------------------------------------------
@@ -493,6 +690,8 @@ void setup() {
   // pins LOW; with runtime pins we can't know them yet, so keep them from
   // floating into a camera trigger input.)
   for (uint8_t idx = 3; idx < kNumPins; idx++) pinMode(kPinTable[idx], INPUT_PULLDOWN);
+  // Pins a dim command ever set come up at full until the host sets them.
+  restore_boot_dims();
 
   // No blocking `while (!Serial)` — must come up even without a host attached.
   Serial.begin(kBaudRate);
@@ -522,6 +721,8 @@ void loop() {
           reject('c');
         } else if (g_buf[0] != kProtocolVersion) {
           reject('v');
+        } else if (g_cmd == kDimMagic) {
+          parse_dim(g_buf + 3, g_want_len);
         } else {
           parse_and_validate(g_buf + 3, g_want_len);
         }
@@ -537,7 +738,9 @@ void loop() {
       Serial.write(' ');
       Serial.print(TRIGGERBOX_FW_BUILD);
       Serial.write('\n');
-    } else if (b == kArmMagic) {
+    } else if (b == kArmMagic || b == kDimMagic) {
+      // Both frames share the header, length and checksum; g_cmd picks the parser.
+      g_cmd = b;
       g_rx = Rx::COLLECT;
       g_got = 0;
       g_need = 3;  // collect the header first
@@ -551,6 +754,8 @@ void loop() {
       (int32_t)(millis() - g_deadline_ms) >= 0) {
     g_rx = Rx::CMD;
   }
+
+  store_dim_pins();  // no-op unless idle with a changed set
 
   // ---- Clocks (RUNNING only) -----------------------------------------------
   if (g_state == State::RUNNING) {

@@ -995,7 +995,7 @@ _TRIGGERBOX_STATUS = {
     "ready": True,
     "device": "/dev/ttyACM0",
     "arduino_state": "idle",
-    "firmware": "TRIGGERBOX 2 abc1234",
+    "firmware": "TRIGGERBOX 4 abc1234",
     "firmware_ok": True,
     "firmware_state": "current",
     "needs_flash": False,
@@ -1127,6 +1127,112 @@ def test_triggerbox_auto_strobe_updates_when_the_camera_system_attaches(
         assert 2 <= exposure_reads["n"] <= 4, exposure_reads["n"]
     finally:
         page.close()
+
+
+def _make_triggerbox_tab(page: Page, status: dict) -> None:
+    """The real TriggerboxTab in a fresh panel as window.__tb, against a fetch
+    stub that records each request in window.__reqs and answers
+    /api/triggerbox/dim from window.__dimReply (status, body).
+    """
+    page.route(
+        "**/plugins/triggerbox/triggerbox.js",
+        lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=TRIGGERBOX_JS.read_text()
+        ),
+    )
+    page.evaluate(
+        """async (status) => {
+            window.__reqs = [];
+            window.__notes = [];
+            window.__dimReply = null;
+            window.fetch = async (url, opts) => {
+                const body = opts?.body ? JSON.parse(opts.body) : null;
+                window.__reqs.push([opts?.method || 'GET', url, body]);
+                if (url === '/api/triggerbox/dim') {
+                    const [code, data] = window.__dimReply ||
+                        [200, { dim: [{ pin: body.pin, percent: body.percent }] }];
+                    return { ok: code < 300, status: code, json: async () => data };
+                }
+                return { ok: true, status: 200, json: async () => ({}) };
+            };
+            const { default: Tab } = await import('/plugins/triggerbox/triggerbox.js');
+            const panel = document.createElement('section');
+            document.body.appendChild(panel);
+            window.__tb = new Tab({
+                name: 'triggerbox', panel, status,
+                send: () => {},
+                notify: (level, msg) => window.__notes.push([level, msg]),
+                getRecordSettings: () => ({ fps: 50, duration_s: 10 }),
+            });
+            window.__tb.setConnected(true);
+            await new Promise((r) => setTimeout(r, 0));
+        }""",
+        status,
+    )
+
+
+def test_triggerbox_dim_slider_sets_follows_and_snaps_back(page):
+    """A configured dim output gets a 0-100 % control: an edit posts the level,
+    a push from another client moves it, and a level the board refuses snaps
+    back to the one it holds.
+    """
+    status = {
+        **_TRIGGERBOX_STATUS,
+        "dim": [{"pin": "D9", "percent": 40}],
+    }
+    # The IR strobe on the driver board's line: the tab keeps the config's pin.
+    status["lights"] = [{**status["lights"][0], "pin": "D10"}]
+    _make_triggerbox_tab(page, status)
+    assert page.evaluate(
+        "() => window.__tb.getStartParams().lights.map((l) => l.pin)"
+    ) == ["D10"]
+    row = "#triggerbox-dims .tb-dim-row[data-pin='D9']"
+    assert not _hidden(page, "#triggerbox-dim-section")
+    assert prop(page, f"{row} .tb-dim-range", "e => e.value") == "40"
+    assert prop(page, f"{row} .tb-dim-range", "e => e.disabled") is False
+
+    def set_number(value: str) -> None:
+        page.evaluate(
+            """async ([sel, value]) => {
+                const input = document.querySelector(sel);
+                input.value = value;
+                input.dispatchEvent(new Event('change'));
+                await new Promise((r) => setTimeout(r, 0));
+            }""",
+            [f"{row} .tb-dim-number", value],
+        )
+
+    set_number("125")  # clamped to the input's max
+    dims = [r for r in page.evaluate("() => window.__reqs") if r[1].endswith("/dim")]
+    assert dims == [["POST", "/api/triggerbox/dim", {"pin": "D9", "percent": 100}]]
+    assert prop(page, f"{row} .tb-dim-range", "e => e.value") == "100"
+
+    page.evaluate("() => window.__tb.applyState({ dim: [{ pin: 'D9', percent: 60 }] })")
+    assert prop(page, f"{row} .tb-dim-number", "e => e.value") == "60"
+
+    page.evaluate("() => { window.__dimReply = [409, { detail: 'D9 is in use' }]; }")
+    set_number("10")
+    assert prop(page, f"{row} .tb-dim-range", "e => e.value") == "60"
+    assert ["error", "D9 is in use"] in page.evaluate("() => window.__notes")
+
+    # A camera line on the dimmed pin is flagged before the board refuses it.
+    page.evaluate(
+        """() => {
+            window.__tb.cameras[0].pin = 'D9';
+            window.__tb._renderTiming();
+        }"""
+    )
+    assert "pin D9 is dimmed" in prop(
+        page, "#triggerbox-timing-summary", "e => e.textContent"
+    )
+
+    page.evaluate("() => window.__tb.setConnected(false)")
+    assert prop(page, f"{row} .tb-dim-range", "e => e.disabled") is True
+
+
+def test_triggerbox_dim_section_hidden_without_dim_outputs(page):
+    _make_triggerbox_tab(page, _TRIGGERBOX_STATUS)
+    assert _hidden(page, "#triggerbox-dim-section")
 
 
 def test_flywheel_tab_seeds_its_loop_from_the_configured_command(
