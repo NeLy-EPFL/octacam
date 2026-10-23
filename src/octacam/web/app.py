@@ -55,10 +55,12 @@ def create_app(
     config: OctacamConfig,
     shutdown_callback: Callable[[], None] = _default_shutdown,
     user: str | None = None,
+    pinned: frozenset[str] = frozenset(),
 ) -> FastAPI:
     """The GUI's app for `controller`, serving the plugins it was built with
     and saving to its config dir. *user* (`--user`) is chosen at start, else
-    the last user of this rig on this machine.
+    the last user of this rig on this machine. *pinned*: the config keys the
+    launch's `--set` gave, which choosing a user keeps.
     """
     config_dir = str(controller.config_dir or "")
     hub = Hub()
@@ -82,6 +84,7 @@ def create_app(
         config_dir,
         raw_config=config_writer.load_raw_config(config_dir) if config_dir else {},
         plugin_web=plugin_web,
+        pinned=pinned,
     )
     users.choose_initial_user(state, user)
 

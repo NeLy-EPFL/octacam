@@ -29,17 +29,27 @@ from octacam.cli.flash import preflight_firmware
 log = logging.getLogger("octacam")
 
 
-def _say_who_records(name: str, initials: str, settings, user: str | None) -> None:
-    """Log whose take this is and where its data goes: a warning when the user
-    is the last one remembered on this machine rather than `--user`, so a
-    different person at the keyboard notices before their data lands in
-    someone else's folders.
+def _say_who_records(
+    name: str,
+    initials: str,
+    settings,
+    user: str | None,
+    plugin_options: dict[str, dict] | None = None,
+) -> None:
+    """Log whose take this is and where its data goes, the user's plugin
+    options (their 2P share) included: a warning when the user is the last one
+    remembered on this machine rather than `--user`, so a different person at
+    the keyboard notices before their data lands in someone else's folders.
     """
     who = f"{initials} ({name})" if name else initials
     where = (
         f"saving to {settings.save_dir}, transfer to "
         f"{settings.transfer_directory or '(none)'}"
     )
+    for plugin, options in sorted((plugin_options or {}).items()):
+        shown = ", ".join(f"{k} {v}" for k, v in sorted(options.items()))
+        if shown:
+            where += f", {plugin} {shown}"
     if user:
         log.info("Recording as %s: %s", who, where)
     else:
@@ -189,7 +199,7 @@ def record(
     `--set`.
     """
     from octacam import session_cache
-    from octacam.config import RecordingSettings, load_config_dir
+    from octacam.config import RecordingSettings, load_config_dir, override_keys
     from octacam.controller import RecordingController
     from octacam.plugins import build_plugins
     from octacam.users import recording_user, settings_for_user
@@ -201,7 +211,9 @@ def record(
     settings = RecordingSettings.from_config(config, fps=fps)
     initials = recording_user(config, config_dir, user)
     if initials:
-        settings = settings.updated(**settings_for_user(config, initials))
+        settings = settings.updated(
+            **settings_for_user(config, initials, pinned=override_keys(sets))
+        )
     if duration is not None:
         settings.duration_s = duration
     if out is not None:
@@ -209,7 +221,13 @@ def record(
         # the folder name.
         settings = settings.with_save_dir(str(out))
     if initials:
-        _say_who_records(config.users[initials].name, initials, settings, user)
+        _say_who_records(
+            config.users[initials].name,
+            initials,
+            settings,
+            user,
+            config.users[initials].plugins,
+        )
 
     warn_if_transcoding()
 

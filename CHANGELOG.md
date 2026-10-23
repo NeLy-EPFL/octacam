@@ -22,9 +22,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   folder name back, and summaries name who recorded. `record` without
   `--user` warns that it records as the last user and says where the data
   goes.
-- **Experiment / Fly / Take fields with Next fly** in the Record tab, and a
+- **Experiment / Fly / Take fields with Next fly** in the Record tab (one
+  folder name each; a deeper recording folder keeps the raw field), and a
   **Ready?** strip saying what to fix before recording (cameras, boards, disk,
-  destination, and each plugin's own checks).
+  destination, and each plugin's own checks). An explicit
+  `--set transfer.directory=...` wins over the chosen user's destination.
 - **`octacam process` transfers the data before building grids**, so a day's
   videos are on the destination hours earlier; grids are built and transferred
   after. **Plugins can add processing steps** (`Plugin.process_steps`, a

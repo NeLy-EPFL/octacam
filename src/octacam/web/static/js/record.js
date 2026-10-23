@@ -8,28 +8,32 @@ const BUSY_STATES = new Set(["waiting", "recording", "finishing"]);
 // Each collapsible section's open state, per browser: `${SECTION_KEY}<name>`.
 const SECTION_KEY = "octacam.record.section.";
 
-// A recording folder `<experiment...>/<fly>/<take>` as its three parts, or
-// null when it has fewer than three (then the raw field is shown).
+// A recording folder `<experiment>/<fly>/<take>` as its three parts, or null
+// for any other depth (then the raw field is shown): each part is one folder,
+// the layout the 2P processing walks (<day>/<fly>/<take>).
 export function splitRecording(relative) {
   const parts = (relative || "").split("/").filter(Boolean);
-  if (parts.length < 3) return null;
-  return {
-    experiment: parts.slice(0, -2).join("/"),
-    fly: parts[parts.length - 2],
-    take: parts[parts.length - 1],
-  };
+  if (parts.length !== 3) return null;
+  const [experiment, fly, take] = parts;
+  return { experiment, fly, take };
 }
 
 // The next fly: its number +1 (Fly2 -> Fly3, else "<fly>2"), the take's number
 // back to 1 at the same width (005 -> 001). The fly's number is the one right
-// after "Fly", else its first: a genotype after it stays (Fly1_GCaMP6s ->
-// Fly2_GCaMP6s, not Fly1_GCaMP7s).
+// after "Fly", else a number standing alone between "_"/"-" (a line name keeps
+// its digits: R57C10_1 -> R57C10_2), else its first: a genotype after it stays
+// (Fly1_GCaMP6s -> Fly2_GCaMP6s, not Fly1_GCaMP7s).
 export function nextFly({ experiment, fly, take }) {
   const bump = (text, pattern, to) =>
     text.replace(pattern, (whole, head, digits) =>
       head + String(to(Number(digits))).padStart(digits.length, "0")
     );
-  const flyNumber = /fly\d/i.test(fly) ? /(fly)(\d+)/i : /()(\d+)/;
+  const alone = /(^|[_-])(\d+)(?=$|[_-])/;
+  const flyNumber = /fly\d/i.test(fly)
+    ? /(fly)(\d+)/i
+    : alone.test(fly)
+      ? alone
+      : /()(\d+)/;
   const nextFlyName = /\d/.test(fly) ? bump(fly, flyNumber, (n) => n + 1) : `${fly}2`;
   const firstTake = /\d/.test(take) ? bump(take, /()(\d+)(?!.*\d)/, () => 1) : take;
   return { experiment, fly: nextFlyName, take: firstTake };
@@ -539,6 +543,11 @@ export class RecordTab {
     };
     if (!p.experiment || !p.fly || !p.take) {
       this.notify("warning", "Experiment, fly and take all need a name");
+      this._showTakeName(this.settings?.relative_directory);
+      return;
+    }
+    if ([p.experiment, p.fly, p.take].some((part) => /[\\/]/.test(part))) {
+      this.notify("warning", "Experiment, fly and take are each one folder name (no /)");
       this._showTakeName(this.settings?.relative_directory);
       return;
     }

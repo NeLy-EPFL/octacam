@@ -171,6 +171,8 @@ name = "Matthias"
 [users.MD.twophoton]
 source = "/share/MD"
 
+[emptytable]
+
 [[cameras]]
 name = "camera_F"
 serial_number = "123"

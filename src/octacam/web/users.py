@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -38,15 +39,64 @@ class NewUserRequest(StrictModel):
 
 # Checks touching the share or the NAS are cached briefly: the strip refreshes
 # often, and a hung mount must not hold every request. The NAS folders not set
-# up as users yet (a scandir of every user's transfer root) are cached as long.
+# up as users yet (a scandir of every user's transfer root) are refreshed as
+# often, in the background: a request waits at most DISCOVER_WAIT_S for a scan,
+# then answers with the last list (empty before the first), so a hung CIFS
+# mount never stalls the GUI.
 READY_CACHE_S = 20.0
+DISCOVER_WAIT_S = 1.0
+
+
+class _Discovered:
+    """The NAS's initials folders not set up as users, scanned off the request."""
+
+    def __init__(self, state: AppState):
+        self._state = state
+        self._lock = threading.Lock()
+        self._found: list[str] = []
+        self._scanned_at: float | None = None
+        self._scan: threading.Event | None = None  # set when the running scan ends
+
+    def get(self) -> list[str]:
+        with self._lock:
+            fresh = (
+                self._scanned_at is not None
+                and time.monotonic() - self._scanned_at < READY_CACHE_S
+            )
+            scan = self._scan
+            if not fresh and scan is None:
+                scan = self._scan = threading.Event()
+                threading.Thread(
+                    target=self._run, args=(scan,), name="users-discover", daemon=True
+                ).start()
+        if scan is not None:
+            scan.wait(DISCOVER_WAIT_S)
+        with self._lock:
+            return list(self._found)
+
+    def clear(self) -> None:
+        """Rescan on the next request (a user was added)."""
+        with self._lock:
+            self._scanned_at = None
+
+    def _run(self, done: threading.Event) -> None:
+        try:
+            found = users_mod.discover_initials(self._state.config.users)
+        except Exception:  # a scan must never kill the GUI
+            found = None
+        with self._lock:
+            if found is not None:
+                self._found = found
+            self._scanned_at = time.monotonic()
+            self._scan = None
+        done.set()
 
 
 def router(state: AppState) -> APIRouter:
     api = APIRouter()
     controller = state.controller
     ready_cache: dict[str, tuple[float, list[dict]]] = {}
-    discovered_cache: dict[str, tuple[float, list[str]]] = {}
+    discovered = _Discovered(state)
 
     def user_options() -> dict[str, dict[str, str]]:
         return {
@@ -54,14 +104,6 @@ def router(state: AppState) -> APIRouter:
             for p in controller.plugins.plugins
             if p.user_options
         }
-
-    def discovered() -> list[str]:
-        hit = discovered_cache.get("")
-        if hit and time.monotonic() - hit[0] < READY_CACHE_S:
-            return hit[1]
-        found = users_mod.discover_initials(state.config.users)
-        discovered_cache[""] = (time.monotonic(), found)
-        return found
 
     def listing() -> dict:
         settings = controller.get_settings()
@@ -76,7 +118,7 @@ def router(state: AppState) -> APIRouter:
                 for initials, user in sorted(state.config.users.items())
             ],
             "active": settings.user,
-            "discovered": discovered(),
+            "discovered": discovered.get(),
             "user_options": user_options(),
         }
 
@@ -89,7 +131,10 @@ def router(state: AppState) -> APIRouter:
             memory.relative_by_user[current.user] = current.relative_directory
         try:
             changes = users_mod.settings_for_user(
-                state.config, initials, memory.relative_by_user.get(initials)
+                state.config,
+                initials,
+                memory.relative_by_user.get(initials),
+                pinned=state.pinned,
             )
             updated = controller.update_settings(**changes)
         except RuntimeError as e:
@@ -167,7 +212,7 @@ def router(state: AppState) -> APIRouter:
                 }
             }
         )
-        discovered_cache.clear()  # they are set up now
+        discovered.clear()  # they are set up now
         # A later Save of the camera settings rewrites the file from this
         # copy: it must hold the new user too.
         from octacam.config_writer import load_raw_config
@@ -205,7 +250,10 @@ def choose_initial_user(state: AppState, user: str | None) -> None:
     if not initials:
         return
     changes = users_mod.settings_for_user(
-        state.config, initials, memory.relative_by_user.get(initials)
+        state.config,
+        initials,
+        memory.relative_by_user.get(initials),
+        pinned=state.pinned,
     )
     state.controller.update_settings(**changes)
     state.controller.plugins.on_user(state.config.users[initials].plugins)
