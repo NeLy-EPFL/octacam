@@ -60,6 +60,13 @@ SYNC_FOLDER_PREFIX = "SyncData"
 _VERIFY_TOLERANCE = 1
 # How late the board's cancel can land after octacam stopped the cameras.
 LATE_STOP_S = 0.5
+# ThorImage's start (`Experiment.xml` uTime, whole seconds) and its capture's
+# CaptureOn rise, both on the 2P PC's clock: 0.5-3 s apart on all 79 real pairs
+# (2026-10-14 to 10-22, streaming and Z-stacks). A capture whose start is
+# further from the segment's is another one, whatever its frame count (real
+# 2026-10-22 Fly1/003: two ~650-frame captures 171 s apart, the wrong one
+# matching SyncData206's FrameOut count 2 edges better).
+_CAPTURE_START_TOLERANCE_S = 5.0
 # No acquisition outlasts this (the plugin's ceiling defaults to 1 h): an
 # older start rules a folder out without reading its files' mtimes.
 _LONGEST_ACQUISITION_S = 4 * 3600.0
@@ -595,6 +602,19 @@ def is_settled(
     return quiet_s >= settle_s
 
 
+def _segment_start(sync: TwoPhotonFolder, segment: CaptureSegment) -> float:
+    """When *segment*'s `CaptureOn` rose, in unix seconds on the 2P PC's clock."""
+    return sync.start_time + segment.start_sample / (segment.sample_rate or 100_000.0)
+
+
+def _starts_capture(
+    image: TwoPhotonFolder, sync: TwoPhotonFolder, segment: CaptureSegment
+) -> bool:
+    """Whether *image*'s ThorImage start is the start of *segment*'s capture."""
+    gap = abs(_segment_start(sync, segment) - image.start_time)
+    return gap <= _CAPTURE_START_TOLERANCE_S
+
+
 def _start_gap_seconds(take_start: float, candidate: TwoPhotonFolder) -> float:
     """The sole timestamp-tier acceptance/ranking criterion: how far
     *candidate*'s start drifted from the take's own start.
@@ -761,6 +781,7 @@ def match_takes_to_twophoton_batch(
         take_end = take.start_time + take.duration_s
         matches: list[TwoPhotonMatch] = []
         verified_segment_key: tuple[Path, int] | None = None
+        verified_sync: TwoPhotonFolder | None = None
 
         if verify_with_signals:
             # Rank every (folder, segment) within tolerance rather than
@@ -813,8 +834,9 @@ def match_takes_to_twophoton_batch(
                     )
                 )
                 verified_segment_key = (best_folder.path, best_idx)
+                verified_sync = best_folder
 
-        if verified_segment_key is not None:
+        if verified_segment_key is not None and verified_sync is not None:
             claimed_segments.add(verified_segment_key)
             sync_path, seg_idx = verified_segment_key
             sync_segments = segment_cache[sync_path]
@@ -833,6 +855,8 @@ def match_takes_to_twophoton_batch(
                 # verified against October takes).
                 image_gap = _start_gap_seconds(take.start_time, c)
                 if image_gap > verify_window_s:
+                    continue
+                if not _starts_capture(c, verified_sync, segment):
                     continue
                 if c.path not in timepoints_cache:
                     timepoints_cache[c.path] = thorimage_expected_frameout_edges(
@@ -1140,18 +1164,18 @@ def correlate_sync_folder_to_image(
     """Find which discovered ThorImage folder *sync_folder* actually paired
     with, purely from the recorded DAQ signal -- no octacam take involved.
 
-    A `SyncData*` folder's `FrameOut` edge count (per `CaptureOn`
-    segment) is checked against every candidate's own `Experiment.xml
-    <Timelapse timepoints="...">` (scaled for FastZ, see
-    `thorimage_expected_frameout_edges`), within *window_s* of the
-    sync folder's own start; an
-    exact/near match is decisive, the same signal already used to confirm a
-    behavior-take pairing transitively (see `match_takes_to_twophoton_batch`)
-    -- this is that same check with no take in the loop, for a `SyncData`
-    folder that never matched any take at all (e.g. a same-fly Z-stack ThorSync
-    happened to be running for). Returns the best (lowest edge-count diff)
-    candidate within *tolerance*, or `None` (no h5py, no segments, or
-    nothing within tolerance) -- never raises.
+    A `SyncData*` folder's `FrameOut` edge count (per `CaptureOn` segment) is
+    checked against every candidate's own `Experiment.xml <Timelapse
+    timepoints="...">` (scaled for FastZ, see
+    `thorimage_expected_frameout_edges`), within *window_s* of the sync folder's
+    own start and starting with the segment it is checked against
+    (`_starts_capture`); an exact/near match is decisive, the same signal
+    already used to confirm a behavior-take pairing transitively (see
+    `match_takes_to_twophoton_batch`) -- this is that same check with no take in
+    the loop, for a `SyncData` folder that never matched any take at all (e.g. a
+    same-fly Z-stack ThorSync happened to be running for). Returns the best
+    (lowest edge-count diff) candidate within *tolerance*, or `None` (no h5py,
+    no segments, or nothing within tolerance) -- never raises.
     """
     segments = read_capture_segments(sync_folder.path)
     if not segments:
@@ -1171,6 +1195,8 @@ def correlate_sync_folder_to_image(
             # Whole-episode signature: one segment per slice, each with the
             # averaged-frame edge count (see thorimage_zstack_signature).
             slices, per_slice = zstack
+            if not _starts_capture(candidate, sync_folder, segments[0]):
+                continue
             if all(seg.frameout_edges == per_slice for seg in segments):
                 diff = abs(len(segments) - slices)
                 if diff <= tolerance:
@@ -1181,6 +1207,8 @@ def correlate_sync_folder_to_image(
             thorimage_frameout_tolerance(candidate.path / EXPERIMENT_XML_FILENAME),
         )
         for segment in segments:
+            if not _starts_capture(candidate, sync_folder, segment):
+                continue
             diff = frameout_edge_diff(segment, timepoints)
             if diff <= seg_tolerance:
                 ranked.append((diff, gap, candidate))

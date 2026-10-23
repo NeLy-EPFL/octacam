@@ -1526,11 +1526,13 @@ def test_sweep_attributes_unclaimed_sync_folder_via_frameout_correlation(tmp_pat
     _make_image_folder_2p(
         source_root, "exp", "Fly1_001", u_time=take_start + 2, n_frames=2
     )
+    # Started with Fly1_001's capture (4 s after it), but over the 5 s
+    # match window from the take, which leaves it unclaimed.
     _make_verifiable_sync_folder_2p(
         source_root,
         "exp",
         "SyncData999",
-        mtime=take_start - 500,
+        mtime=take_start + 6,
         camera_frames=0,
         frameout_edges=2,
     )
@@ -2586,7 +2588,7 @@ def test_reconcile_puts_a_zstack_and_its_thorsync_in_one_session(tmp_path):
         di.create_dataset("FrameOut", data=frameout)
         di.create_dataset("Cameras", data=np.zeros((300, 1), np.uint32))
     (sync / "ThorRealTimeDataSettings.xml").write_text("<ThorData/>")
-    os.utime(sync / "ThorRealTimeDataSettings.xml", (t0 - 60, t0 - 60))
+    os.utime(sync / "ThorRealTimeDataSettings.xml", (t0 + 2, t0 + 2))
 
     result = _reconcile(
         _rig_config(tmp_path, dest_root), dest_root / "261014_PAM7xCI80"

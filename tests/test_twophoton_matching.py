@@ -550,6 +550,60 @@ def test_batch_verified_image_tier_ignores_far_away_same_count_folder(tmp_path):
     assert correlate_sync_folder_to_image(sync, [weeks_old]) is None
 
 
+def _make_stopped_early_image_folder(
+    root: Path, experiment: str, name: str, *, u_time: float, frames: int
+) -> TwoPhotonFolder:
+    """A 5000-timepoint stream stopped after *frames* frames (one file each)."""
+    folder = root / experiment / name
+    folder.mkdir(parents=True)
+    (folder / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment>'
+        f'<Date date="x" uTime="{u_time}" />'
+        '<Wavelengths><Wavelength name="ChanA" /></Wavelengths>'
+        '<Streaming enable="1" zFastEnable="0" /><Timelapse timepoints="5000" />'
+        "</ThorImageExperiment>"
+    )
+    for t in range(1, frames + 1):
+        (folder / f"ChanA_001_001_001_{t:04d}.tif").write_bytes(b"")
+    return TwoPhotonFolder(folder, "image", start_time=u_time, last_mtime=u_time)
+
+
+def test_batch_verified_image_must_start_with_its_capture(tmp_path):
+    # Real bug (2026-10-22 Fly1/003): two short captures 173 s apart, 649 and
+    # 651 frames; SyncData206 recorded 651 FrameOut edges. The next take's
+    # capture fit the count 2 edges better and was "verified" 169 s away, its
+    # own take got no imaging, and the right capture was left unclaimed.
+    sync = _make_verifiable_sync_folder(
+        tmp_path,
+        "exp",
+        "SyncData206",
+        mtime=1001.0,
+        capture_ranges=[(100, 4900)],
+        cameras_per_segment=[50],
+        frameout_per_segment=[651],
+    )
+    right = _make_stopped_early_image_folder(
+        tmp_path, "exp", "Fly1_Streaming_002", u_time=1000.0, frames=649
+    )
+    next_one = _make_stopped_early_image_folder(
+        tmp_path, "exp", "Fly1_Streaming_003", u_time=1173.0, frames=651
+    )
+    take = TakeInfo(
+        tmp_path / "003", start_time=1001.0, duration_s=46.0, camera_frame_counts=[50]
+    )
+    results = match_takes_to_twophoton_batch(
+        [take],
+        [sync, right, next_one],
+        match_window_s=5.0,
+        verify_window_s=3600.0,
+        verify_with_signals=True,
+    )
+    image = [m for m in results[take.folder] if m.folder.kind == "image"]
+    assert [(m.folder, m.confidence) for m in image] == [(right, "verified")]
+    assert correlate_sync_folder_to_image(sync, [next_one, right]) is right
+    assert correlate_sync_folder_to_image(sync, [next_one]) is None
+
+
 def _make_zstack_image_folder(
     root: Path, experiment: str, name: str, *, u_time: float, steps: int, average: int
 ) -> TwoPhotonFolder:
@@ -823,7 +877,7 @@ def test_correlate_sync_folder_to_image_finds_matching_candidate(tmp_path):
         frameout_per_segment=[50],
     )
     right = _make_image_folder_with_timepoints(
-        tmp_path, "exp", "Fly1_Zstack", u_time=2000.0, timepoints=50
+        tmp_path, "exp", "Fly1_Zstack", u_time=999.0, timepoints=50
     )
     wrong = _make_image_folder_with_timepoints(
         tmp_path, "exp", "Fly1_001", u_time=3000.0, timepoints=999
