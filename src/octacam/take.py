@@ -10,6 +10,7 @@ summary.
 """
 
 import contextlib
+import dataclasses
 import logging
 import shutil
 import threading
@@ -17,8 +18,6 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
-
-import numpy as np
 
 from octacam import config_writer, session_cache
 from octacam.cameras import CameraSystem
@@ -227,12 +226,21 @@ def _unlike_profiles_note(groups: dict[DeliveryProfile | str, list[str]]) -> str
     )
 
 
+# The start check's arrival window: a camera's first second of frames (at
+# least ARRIVAL_MIN_FRAMES), whose fastest deliveries give its latency: the
+# ARRIVAL_FLOOR_QUANTILE of them, so a single early outlier cannot decide it.
+ARRIVAL_WINDOW_NS = 1_000_000_000
+ARRIVAL_MIN_FRAMES = 16
+ARRIVAL_FLOOR_QUANTILE = 0.05
+
+
 def check_sync(
     stats: list[CameraStats],
     recording: list[str],
     clock: PulseClock,
     profiles: dict[str, DeliveryProfile | None],
     completed: bool,
+    train_pulses: int | None = None,
 ) -> dict:
     """Whether frame k is the same trigger pulse in every camera, and why not.
 
@@ -247,7 +255,19 @@ def check_sync(
     comparable only between cameras of one delivery profile (a 2048^2 GS3 lands
     ~4.5 ms after an acA1920): those deliver a pulse within ~0.5 ms of each
     other, so a pulse late is a whole period. Across profiles a note says the
-    start was not checked.
+    start was not checked. Delivery only ever lags (a stall, a burst after a
+    backlog), so a camera's latency is a low quantile of its first second of
+    frames (`ARRIVAL_FLOOR_QUANTILE`).
+
+    `train_pulses`: how many pulses an unfilled (external) train emitted, as
+    its source reported when a plugin ended the take
+    (`controller.finish_recording`). A camera spanning that many pulses, from
+    its first frame to its last, started on the first and ended on the last, so
+    when every camera does the arrivals are not compared: six acA1920s sharing
+    a USB bus deliver one pulse up to 2.4 periods apart at 100 fps
+    (2026-10-16), equal frame counts throughout. Equal spans alone prove
+    nothing: a camera that missed the first pulse and one that missed the last
+    span the same.
     """
     warnings: list[str] = []
     notes: list[str] = []
@@ -357,6 +377,7 @@ def check_sync(
             "start_offsets": offsets,
         }
     delays: dict[str, float] = {}
+    window = max(ARRIVAL_MIN_FRAMES, int(ARRIVAL_WINDOW_NS // period)) if period else 0
     for camera in cams:
         rows = [
             (arrival, pulse)
@@ -364,11 +385,19 @@ def check_sync(
                 camera.arrival_ns, camera.pulse_index, strict=False
             )
             if arrival
-        ][:16]
+        ][:window]
         if period and len(rows) >= 4:
-            delays[camera.name] = float(
-                np.median([arrival - pulse * period for arrival, pulse in rows])
-            )
+            lags = sorted(arrival - pulse * period for arrival, pulse in rows)
+            delays[camera.name] = float(lags[int(len(lags) * ARRIVAL_FLOOR_QUANTILE)])
+    spans = {c.name: c.pulse_index[-1] + 1 for c in cams if c.pulse_index}
+    aligned = (
+        bool(train_pulses)
+        and not clock.fill
+        and len(spans) == len(cams) > 1
+        and set(spans.values()) == {train_pulses}
+    )
+    if aligned:
+        offsets = dict.fromkeys(spans, 0)
     # Group the cameras by delivery profile; one whose profile could not be read
     # is a group of its own, under its name, and compared with none.
     groups: dict[DeliveryProfile | str, list[str]] = {}
@@ -378,7 +407,7 @@ def check_sync(
             key = profile if profile is not None else camera.name
             groups.setdefault(key, []).append(camera.name)
     for members in groups.values():
-        if len(members) < 2:
+        if len(members) < 2 or aligned:
             continue
         earliest = min(delays[name] for name in members)
         for name in members:
@@ -401,7 +430,13 @@ def check_sync(
                         f"frame i shows the moment of the other cameras' frame "
                         f"i+{nearest} (it missed the train's first pulse(s))"
                     )
-    if len(groups) > 1:
+    if aligned:
+        notes.append(
+            f"Every camera spans the {train_pulses} pulses its trigger source "
+            "reported, so each started on the first (checked by frame count, not "
+            "by when the first frames reached the host)"
+        )
+    elif len(groups) > 1:
         notes.append(_unlike_profiles_note(groups))
     return {"ok": ok, "warnings": warnings, "notes": notes, "start_offsets": offsets}
 
@@ -485,7 +520,15 @@ class Take:
         self.plugins = plugins
         self.plugin_params = plugin_params
         self.profiles = profiles
-        self.clock = resolve_pulse_clock(settings, plugins, plugin_params)
+        # A plugin that ends the take itself (twophoton, when ThorImage stops)
+        # sets a ceiling that stands in for the duration, deadline and pulses.
+        self.ceiling = plugins.take_ceiling(plugin_params)
+        clock_settings = (
+            dataclasses.replace(settings, duration_s=self.ceiling[1])
+            if self.ceiling
+            else settings
+        )
+        self.clock = resolve_pulse_clock(clock_settings, plugins, plugin_params)
         # octacam drives the trigger, so it can prime the cameras.
         self.primed = settings.trigger_source in ("software", "managed")
         self.hooks_timeout_s = start_sequence_timeout_s(
@@ -499,18 +542,33 @@ class Take:
         self.primed_pulses = 0
         self.train_end: float | None = None  # monotonic, once the train started
         self.deadline: float | None = None  # monotonic, once the countdown started
+        self.countdown_started: float | None = None  # monotonic, the first frame
+        self.first_frame_wall_ns = 0  # wall clock at the first frame
         self.completed: bool | None = None  # ran to its end (None: not over yet)
+        self.ended_by: str | None = None  # the plugin that ended it (finish)
+        # The pulses its source emitted, as that plugin reported (finish).
+        self.source_pulses: int | None = None
         self.sync: dict | None = None
         self._event = event
         self._config_dir = config_dir
         self._session_id = session_id
         self._record_kind = record_kind
         self._stop = threading.Event()
+        self._finish = threading.Event()
 
     def stop(self, abort: bool) -> None:
         """End the take early; the last call says whether it was aborted."""
         self.aborted = abort
         self._stop.set()
+
+    def finish(self, by: str, pulses: int | None = None) -> None:
+        """End the take as complete: the plugin `by` decides its end (it set a
+        ceiling, `Plugin.take_ceiling_s`), so this is not an early stop.
+        `pulses`: how many its trigger source emitted, when it can tell.
+        """
+        self.ended_by = by
+        self.source_pulses = pulses if pulses is not None and pulses > 0 else None
+        self._finish.set()
 
     # ---------------------------------------------------------------- start
 
@@ -582,7 +640,11 @@ class Take:
                     take.arm_counting()
             if not self._stop.is_set():
                 if self.settings.trigger_source == "software":
-                    self.system.start_software_trigger(self.settings.duration_s)
+                    # A plugin's ceiling stands in for the duration (its finish
+                    # stops the train sooner).
+                    self.system.start_software_trigger(
+                        self.ceiling[1] if self.ceiling else self.settings.duration_s
+                    )
                 self.plugins.on_recording_start(self.plugin_params)
                 # Anchored after the arm returns: it can take seconds (a board's
                 # USB-reset recovery), which an earlier anchor cuts from the take.
@@ -666,6 +728,8 @@ class Take:
         """
         hardware = self.settings.trigger_source != "software"
         expected = len(self.recording)
+        # Only a stop ends this wait: a plugin's finish before the first frame
+        # (an external take whose trigger never came) leaves it to the operator.
         start = time.monotonic()
         armed_at: float | None = None
         warned = False
@@ -712,7 +776,12 @@ class Take:
         """
         self.hooks_done.wait(self.hooks_timeout_s)
         self.plugins.on_first_frame(self.plugin_params)
-        self.deadline = time.monotonic() + self.settings.duration_s + STOP_GRACE_S
+        # An externally triggered take starts on its first frame, which may come
+        # long after Start (octacam armed before the 2P acquisition starts).
+        self.first_frame_wall_ns = time.time_ns()
+        self.countdown_started = time.monotonic()
+        duration_s = self.ceiling[1] if self.ceiling else self.settings.duration_s
+        self.deadline = self.countdown_started + duration_s + STOP_GRACE_S
 
     def countdown(self) -> None:
         """Run until stopped or the take is over, telling the operator of missed
@@ -725,7 +794,7 @@ class Take:
         assert deadline is not None
         reported: dict[str, int] = {}
         takes = self.camera_takes
-        while not self._stop.is_set():
+        while not self._stop.is_set() and not self._finish.is_set():
             if takes and all(take.tracker.complete for take in takes):
                 break
             train_end = self.train_end
@@ -768,6 +837,25 @@ class Take:
         self.completed = not self._stop.is_set()
         self.hooks_done.wait(self.hooks_timeout_s)
 
+    def _emitted_pulses(self) -> int:
+        """The pulses a finished train emitted: what its source reported, else
+        the software trigger's newest fired trigger (an offered one still
+        pending at the stop never fired), else the furthest any camera got (a
+        plugin finishes once its source stopped, so no pulse is in flight).
+        """
+        if self.source_pulses is not None:
+            return self.source_pulses
+        if self.clock.source == "software":
+            return max(
+                (
+                    camera.backend.trigger.fired_count
+                    for camera in self.system.cameras
+                    if camera.name in self.recording
+                ),
+                default=0,
+            )
+        return max((take.tracker.next_pulse for take in self.camera_takes), default=0)
+
     def teardown(self) -> None:
         """Trigger off -> grab loops exit -> writers drain -> sync check ->
         summary, timestamps and the session-cache note.
@@ -775,12 +863,22 @@ class Take:
         self.system.stop_software_trigger()
         # A completed train pads every video to its pulse count (a camera that
         # missed the last pulses still ends on the last pulse); a stopped take
-        # ends where it was.
+        # ends where it was. A take a plugin finished ended before its ceiling's
+        # count: its train is the pulses emitted, which the summary and the sync
+        # check then go by too.
+        if self.completed and self.ended_by is not None and self.clock.fill:
+            self.clock = dataclasses.replace(self.clock, count=self._emitted_pulses())
         clock = self.clock
         self.system.stop(clock.count if self.completed and clock.fill else None)
         stats = [take.stats() for take in self.camera_takes]
         self.sync = check_sync(
-            stats, self.recording, clock, self.profiles, bool(self.completed)
+            stats,
+            self.recording,
+            clock,
+            self.profiles,
+            bool(self.completed),
+            # Reported by the plugin that ended the take once its source stopped.
+            train_pulses=self.source_pulses if self.completed else None,
         )
         for message in self.sync["warnings"]:
             self._event("warning", message)
@@ -885,6 +983,9 @@ class Take:
                 sync=self.sync,
                 primed_pulses=self.primed_pulses,
                 completed=self.completed,
+                first_frame_wall_ns=self.first_frame_wall_ns,
+                ended_by=self.ended_by,
+                duration_limit_s=self.ceiling[1] if self.ceiling else None,
             )
             log.info("Wrote recording summary: %s", write_summary(folder, summary))
         except Exception:

@@ -119,6 +119,7 @@ class RecordingController:
         self._starting = False
         # The current or last recording, and the thread that drives it.
         self._take: Take | None = None
+        self._take_id = 0  # numbers the takes this controller started
         self._monitor: threading.Thread | None = None
         # Bumped per countdown, so a client that missed the states between two
         # recordings can still tell them apart.
@@ -144,6 +145,12 @@ class RecordingController:
     def _set_state(self, state: str) -> None:
         self._state = state
         self._notify("state", self.snapshot())
+
+    def event(self, level: str, message: str) -> None:
+        """Tell the operator (event log + listeners), for plugins: `level` is
+        `"info"`, `"warning"` or `"error"`.
+        """
+        self._event(level, message)
 
     def _event(self, level: str, message: str) -> None:
         """Log an operator-facing message and send it to the listeners; `level`
@@ -193,6 +200,13 @@ class RecordingController:
     def notify_state(self) -> None:
         """Broadcast the current snapshot to listeners."""
         self._notify("state", self.snapshot())
+
+    @property
+    def take_id(self) -> int:
+        """The current (or latest) take's number: a plugin that ends its take
+        later passes it to `finish_recording`, which then cannot end another.
+        """
+        return self._take_id
 
     @property
     def recording_active(self) -> bool:
@@ -611,6 +625,7 @@ class RecordingController:
         """
         resume_mode: str | None = None
         with self._lock:
+            self._take_id += 1
             take = self._take = Take(
                 self.camera_system,
                 self._settings,
@@ -718,6 +733,32 @@ class RecordingController:
                 return
             assert self._take is not None
             self._take.stop(abort)
+
+    def finish_recording(
+        self, by: str, *, pulses: int | None = None, take_id: int | None = None
+    ) -> None:
+        """End the current recording as complete, for the plugin `by` that set
+        its end (`Plugin.take_ceiling_s`); unlike `stop_recording`, not an
+        early stop. Call it once the plugin's trigger source has stopped.
+
+        `pulses`: how many pulses that source emitted, when it can tell; every
+        video then ends on that count, and a camera spanning all of them provably
+        started on the first. `take_id`: the `take_id` read while the take ran,
+        so a call that lost the race to a newer take does not end that one.
+        """
+        with self._lock:
+            if not self.recording_active:
+                return
+            if take_id is not None and take_id != self._take_id:
+                log.info(
+                    "%s asked to end take %d, but take %d is running: ignored",
+                    by,
+                    take_id,
+                    self._take_id,
+                )
+                return
+            assert self._take is not None
+            self._take.finish(by, pulses)
 
     def join(self, timeout: float | None = None) -> None:
         """Block until the current recording has fully finished."""
@@ -839,13 +880,19 @@ class RecordingController:
             settings = self._settings
             take = self._take
             remaining_ms = None
+            elapsed_ms = None
             recording_id = None
             if (
                 self._state == "recording"
                 and take is not None
                 and take.deadline is not None
             ):
-                remaining_ms = max(0, round((take.deadline - time.monotonic()) * 1000))
+                now = time.monotonic()
+                if take.ceiling and take.countdown_started is not None:
+                    # A plugin ends it: no countdown, only the time so far.
+                    elapsed_ms = max(0, round((now - take.countdown_started) * 1000))
+                else:
+                    remaining_ms = max(0, round((take.deadline - now) * 1000))
                 recording_id = self._recording_seq
         # The last take's writer failure stays shown until the next take.
         failed = (
@@ -866,6 +913,10 @@ class RecordingController:
             "ready": self._ready,
             "init_error": self._init_error,
             "remaining_ms": remaining_ms,
+            "elapsed_ms": elapsed_ms,
+            # The plugin that ends this take itself, and its ceiling.
+            "ended_by_plugin": take.ceiling[0] if take and take.ceiling else None,
+            "duration_limit_s": take.ceiling[1] if take and take.ceiling else None,
             "recording_id": recording_id,
             "recordings_made": self._recordings_made,
             "save_dir": settings.save_dir,

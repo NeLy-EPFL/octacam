@@ -555,6 +555,48 @@ def test_an_unclassified_board_says_why(monkeypatch, tmp_path, sketch, probed, d
     assert info["detail"].startswith(detail)
 
 
+def test_take_ceiling_comes_from_the_first_plugin_that_ends_the_take():
+    seen = []
+
+    class Plain(Plugin):
+        name = "plain"
+
+    class Ender(Plugin):
+        name = "ender"
+
+        def take_ceiling_s(self, params):
+            seen.append(params)
+            return 3600
+
+    class Broken(Plugin):
+        name = "broken"
+
+        def take_ceiling_s(self, params):
+            raise RuntimeError("boom")
+
+    manager = PluginManager([Plain(), Broken(), Ender()])
+    # A raising hook is logged and skipped; each plugin gets its own slice.
+    assert manager.take_ceiling({"ender": {"x": 1}}) == ("ender", 3600.0)
+    assert seen == [{"x": 1}]
+    assert PluginManager([Plain()]).take_ceiling({}) is None
+
+
+def test_an_explicit_duration_reaches_every_headless_start_slice():
+    # `octacam record --duration` is exact: a plugin that would end the take
+    # itself learns so through its headless slice.
+    class Ender(Plugin):
+        name = "ender"
+
+        def default_start_params(self, fps, duration_s, *, fixed_duration=False):
+            return {"fixed": fixed_duration}
+
+    manager = PluginManager([Ender()])
+    assert manager.default_start_params(80.0, 5.0) == {"ender": {"fixed": False}}
+    assert manager.default_start_params(80.0, 5.0, fixed_duration=True) == {
+        "ender": {"fixed": True}
+    }
+
+
 def test_a_plugin_s_command_group_is_found_and_a_broken_one_skipped(monkeypatch):
     import sys
     import types

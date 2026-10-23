@@ -76,9 +76,20 @@ class Plugin:
     def on_recording_stop(self, aborted: bool) -> None:
         pass
 
-    def default_start_params(self, fps: float, duration_s: float) -> dict | None:
+    def default_start_params(
+        self, fps: float, duration_s: float, *, fixed_duration: bool = False
+    ) -> dict | None:
         """The slice headless `octacam record` starts with, as the GUI sends its
         tab's: a plugin that arms a board at record start needs one.
+        *fixed_duration*: the operator set the duration (`--duration`), so a
+        plugin that can end the take itself (`take_ceiling_s`) should not.
+        """
+        return None
+
+    def take_ceiling_s(self, params: dict | None) -> float | None:
+        """For a take this plugin ends itself (`controller.finish_recording`),
+        the longest it may run: it replaces the set duration as the deadline.
+        None: the duration applies. Pure: called under the controller lock.
         """
         return None
 
@@ -143,9 +154,11 @@ class PluginManager:
         return slice_ if isinstance(slice_, dict) else None
 
     @staticmethod
-    def _call(plugin: Plugin, hook: Callable[..., Any], *args, default=None) -> Any:
+    def _call(
+        plugin: Plugin, hook: Callable[..., Any], *args, default=None, **kwargs
+    ) -> Any:
         try:
-            return hook(*args)
+            return hook(*args, **kwargs)
         except Exception:
             log.exception("Plugin %s.%s failed", plugin.name, hook.__name__)
             return default
@@ -208,13 +221,33 @@ class PluginManager:
         slice_ = self._slice(plugin, params)
         return bool(self._call(plugin, plugin.prime_trigger, slice_, pulses))
 
-    def default_start_params(self, fps: float, duration_s: float) -> dict:
+    def take_ceiling(self, params: dict | None) -> tuple[str, float] | None:
+        """The first plugin that ends this take itself, with its ceiling in
+        seconds (see `Plugin.take_ceiling_s`); None when the duration applies.
+        """
+        for plugin in self.plugins:
+            ceiling = self._call(
+                plugin, plugin.take_ceiling_s, self._slice(plugin, params)
+            )
+            if ceiling:
+                return plugin.name, float(ceiling)
+        return None
+
+    def default_start_params(
+        self, fps: float, duration_s: float, *, fixed_duration: bool = False
+    ) -> dict:
         """Each plugin's non-None headless start slice, keyed by name as the GUI
         sends them.
         """
         params: dict = {}
         for plugin in self.plugins:
-            slice_ = self._call(plugin, plugin.default_start_params, fps, duration_s)
+            slice_ = self._call(
+                plugin,
+                plugin.default_start_params,
+                fps,
+                duration_s,
+                fixed_duration=fixed_duration,
+            )
             if slice_ is not None:
                 params[plugin.name] = slice_
         return params

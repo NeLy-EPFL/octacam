@@ -42,7 +42,14 @@
       <fieldset id="record-fields" disabled>
         <!-- Essentials: always visible. Everything else lives under the
              Advanced-options switch below (see record.js). -->
-        <label class="row" title="How long each recording runs before it stops automatically"><span>Duration:</span>
+        <!-- Offered by a plugin that can end the take itself (twophoton:
+             "Synced with ThorImage"): ticked hides the Duration row, unticked
+             the duration applies. Hidden unless offered (record.js
+             setDurationSync). -->
+        <label class="row" id="duration-sync-row" hidden><span id="duration-sync-label">Synced:</span>
+          <input id="duration-sync" type="checkbox">
+        </label>
+        <label class="row" id="duration-row" title="How long each recording runs before it stops automatically"><span>Duration:</span>
           <span class="duration">
             <input id="duration-value" type="number" min="0.01" step="any" value="20"
               title="Recording length, in the unit selected at right">
@@ -53,6 +60,7 @@
             </select>
           </span>
         </label>
+        <span id="duration-sync-warning" class="hint warning" role="alert" hidden></span>
         <label class="row" title="Target capture rate in frames per second (applies to every camera)"><span>FPS:</span>
           <input id="fps" type="number" min="0.01" max="1000" step="1">
         </label>

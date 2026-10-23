@@ -10,6 +10,7 @@ forever: every reader goes through `recording_info_dir`.
 from __future__ import annotations
 
 import datetime
+import itertools
 import json
 import os
 from pathlib import Path
@@ -192,6 +193,36 @@ def _capped(indices: list[int]) -> list[int]:
     return list(indices[:SUMMARY_INDEX_LIMIT])
 
 
+def _real_duration_s(settings: RecordingSettings, cameras: list[CameraStats]) -> float:
+    """A plugin-ended take's length: its longest camera's pulse span times that
+    camera's median timestamp interval per pulse (an external clock's rate may
+    differ from the target fps). Raw timestamps can jump (a GS3's +128 s, which
+    the pulse tracker folds), so their first-to-last difference cannot be
+    trusted. Without timestamps, the most frames over the target fps.
+    """
+    spans = []
+    for camera in cameras:
+        rows = [
+            (stamp, pulse)
+            for stamp, pulse in zip(
+                camera.timestamp_ns, camera.pulse_index, strict=False
+            )
+            if stamp
+        ]
+        per_pulse = [
+            (t1 - t0) / (p1 - p0)
+            for (t0, p0), (t1, p1) in itertools.pairwise(rows)
+            if p1 > p0 and t1 > t0
+        ]
+        if per_pulse:
+            pulses = rows[-1][1] - rows[0][1] + 1
+            spans.append(pulses * float(np.median(per_pulse)) / 1e9)
+    if spans:
+        return round(max(spans), 3)
+    frames = max((camera.frames for camera in cameras), default=0)
+    return round(frames / settings.fps, 3) if settings.fps > 0 else 0.0
+
+
 def build_recording_summary(
     settings: RecordingSettings,
     cameras: list[CameraStats],
@@ -201,11 +232,20 @@ def build_recording_summary(
     sync: dict | None = None,
     primed_pulses: int = 0,
     completed: bool | None = None,
+    first_frame_wall_ns: int = 0,
+    ended_by: str | None = None,
+    duration_limit_s: float | None = None,
 ) -> dict:
     """The recording_summary.json payload, from each camera's stats (no I/O).
 
     `transform_applied` is true only when the transform was baked into the
     video (display form and a non-identity transform).
+
+    A take a plugin bounds itself (`duration_limit_s`, its ceiling) records
+    who ended it (`ended_by`) and its real length as `duration_s` (frames /
+    target fps): the set duration never applied. `first_frame_time_ns` is when
+    the first frames were in, which for an external trigger can be long after
+    `start_time_ns` (Start pressed).
     """
     extension = settings.video_format().extension
     start_iso = (
@@ -268,7 +308,12 @@ def build_recording_summary(
         # cameras that disagree by it.
         "completed": completed,
         "fps_target": settings.fps,
-        "duration_s": settings.duration_s,
+        "duration_s": _real_duration_s(settings, cameras)
+        if duration_limit_s is not None
+        else settings.duration_s,
+        "duration_limit_s": duration_limit_s,
+        "ended_by": ended_by,
+        "first_frame_time_ns": first_frame_wall_ns or None,
         "trigger_source": settings.trigger_source,
         "save_method": settings.save_method,
         # The args of the encoder used (nvenc's for save_method="nvenc").
