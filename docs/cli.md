@@ -28,6 +28,7 @@ $ octacam [OPTIONS] COMMAND [ARGS]...
 * `jobs`: Manage detached `octacam process` jobs...
 * `cache`: Inspect and clear the octacam cache...
 * `users`: The rig's users: who records and where...
+* `twophoton`: 2-photon data on the destination: verify,...
 
 ## `octacam gui`
 
@@ -499,5 +500,182 @@ $ octacam users add [OPTIONS] {config_dir} {initials}
 * `--name <str>`: Full name.
 * `--transfer-directory <str>`: Where `octacam process` copies their recordings. Default: guessed from the other users' (their own initials folder).
 * `--option PLUGIN.OPTION=VALUE`: A plugin's per-user option, e.g. twophoton.source=/mnt/share/MA; repeatable. Default: guessed like the transfer directory.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+## `octacam twophoton`
+
+2-photon data on the destination: verify, sweep, renumber, render.
+
+**Usage**:
+
+```console
+$ octacam twophoton [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `verify`: Which 2P folders on the share are...
+* `sweep`: Copy the share's settled 2P data no take...
+* `manifest`: Rewrite every day's 2p_reconciliation.md...
+* `reconcile`: Renumber flies' sessions into one...
+* `reassemble`: Stack ThorImage folders still holding...
+* `render`: Render the synced behavior + 2P video...
+* `board-sync`: Align each take under *paths* paired...
+
+### `octacam twophoton verify`
+
+Which 2P folders on the share are verifiably at the destination, and so safe to delete. Compares every file (a stacked channel page by page); exits 1 on any mismatch. Read-only unless --delete, which deletes only the folders this run verified.
+
+**Usage**:
+
+```console
+$ octacam twophoton verify [OPTIONS] [paths]...
+```
+
+**Arguments**:
+
+* `paths...`: Only these experiment (or 2P) folders on the share.
+
+**Options**:
+
+* `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `--delete`: Delete the share folders found identical at the destination (only inside the share folder): those under PATHS, or every one with --all.
+* `--all`: With --delete: the whole share folder.
+* `-u, --user <str>`: A `[users.<initials>]` of the rig: their destination, share folder and 2P options (delete_share_data) instead of the rig's.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton sweep`
+
+Copy the share's settled 2P data no take claims, under its fly (else 2p_only/<experiment>/<date>/), and pair takes still waiting for theirs. `octacam process` does this after each run.
+
+**Usage**:
+
+```console
+$ octacam twophoton sweep [OPTIONS]
+```
+
+**Options**:
+
+* `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `-u, --user <str>`: A `[users.<initials>]` of the rig: their destination, share folder and 2P options (delete_share_data) instead of the rig's.
+* `--dry-run`: List what would be done, change nothing.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton manifest`
+
+Rewrite every day's 2p_reconciliation.md on the destination.
+
+**Usage**:
+
+```console
+$ octacam twophoton manifest [OPTIONS]
+```
+
+**Options**:
+
+* `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `--dry-run`: List what would be done, change nothing.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton reconcile`
+
+Renumber flies' sessions into one RecordingN_<Beh|2P|Synced> sequence. `octacam process` does this for the flies it touches; this covers older data and flies spread over several runs. Every rename goes to the fly's reconciliation_log.md.
+
+**Usage**:
+
+```console
+$ octacam twophoton reconcile [OPTIONS] [paths]...
+```
+
+**Arguments**:
+
+* `paths...`: Day (experiment) or fly folders on the destination.
+
+**Options**:
+
+* `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `--all`: Every fly on the destination (slow over a share), and turn the generic bucket's groups into new flies.
+* `--dry-run`: List what would be done, change nothing.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton reassemble`
+
+Stack ThorImage folders still holding per-frame TIFFs (copied by hand, or before stacking existed): one stack per channel, every page compared with its frame, then the frames deleted.
+
+**Usage**:
+
+```console
+$ octacam twophoton reassemble [OPTIONS] [paths]...
+```
+
+**Arguments**:
+
+* `paths...`: Folders to search on the destination.
+
+**Options**:
+
+* `-c, --config <directory>`: The rig's config directory: its [transfer].directory and the twophoton plugin's `source` and other options.  [required]
+* `--all`: Search the whole destination (slow over a share; the frames of each stacked folder are deleted).
+* `--dry-run`: List what would be done, change nothing.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton render`
+
+Render the synced behavior + 2P video (synced_2p.mp4, beside the grid) of each paired take and the MIPs of each Z-stack under *paths*: older data, or other settings (--force). `octacam process` renders new data itself.
+
+**Usage**:
+
+```console
+$ octacam twophoton render [OPTIONS] {paths}...
+```
+
+**Arguments**:
+
+* `paths...`: Transferred takes, or any folder above them (searched).  [required]
+
+**Options**:
+
+* `--synced / --no-synced`: Behavior + 2P videos.  [default: synced]
+* `--mip / --no-mip`: Z-stack MIPs.  [default: mip]
+* `--force`: Re-render existing outputs.
+* `--green <str>`: ThorImage channel shown green.  [default: ChanA]
+* `--red <str>`: ThorImage channel shown red.  [default: ChanB]
+* `--fastz-projection <str>`: A FastZ timepoint's planes: mean or max.  [default: mean]
+* `--fps <float>`: Synced video frame rate.  [default: 25.0]
+* `--height <int>`: Synced video height (px).  [default: 720]
+* `--smooth <int>`: 2P box-blur radius (px, 0: off).  [default: 1]
+* `--dry-run`: List what would be done, change nothing.
+* `-v, --verbose`: Debug messages, and a traceback on errors.
+* `--help`: Show this message and exit.
+
+### `octacam twophoton board-sync`
+
+Align each take under *paths* paired without ThorSync on the trigger board's clock (twophoton_board_sync.json, read by the synced render): for takes transferred before `octacam process` did it. Search a whole day, so its completed takes lend their 2P period to the stopped-early ones.
+
+**Usage**:
+
+```console
+$ octacam twophoton board-sync [OPTIONS] {paths}...
+```
+
+**Arguments**:
+
+* `paths...`: Transferred takes, or any folder above them (searched).  [required]
+
+**Options**:
+
+* `-r, --reference <directory>`: More takes (or folders above them) to measure this rig's scan timing on, for takes whose board sent no report (before 2026-10-14): ones with ThorSync or a board report, other days too.
+* `--airflow-logs <directory>`: airflow_control's log folder: each take aligned here also gets the air commands logged during it (its missing AirFlow channel).
+* `--dry-run`: List what would be done, change nothing.
 * `-v, --verbose`: Debug messages, and a traceback on errors.
 * `--help`: Show this message and exit.

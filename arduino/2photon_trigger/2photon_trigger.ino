@@ -6,10 +6,17 @@
 //
 //  The host (octacam) sends an arm packet over USB serial; the Arduino waits
 //  for a rising edge on kTriggerInPin (ThorSync), then emits a precise
-//  camera-frame square wave for the configured duration.
+//  camera-frame square wave until either the configured duration elapses or —
+//  when idle_ms > 0 ("match ThorImage") — ThorImage stops: kTriggerInPin has
+//  stayed LOW for idle_ms. Real ThorSync data shows that pin's source is busy for
+//  the whole acquisition (CaptureOn is HIGH throughout; FrameOut is HIGH ~99% of
+//  each frame period), so "LOW for idle_ms" means the acquisition is over.
+//  duration_ms stays a hard ceiling either way: idle detection can only end a
+//  run sooner, never later.
 //
-//  Host → Arduino wire protocol (7 bytes, little-endian):
-//    [0xA5][fps:uint16_t LE][duration_ms:uint32_t LE]
+//  Host → Arduino wire protocol (9 bytes, little-endian):
+//    [0xA5][fps:uint16_t LE][duration_ms:uint32_t LE][idle_ms:uint16_t LE]
+//    idle_ms = 0 disables the ThorImage-stop detection (fixed duration).
 //
 //  Abort/cancel (1 byte):
 //    [0xCA]  — returns Arduino to IDLE from any state
@@ -19,7 +26,20 @@
 //    'T' (0x54) — triggered, capture running
 //    'D' (0x44) — done, capture complete, back to IDLE
 //
-//  Identify (1 byte): [0x3F] '?'  -> replies "2PHOTON 1 <build>\n"
+//  Right before 'D' the board reports why and how the run ended, as one
+//  newline-terminated line (it starts with 'S', never a status byte):
+//    "STOP <reason> <edges> <high_ms> <run_ms> <pulses>\n"
+//    reason  'I' = ThorImage stopped (input idle), 'C' = duration ceiling hit
+//    edges   rising edges seen on kTriggerInPin while running (incl. the start)
+//    high_ms total time kTriggerInPin was HIGH while running
+//    run_ms  total run time
+//    pulses  camera trigger pulses (rising edges on kCameraPin) of the run; a
+//            board that sends it starts them half a period after the start
+//            edge (an older one sent the first four fields only)
+//  edges/high_ms tell what is wired to the input (a CaptureOn-style gate: one
+//  edge, HIGH ≈ run; a FrameOut-style train: one edge per 2P frame).
+//
+//  Identify (1 byte): [0x3F] '?'  -> replies "2PHOTON 2 <build>\n"
 //    The banner starts with '2' (never a status byte), so the host can tell it
 //    apart from the bare 'A'/'T'/'D' status bytes. <build> is a short hash of the
 //    sketch source (fw_build_info.h) so octacam knows whether this exact firmware
@@ -28,7 +48,8 @@
 //  State machine:
 //    IDLE  ---(arm packet)---> ARMED
 //    ARMED ---(ThorSync  )---> RUNNING
-//    RUNNING ---(timeout )---> IDLE  (sends 'D')
+//    RUNNING ---(duration elapsed, or input idle for idle_ms)---> IDLE
+//                                          (sends "STOP ..." then 'D')
 //    Any state ---(0xCA  )---> IDLE
 //    Any state ---(arm   )---> ARMED (re-arms mid-run if needed)
 //
@@ -46,9 +67,9 @@ constexpr uint8_t kStatusLed    = LED_BUILTIN;
 constexpr uint8_t  kArmMagic       = 0xA5;
 constexpr uint8_t  kCancelMagic    = 0xCA;
 constexpr uint8_t  kIdentifyMagic  = 0x3F;  // '?'  -> identity banner
-constexpr uint8_t  kArmPayloadSize = 6;   // uint16 fps + uint32 duration_ms
+constexpr uint8_t  kArmPayloadSize = 8;   // uint16 fps + uint32 duration_ms + uint16 idle_ms
 constexpr uint32_t kPayloadWaitMs  = 10;  // max wait for payload bytes after magic
-constexpr char     kVersion[]      = "2PHOTON 1";
+constexpr char     kVersion[]      = "2PHOTON 2";
 
 // ---- State machine ---------------------------------------------------------
 enum class State : uint8_t { IDLE, ARMED, RUNNING };
@@ -57,19 +78,33 @@ static State g_state = State::IDLE;
 // ---- Capture parameters set by the arm packet ------------------------------
 static uint16_t g_fps         = 0;
 static uint32_t g_duration_ms = 0;
+static uint16_t g_idle_ms     = 0;  // 0 = fixed duration (no ThorImage-stop detection)
 
 // ---- RUNNING-state tracking ------------------------------------------------
 static uint32_t g_run_start_ms      = 0;
+static uint32_t g_last_active_ms    = 0;  // last time kTriggerInPin read HIGH
+static uint32_t g_high_ms           = 0;  // accumulated HIGH time (diagnostic)
+static uint32_t g_high_since_ms     = 0;  // start of the current HIGH stretch
+static uint32_t g_edges             = 0;  // rising edges while running (diagnostic)
 // ARMED-state: edge detection (non-blocking poll)
 static bool     g_last_trigger_high = false;
 
 // ---- Timer1 helpers (CTC mode, /8 prescaler) -------------------------------
 
+// The camera/sync pin level the ISR toggles. Reset by every timer1_start, so a
+// run's first rising edge always comes one half period after its start edge: a
+// level carried over from the previous run's parity made it a whole period
+// half the time (octacam's ThorSync-free alignment relies on the phase).
+static volatile bool g_cam_level = false;
+// The run's camera pulses (rising edges), for the STOP report: octacam counts
+// its frames against them.
+static volatile uint32_t g_cam_pulses = 0;
+
 ISR(TIMER1_COMPA_vect) {
-  static bool level = false;
-  level = !level;
-  digitalWrite(kCameraPin, level);
-  digitalWrite(kSyncPin,   level);
+  g_cam_level = !g_cam_level;
+  digitalWrite(kCameraPin, g_cam_level);
+  digitalWrite(kSyncPin,   g_cam_level);
+  if (g_cam_level) ++g_cam_pulses;
 }
 
 // Timer1 prescaler options, finest first. A fixed /8 prescaler overflowed the
@@ -103,10 +138,13 @@ static void timer1_start(const uint16_t fps) {
     }
   }
   cli();
+  g_cam_level  = false;
+  g_cam_pulses = 0;
   TCCR1A = 0;
   TCCR1B = 0;
   TCNT1  = 0;
   OCR1A  = static_cast<uint16_t>(ocr);
+  TIFR1  = _BV(OCF1A);            // a compare match left pending by the last run
   TCCR1B = _BV(WGM12) | cs_bits;  // CTC mode + selected prescaler
   TIMSK1 = _BV(OCIE1A);
   sei();
@@ -124,10 +162,11 @@ static void timer1_stop() {
 
 // ---- Serial helpers --------------------------------------------------------
 
-// Reads the 6-byte arm payload that follows the magic byte.
+// Reads the 8-byte arm payload that follows the magic byte.
 // Blocks for up to kPayloadWaitMs (a few milliseconds); returns false on
 // timeout or if the payload values are out of range.
-static bool parse_arm_payload(uint16_t &fps, uint32_t &duration_ms) {
+static bool parse_arm_payload(uint16_t &fps, uint32_t &duration_ms,
+                              uint16_t &idle_ms) {
   const uint32_t start = millis();
   while (Serial.available() < static_cast<int>(kArmPayloadSize)) {
     if (millis() - start >= kPayloadWaitMs) return false;
@@ -139,6 +178,7 @@ static bool parse_arm_payload(uint16_t &fps, uint32_t &duration_ms) {
               | (static_cast<uint32_t>(buf[3]) << 8)
               | (static_cast<uint32_t>(buf[4]) << 16)
               | (static_cast<uint32_t>(buf[5]) << 24);
+  idle_ms = static_cast<uint16_t>(buf[6]) | (static_cast<uint16_t>(buf[7]) << 8);
   return fps >= 1 && fps <= 10000 && duration_ms >= 1;
 }
 
@@ -152,9 +192,11 @@ static void enter_idle() {
   g_state = State::IDLE;
 }
 
-static void enter_armed(const uint16_t fps, const uint32_t duration_ms) {
+static void enter_armed(const uint16_t fps, const uint32_t duration_ms,
+                        const uint16_t idle_ms) {
   g_fps         = fps;
   g_duration_ms = duration_ms;
+  g_idle_ms     = idle_ms;
   // Initialise the edge detector from the current pin level so a signal that
   // is already HIGH at arm time does not immediately fire a false trigger.
   g_last_trigger_high = (digitalRead(kTriggerInPin) == HIGH);
@@ -165,10 +207,34 @@ static void enter_armed(const uint16_t fps, const uint32_t duration_ms) {
 }
 
 static void enter_running() {
-  g_run_start_ms = millis();
+  g_run_start_ms   = millis();
+  g_last_active_ms = g_run_start_ms;
+  g_high_since_ms  = g_run_start_ms;
+  g_high_ms        = 0;
+  g_edges          = 1;  // the start edge itself
+  g_last_trigger_high = true;
   timer1_start(g_fps);
   g_state = State::RUNNING;
   Serial.write('T');
+}
+
+// Ends a run: report why + what the input looked like, then 'D'.
+static void finish_run(const char reason, const uint32_t now) {
+  if (g_last_trigger_high) g_high_ms += now - g_high_since_ms;
+  enter_idle();  // the timer is stopped: the count no longer moves
+  const uint32_t pulses = g_cam_pulses;
+  Serial.print("STOP ");
+  Serial.write(reason);
+  Serial.write(' ');
+  Serial.print(g_edges);
+  Serial.write(' ');
+  Serial.print(g_high_ms);
+  Serial.write(' ');
+  Serial.print(now - g_run_start_ms);
+  Serial.write(' ');
+  Serial.print(pulses);
+  Serial.write('\n');
+  Serial.write('D');
 }
 
 // ---- setup / loop ----------------------------------------------------------
@@ -209,10 +275,11 @@ void loop() {
       Serial.read();  // consume magic
       uint16_t fps;
       uint32_t duration_ms;
-      if (parse_arm_payload(fps, duration_ms)) {
+      uint16_t idle_ms;
+      if (parse_arm_payload(fps, duration_ms, idle_ms)) {
         // A new arm packet re-arms from any state (stops the timer if running).
         if (g_state == State::RUNNING) timer1_stop();
-        enter_armed(fps, duration_ms);
+        enter_armed(fps, duration_ms, idle_ms);
       }
     } else {
       Serial.read();  // discard unknown byte
@@ -234,11 +301,25 @@ void loop() {
       break;
     }
 
-    case State::RUNNING:
-      if (millis() - g_run_start_ms >= g_duration_ms) {
-        enter_idle();
-        Serial.write('D');
+    case State::RUNNING: {
+      const uint32_t now  = millis();
+      const bool     high = (digitalRead(kTriggerInPin) == HIGH);
+      if (high) {
+        g_last_active_ms = now;
+        if (!g_last_trigger_high) {
+          ++g_edges;
+          g_high_since_ms = now;
+        }
+      } else if (g_last_trigger_high) {
+        g_high_ms += now - g_high_since_ms;
+      }
+      g_last_trigger_high = high;
+      if (now - g_run_start_ms >= g_duration_ms) {
+        finish_run('C', now);
+      } else if (g_idle_ms > 0 && now - g_last_active_ms >= g_idle_ms) {
+        finish_run('I', now);
       }
       break;
+    }
   }
 }

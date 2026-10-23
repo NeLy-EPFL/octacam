@@ -48,3 +48,18 @@ def camera_stats(name: str = "cam0", *, frames: int = 0, **fields) -> CameraStat
         "writer_failed": False,
     }
     return CameraStats(**{**defaults, **fields})
+
+
+def plugin_doctor_text(config_dir) -> str:
+    """The plugins section of `octacam doctor` for a rig config, as one line of
+    text: the plugins' own checks, without the camera enumeration and serial
+    probes the whole command runs (which depend on the machine's USB bus).
+    """
+    from pathlib import Path
+
+    from octacam.cli.doctor import _doctor_plugins, _Report
+    from octacam.config import load_config_dir
+
+    report = _Report()
+    _doctor_plugins(report, load_config_dir(Path(config_dir)), Path(config_dir))
+    return " ".join(text for _title, items in report.sections for _s, text in items)

@@ -81,6 +81,7 @@ nav:
       - Processing recordings: guide/processing.md
       - Camera backends: guide/backends.md
       - Plugins: guide/plugins.md
+      - 2-photon rigs: guide/twophoton.md
       - Troubleshooting: reference/troubleshooting.md
   - Configuration: guide/configuration.md
   - CLI reference: cli.md

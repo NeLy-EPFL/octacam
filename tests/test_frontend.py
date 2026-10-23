@@ -1714,56 +1714,6 @@ def test_plugin_ended_take_shows_elapsed_time_not_a_countdown(page):
     assert "1:05" in text and "elapsed" in text
 
 
-def test_a_plugin_can_replace_the_duration_with_a_checkbox(page):
-    # A plugin that ends the take itself (twophoton: "Synced with ThorImage")
-    # offers a checkbox; ticked hides Duration, unticked brings it back, and the
-    # flip is reported to the plugin. Withdrawn, the plain Duration returns.
-    make_tab(page)
-    state = page.evaluate(
-        """() => {
-            const flips = [];
-            const shown = (id) => !document.getElementById(id).hidden;
-            const read = () => ({
-                sync: shown('duration-sync-row'),
-                duration: shown('duration-row'),
-                warning: shown('duration-sync-warning')
-                    ? document.getElementById('duration-sync-warning').textContent
-                    : null,
-                label: document.getElementById('duration-sync-label').textContent,
-            });
-            const before = read();
-            window.__tab.setDurationSync({
-                label: 'Synced with ThorImage:', checked: true,
-                warning: 'ThorSync stops first', onChange: (c) => flips.push(c),
-            });
-            const offered = read();
-            const box = document.getElementById('duration-sync');
-            box.checked = false;
-            box.dispatchEvent(new Event('change'));
-            const unticked = read();
-            window.__tab.setDurationSync(null);
-            return {before, offered, unticked, withdrawn: read(), flips};
-        }"""
-    )
-    assert state["before"] == {
-        "sync": False,
-        "duration": True,
-        "warning": None,
-        "label": "Synced:",
-    }
-    assert state["offered"] == {
-        "sync": True,
-        "duration": False,
-        "warning": "ThorSync stops first",
-        "label": "Synced with ThorImage:",
-    }
-    assert state["unticked"]["duration"] is True
-    assert state["flips"] == [False]
-    assert state["withdrawn"]["sync"] is False
-    assert state["withdrawn"]["duration"] is True
-    assert state["withdrawn"]["warning"] is None
-
-
 # --- background-processing notice (jobs.js) --------------------------------- #
 
 RUNNING_JOB = {
@@ -1978,6 +1928,247 @@ def test_jobs_notice_counts_warnings_and_reports_them_at_the_end(page):
         "Background processing finished with 2 warnings \u2014 first: WARNING: ThorSync"
     )
     assert "octacam jobs attach j1" in message
+
+
+def test_a_plugin_can_replace_the_duration_with_a_checkbox(page):
+    # A plugin that ends the take itself (twophoton: "Synced with ThorImage")
+    # offers a checkbox; ticked hides Duration, unticked brings it back, and the
+    # flip is reported to the plugin. Withdrawn, the plain Duration returns.
+    make_tab(page)
+    state = page.evaluate(
+        """() => {
+            const flips = [];
+            const shown = (id) => !document.getElementById(id).hidden;
+            const read = () => ({
+                sync: shown('duration-sync-row'),
+                duration: shown('duration-row'),
+                warning: shown('duration-sync-warning')
+                    ? document.getElementById('duration-sync-warning').textContent
+                    : null,
+                label: document.getElementById('duration-sync-label').textContent,
+            });
+            const before = read();
+            window.__tab.setDurationSync({
+                label: 'Synced with ThorImage:', checked: true,
+                warning: 'ThorSync stops first', onChange: (c) => flips.push(c),
+            });
+            const offered = read();
+            const box = document.getElementById('duration-sync');
+            box.checked = false;
+            box.dispatchEvent(new Event('change'));
+            const unticked = read();
+            window.__tab.setDurationSync(null);
+            return {before, offered, unticked, withdrawn: read(), flips};
+        }"""
+    )
+    assert state["before"] == {
+        "sync": False,
+        "duration": True,
+        "warning": None,
+        "label": "Synced:",
+    }
+    assert state["offered"] == {
+        "sync": True,
+        "duration": False,
+        "warning": "ThorSync stops first",
+        "label": "Synced with ThorImage:",
+    }
+    assert state["unticked"]["duration"] is True
+    assert state["flips"] == [False]
+    assert state["withdrawn"]["sync"] is False
+    assert state["withdrawn"]["duration"] is True
+    assert state["withdrawn"]["warning"] is None
+
+
+TWOPHOTON_JS = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "octacam"
+    / "plugins"
+    / "twophoton"
+    / "web"
+    / "twophoton.js"
+)
+
+
+def test_twophoton_offers_synced_with_thorimage(static_server, browser):
+    """An armed 2-Photon tab replaces the Record tab's Duration with "Synced with
+    ThorImage" (the config's default), gives Duration back when unticked, and
+    withdraws the offer when "Arm with recording" is unticked. The ThorSync
+    check is the Ready? strip's alone: not repeated under the checkbox.
+    """
+    page = browser.new_page()
+    plugins = {
+        "twophoton": {
+            "ready": True,
+            "device": "/dev/arduinoCams",
+            "arduino_state": "idle",
+            "match_thorimage": True,
+            "max_duration_s": 3600,
+            "stop_idle_ms": 2000,
+            "thorsync": {
+                "folder": "PAM7xCI80/SyncData184",
+                "limit_s": 320,
+                "planned_folder": "PAM7xCI80/Fly5_Streaming",
+                "planned_s": 390,
+            },
+            "web": {"module": "/plugins/twophoton/twophoton.js"},
+        }
+    }
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(builder())
+        )
+
+    page.route("**/api/**", json_route(dict))
+    page.route(
+        "**/api/system",
+        json_route(lambda: _system_payload(ready=True, plugins=plugins)),
+    )
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=True)))
+    page.route(
+        "**/plugins/twophoton/twophoton.js",
+        lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=TWOPHOTON_JS.read_text()
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => !document.getElementById('duration-sync-row').hidden", timeout=5000
+        )
+        assert page.evaluate(
+            "() => document.getElementById('duration-sync-label').textContent"
+        ) == ("Synced with ThorImage:")
+        assert page.evaluate("() => document.getElementById('duration-row').hidden")
+        assert page.evaluate(
+            "() => document.getElementById('duration-sync-warning').hidden"
+        )
+
+        page.evaluate(
+            """() => {
+                const box = document.getElementById('duration-sync');
+                box.checked = false;
+                box.dispatchEvent(new Event('change'));
+            }"""
+        )
+        assert not page.evaluate("() => document.getElementById('duration-row').hidden")
+        page.evaluate(
+            """() => {
+                const arm = document.getElementById('twophoton-arm-with-recording');
+                arm.disabled = false;
+                arm.checked = false;
+                arm.dispatchEvent(new Event('change'));
+            }"""
+        )
+        assert page.evaluate(
+            "() => document.getElementById('duration-sync-row').hidden"
+        )
+        assert not page.evaluate("() => document.getElementById('duration-row').hidden")
+    finally:
+        page.close()
+
+
+def test_twophoton_reminds_about_thorsync_and_announces_a_missed_take(
+    static_server, browser
+):
+    """ThorImage records ThorSync only with its box ticked: the session's first
+    armed take asks first (Cancel keeps it from starting), and a take ThorSync
+    did not record is announced in a popup, once.
+    """
+    page = browser.new_page()
+    plugins = {
+        "twophoton": {
+            "ready": True,
+            "device": "/dev/arduinoCams",
+            "arduino_state": "idle",
+            "match_thorimage": True,
+            "max_duration_s": 3600,
+            "stop_idle_ms": 2000,
+            "thorsync": None,
+            "thorsync_remind": True,
+            "thorsync_missing": None,
+            "web": {"module": "/plugins/twophoton/twophoton.js"},
+        }
+    }
+    starts = []
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(builder())
+        )
+
+    page.route("**/api/**", json_route(dict))
+    page.route(
+        "**/api/system",
+        json_route(lambda: _system_payload(ready=True, plugins=plugins)),
+    )
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=True)))
+    page.route(
+        "**/api/recording/start",
+        lambda route: (
+            starts.append(json.loads(route.request.post_data or "{}")),
+            route.fulfill(status=202, content_type="application/json", body="{}"),
+        ),
+    )
+    page.route(
+        "**/plugins/twophoton/twophoton.js",
+        lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=TWOPHOTON_JS.read_text()
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+    shown = (
+        "() => !document.getElementById('twophoton-dialog')"
+        ".classList.contains('hidden')"
+    )
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => !document.getElementById('duration-sync-row').hidden", timeout=5000
+        )
+        page.wait_for_function(
+            "() => !document.getElementById('record-button').disabled", timeout=5000
+        )
+        page.click("#record-button")
+        page.wait_for_function(shown, timeout=5000)
+        assert "ThorSync box ticked" in page.text_content("#twophoton-dialog-msg")
+        page.click("#twophoton-dialog-cancel")
+        page.wait_for_function(f"() => !({shown})()", timeout=5000)
+        page.wait_for_timeout(200)
+        assert starts == []
+
+        page.click("#record-button")
+        page.wait_for_function(shown, timeout=5000)
+        page.click("#twophoton-dialog-ok")
+        page.wait_for_timeout(300)
+        assert len(starts) == 1
+        assert starts[0]["plugin_params"]["twophoton"]["match_thorimage"] is True
+
+        missing = {
+            "capture": "Fly1_Streaming",
+            "message": "ThorSync did not record ThorImage's last capture",
+        }
+        state = {"type": "twophoton_state", "state": "idle", "ready": True}
+        page.evaluate(
+            "(m) => window.__pushWs(m)",
+            {**state, "thorsync_remind": True, "thorsync_missing": missing},
+        )
+        page.wait_for_function(shown, timeout=5000)
+        assert page.text_content("#twophoton-dialog-msg") == missing["message"]
+        assert page.is_hidden("#twophoton-dialog-cancel")
+        page.click("#twophoton-dialog-ok")
+        # The same missed capture again (every state push carries it): no popup.
+        page.evaluate(
+            "(m) => window.__pushWs(m)",
+            {**state, "thorsync_remind": True, "thorsync_missing": missing},
+        )
+        page.wait_for_timeout(200)
+        assert not page.evaluate(shown)
+    finally:
+        page.close()
 
 
 # --- users, recording name, readiness ---------------------------------------- #

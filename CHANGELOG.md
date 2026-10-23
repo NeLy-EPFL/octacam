@@ -15,25 +15,52 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   `confirmStart()` on the tab runs when Start is pressed, and returning false
   cancels the start (for a reminder the operator must acknowledge, such as
   twophoton's "is ThorSync ticked in ThorImage?").
-
-- **A plugin can end the take itself**: `Plugin.take_ceiling_s` returns a
-  safety ceiling that replaces the set duration (deadline and pulse count),
-  and `controller.finish_recording(name, pulses=, take_id=)` ends the take as
-  *completed* (not an early stop). A plugin that knows how many pulses its
-  source emitted passes `pulses`: every video ends on that count, and on an
-  external trigger a camera spanning all of them provably started on the first
-  (otherwise the start is checked from when the first frames arrived).
-  `take_id` (`controller.take_id`, read while the take ran) keeps a late call
-  from ending a newer take. The GUI and `octacam record` show elapsed time for such a take;
-  its summary records `ended_by`, `duration_limit_s` and its real length as
-  `duration_s`. Every summary now also has `first_frame_time_ns`, when the
-  first frames were in (for an external trigger, possibly long after Start),
-  and plugins tell the operator through `controller.event(level, message)`.
-  `octacam record --duration` is exact: `Plugin.default_start_params` gets
-  `fixed_duration=True`, so such a plugin leaves that take to the duration (a
-  plugin overriding the hook must accept the new keyword). Its tab can offer a
-  checkbox in place of the Record tab's Duration (`setDurationSync` in a
-  plugin tab's context).
+- **2-photon rigs** (`twophoton` plugin): a take synced with ThorImage ends
+  when ThorImage stops (the Record tab's **Synced with ThorImage**; firmware
+  protocol v2, reflash with `octacam flash`), the GUI warns when ThorSync is set
+  to stop before a take can end, and `octacam process` pairs each take with its
+  ThorSync/ThorImage data (by ThorSync's recorded camera pulses), copies it with
+  ThorImage's frames as stacks, files 2P-only data under its fly, renumbers each
+  fly's sessions and renders synced behavior + 2P videos and Z-stack MIPs.
+  `octacam twophoton verify|sweep|manifest|reconcile|reassemble|render` run
+  these by hand. With `delete_after_transfer`, verified share folders are
+  deleted, 2P-only ones too (the share's account needs delete rights);
+  `octacam twophoton verify --delete --all` clears a backlog of verified ones.
+  Settings are the plugin's options (`source`, ...); see the 2-photon guide.
+- **ThorSync reminder** (`twophoton`): ThorImage records ThorSync only with
+  its ThorSync box ticked. The GUI's first armed take after launch asks about
+  it, and a take ThorSync did not record is announced in a popup right after
+  it (the next take asks again), then flagged by the Ready? strip, `octacam
+  doctor` and `octacam process`.
+- **A take ThorSync did not record is still aligned** (`twophoton`): on the
+  trigger board's clock (`twophoton_board_sync.json`; every 2P frame within
+  one camera frame of ThorSync, checked on real takes), so its synced video
+  is rendered. `octacam twophoton board-sync` backfills transferred takes,
+  older ones too (before the board's report: from ThorImage's frames and the
+  rig's scan timing measured on `--reference` takes).
+- **Each person decides whether their 2P data leaves the imaging PC**
+  (`twophoton`): share folders are deleted after a verified transfer only with
+  the user's own `delete_share_data = true` (in `[users.<initials>.twophoton]`,
+  carried by their recordings), and never outside their `source` folder.
+  `twophoton sweep`/`verify` take `--user`.
+- **Air commands stand in for ThorSync's AirFlow** (`twophoton`): with the
+  plugin option `airflow_logs` (airflow_control's log folder), a take paired
+  without ThorSync gets the air commands logged during it
+  (`airflow_commands.jsonl`), which reproduce the AirFlow sensor's on/off on
+  99.9 % of camera frames. `board-sync --airflow-logs` backfills.
+- **2-photon firmware**: the first camera pulse of a run is always half a
+  period after ThorSync's edge (it was half or a whole one, depending on the
+  previous run), so a take without ThorSync starts within ~0.1 ms instead of
+  2.5 ms; and the end-of-run report counts the run's camera pulses. A synced
+  take tells octacam that count when it ends, which then proves every camera
+  started on the first pulse (instead of comparing when frames arrived), and
+  the board-clock alignment checks its start against it: a video that does
+  not account for every pulse widens the alignment's stated uncertainty and
+  says so. Reflash with `octacam flash` (an older board still works; the
+  2026-10-21 build keeps its precise start).
+- **The synced video follows `pulse_index`** (`twophoton`): under an external
+  trigger a missed pulse leaves no frame, and the video was drawn one frame
+  early from there on.
 - **triggerbox dim outputs**: any free pin can be held at a 0–100 % PWM level
   (11-bit, ~19.5 kHz, in hardware) whatever the board is doing, for a white
   ambient light driven by the lab's LED driver board in place of the CCS
@@ -50,6 +77,16 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 - **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
   its cells down; with its own faster `ffmpeg_params` a grid builds several
   times faster (see Configuration).
+- **The GUI shows background processing.** While a detached `octacam
+  process` job runs, a strip along the bottom of the camera view says what it
+  is doing and how long the current step has left; once that step is done the
+  job pauses until the GUI closes, as before, and the strip says so. The event
+  log (and, with **Notify me**, a desktop notification) records when it pauses
+  and ends, and Start recording asks first while a step is still running.
+- **Jobs count their warnings**: every warning or error a detached job logs is
+  kept in its status (`octacam jobs list` has a Warnings column, the GUI says
+  "finished with N warnings"), and the log ends with a summary of them. Jobs
+  also report grid progress and name items as `Fly1/003`.
 - **Users**: `[users.<initials>]` in the rig config says who records and where
   their data goes (their transfer destination, and plugin folders such as the
   2P share). The Record tab picks the user from a list and adds a new one in a
@@ -72,22 +109,26 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   (`ProcessSteps.transfer_dest`, `ctx.dests`). A plugin can also add a command
   group (`octacam <name> ...`, from `plugins._COMMANDS`) and its own `octacam
   doctor` checks (`Plugin.doctor`).
-
 - **`[transfer].delete_after_transfer`** (and `process --delete-after-transfer/--no-delete-after-transfer`) removes each local recording once every file in it is accounted for at the destination, after its grids: content-verified copies, and each capture once its mp4 is there. A folder with any other file missing there, or whose destination is the folder itself, is kept. `transfer.transfer_tree` copies a whole folder the same way, for a plugin's acquisition data.
-
 - **The transfer never writes over a different recording**: a destination whose summary started at another time (a take name reused) is left alone and the folder counts as failed.
-
-- **The GUI shows background processing.** While a detached `octacam
-  process` job runs, a strip along the bottom of the camera view says what it
-  is doing and how long the current step has left; once that step is done the
-  job pauses until the GUI closes, as before, and the strip says so. The event
-  log (and, with **Notify me**, a desktop notification) records when it pauses
-  and ends, and Start recording asks first while a step is still running.
-- **Jobs count their warnings**: every warning or error a detached job logs is
-  kept in its status (`octacam jobs list` has a Warnings column, the GUI says
-  "finished with N warnings"), and the log ends with a summary of them. Jobs
-  also report grid progress and name items as `Fly1/003`.
-
+- **A plugin can end the take itself**: `Plugin.take_ceiling_s` returns a
+  safety ceiling that replaces the set duration (deadline and pulse count),
+  and `controller.finish_recording(name, pulses=, take_id=)` ends the take as
+  *completed* (not an early stop). A plugin that knows how many pulses its
+  source emitted passes `pulses`: every video ends on that count, and on an
+  external trigger a camera spanning all of them provably started on the first
+  (otherwise the start is checked from when the first frames arrived).
+  `take_id` (`controller.take_id`, read while the take ran) keeps a late call
+  from ending a newer take. The GUI and `octacam record` show elapsed time for such a take;
+  its summary records `ended_by`, `duration_limit_s` and its real length as
+  `duration_s`. Every summary now also has `first_frame_time_ns`, when the
+  first frames were in (for an external trigger, possibly long after Start),
+  and plugins tell the operator through `controller.event(level, message)`.
+  `octacam record --duration` is exact: `Plugin.default_start_params` gets
+  `fixed_duration=True`, so such a plugin leaves that take to the duration (a
+  plugin overriding the hook must accept the new keyword). Its tab can offer a
+  checkbox in place of the Record tab's Duration (`setDurationSync` in a
+  plugin tab's context).
 - **`--set KEY=VALUE` on `gui` and `record`** overrides any config key for one
   launch by its dotted path (`--set record.save_method=raw`), the same flag
   deeperfly and spintrack take. The value is read as TOML, a list may drop its
@@ -248,6 +289,12 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   once its trigger stopped now proves the common start by frame count (every
   camera spans the whole train), and a camera's latency is its fastest delivery
   in its first second, not the median of its first 16 frames.
+- **2-photon processing says less, and only what matters**: one or two
+  FrameOut edges past the last saved frame of a capture stopped early is
+  expected (logged, no longer a warning); a capture discarded in ThorImage is
+  marked "no images saved" in the day's manifest; the manifest is written after
+  the renumbering, so it names `RecordingN_*` takes and lists only what is
+  still on the share.
 - **The transfer copies every file of a recording's `octacam_recording`
   folder**, a plugin's own included (it copied only the files it knew by name,
   so with a delete after transfer a plugin's facts were lost).
