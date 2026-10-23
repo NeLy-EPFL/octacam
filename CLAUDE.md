@@ -655,7 +655,8 @@ number another build answers with): `0xA5 | ver=4 | len u16 | payload |
 xor`; payload = fps, duration_ms, N camera lines `{pin, pulse_us, delay_us}`, and
 3 symmetric light channels (`strobe`/`continuous`/`pulse_train`; an `off` one is
 not sent). A **dim** command (`0xD1`, same framing, payload `pin_id u8 | duty
-u16`, ack `P`) holds a pin at a 12-bit LEDC PWM level outside the arm/run/idle
+u16`, ack `P`) holds a pin at a 12-bit level (11-bit LEDC PWM at ~19.5 kHz: core 2.x clocks the
+LEDC from the 40 MHz crystal, so 12 bits cannot reach it) outside the arm/run/idle
 state machine: arms, run ends and cancels never touch it, an arm on a pin dimmed
 above 0 and a dim on a pin the live or staged spec drives are rejected (`Eu`).
 The plugin sends dims only to a board identified as v4 (other firmware reads

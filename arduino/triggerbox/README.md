@@ -8,7 +8,7 @@ capability to the host:
   with its own pulse width and phase delay;
 - **up to 3 CCS light channels** (D5/D6/D7), each independently one of four
   modes — **off / strobe / continuous / pulse-train**;
-- **dimmed outputs**: any free pin held at a 0–100 % PWM level (12-bit, ~19.5 kHz) whatever the board is doing, e.g. the white ambient light of an arena. Arming, a run's end and a cancel never change it.
+- **dimmed outputs**: any free pin held at a 0–100 % PWM level (11-bit, ~19.5 kHz) whatever the board is doing, e.g. the white ambient light of an arena. Arming, a run's end and a cancel never change it.
 
 All output pins are chosen **at run time** from the arm packet, so you can rewire
 which screw-terminal lines drive the cameras (or which light channels are used)
@@ -43,7 +43,7 @@ Outputs are written with `digitalWrite` on transitions only. Several edges on th
 same loop iteration are emitted sequentially (~1–2 µs apart on the S3) — well
 inside the frame period and the strobe guard, but not literally simultaneous.
 
-A **dimmed output** runs on the ESP32-S3's LEDC peripheral, in hardware, so it costs the frame clock nothing. Level 0 drives the pin LOW and 100 % drives it steadily HIGH, both as plain GPIO (no PWM edges at either end); in between it is 12-bit PWM at 80 MHz / 4096 ≈ 19.5 kHz. Applying a new level takes one pass of the main loop, like an arm; crossing 0 % or 100 % attaches or detaches the PWM, which takes longer (not yet measured), so a frame-locked edge due at that moment comes out that much late. The sketch uses the Arduino-ESP32 core 3.x LEDC API (`ledcAttach`) and falls back to the 2.0.x one (`ledcSetup` + `ledcAttachPin`) on an older core, such as a 2.0.x `arduino:esp32` Nano ESP32 package.
+A **dimmed output** runs on the ESP32-S3's LEDC peripheral, in hardware, so it costs the frame clock nothing. Level 0 drives the pin LOW and 100 % drives it steadily HIGH, both as plain GPIO (no PWM edges at either end); in between it is 11-bit PWM at 40 MHz / 2048 ≈ 19.5 kHz (the command carries a 12-bit level, halved on the board). On the 2.0.x core the LEDC runs from the 40 MHz crystal, where 12 bits tops out at 9.8 kHz: `ledcSetup(ch, 19531, 12)` fails on a real Nano ESP32. Applying a new level takes one pass of the main loop, like an arm; crossing 0 % or 100 % attaches or detaches the PWM, which takes longer (not yet measured), so a frame-locked edge due at that moment comes out that much late. The sketch uses the Arduino-ESP32 core 3.x LEDC API (`ledcAttach`) and falls back to the 2.0.x one (`ledcSetup` + `ledcAttachPin`) on an older core, such as a 2.0.x `arduino:esp32` Nano ESP32 package.
 
 ## Hardware wiring
 

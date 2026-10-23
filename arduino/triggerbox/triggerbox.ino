@@ -46,7 +46,7 @@
 //  pin HIGH sinks the channel to GND -> light ON.
 //
 //  Dimmed outputs: a dim command holds a pin at a level between 0 and full
-//  scale with hardware PWM (LEDC, 12-bit at ~19.5 kHz), e.g. a driver board's
+//  scale with hardware PWM (LEDC, 11-bit at ~19.5 kHz), e.g. a driver board's
 //  white ambient light. It is independent of the arm/run/idle state machine:
 //  arming, a run's end, a cancel and idle parking never touch a dimmed pin,
 //  and the PWM costs the frame clock nothing (LEDC runs in hardware). Level 0
@@ -150,9 +150,13 @@ constexpr uint32_t kMinLedOnUs        = 1;
 constexpr char     kPrefsNamespace[] = "triggerbox";  // NVS: normally kept on reflash
 constexpr char     kPrefsDimPins[]   = "dim_pins";    // u32 pin-index mask
 constexpr uint16_t kDimPayload = 3;      // pin_id u8, duty u16
-constexpr uint8_t  kDimBits    = 12;
+constexpr uint8_t  kDimBits    = 12;     // levels on the wire
 constexpr uint16_t kDimFull    = 4095;   // full scale: the pin is held HIGH
-constexpr uint32_t kDimFreqHz  = 19531;  // 80 MHz APB clock / 4096 (12-bit)
+// The LEDC runs 11 bits at ~19.5 kHz: on core 2.x its clock is the 40 MHz
+// crystal, so 12 bits tops out at 9765 Hz (ledcSetup(ch, 19531, 12) returns 0,
+// measured on a Nano ESP32), and 40 MHz / 2048 is exact on either clock.
+constexpr uint8_t  kPwmBits    = 11;
+constexpr uint32_t kDimFreqHz  = 19531;
 
 // ---- Light modes -----------------------------------------------------------
 constexpr uint8_t kModeOff        = 0;
@@ -567,14 +571,20 @@ static void parse_and_validate(const uint8_t *payload, uint16_t len) {
 }
 
 // ---- Hardware PWM (LEDC), on either Arduino-ESP32 core ----------------------
+// A wire level (kDimBits) in LEDC counts (kPwmBits), rounded.
+static uint32_t pwm_counts(uint16_t duty) {
+  return (duty + (1u << (kDimBits - kPwmBits - 1))) >> (kDimBits - kPwmBits);
+}
 // Core 3.x picks a free LEDC channel per pin itself; core 2.x (which the
 // arduino:esp32 Nano ESP32 package has shipped) takes one chosen here. Both
 // route the pin through the Nano's Arduino-pin remap like digitalWrite.
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 static bool pwm_attach(uint8_t idx) {
-  return ledcAttach(kPinTable[idx], kDimFreqHz, kDimBits);
+  return ledcAttach(kPinTable[idx], kDimFreqHz, kPwmBits);
 }
-static void pwm_write(uint8_t idx, uint16_t duty) { ledcWrite(kPinTable[idx], duty); }
+static void pwm_write(uint8_t idx, uint16_t duty) {
+  ledcWrite(kPinTable[idx], pwm_counts(duty));
+}
 static void pwm_detach(uint8_t idx) { ledcDetach(kPinTable[idx]); }
 #else
 constexpr uint8_t kLedcChannels = 8;  // ESP32-S3
@@ -587,14 +597,16 @@ static bool pwm_attach(uint8_t idx) {
       if ((g_dim_pwm & (1u << k)) && g_pwm_chan[k] == ch) taken = true;
     }
     if (taken) continue;
-    if (ledcSetup(ch, kDimFreqHz, kDimBits) == 0) return false;
+    if (ledcSetup(ch, kDimFreqHz, kPwmBits) == 0) return false;
     ledcAttachPin(kPinTable[idx], ch);
     g_pwm_chan[idx] = ch;
     return true;
   }
   return false;
 }
-static void pwm_write(uint8_t idx, uint16_t duty) { ledcWrite(g_pwm_chan[idx], duty); }
+static void pwm_write(uint8_t idx, uint16_t duty) {
+  ledcWrite(g_pwm_chan[idx], pwm_counts(duty));
+}
 static void pwm_detach(uint8_t idx) { ledcDetachPin(kPinTable[idx]); }
 #endif
 

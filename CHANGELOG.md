@@ -35,7 +35,7 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   checkbox in place of the Record tab's Duration (`setDurationSync` in a
   plugin tab's context).
 - **triggerbox dim outputs**: any free pin can be held at a 0–100 % PWM level
-  (12-bit, ~19.5 kHz, in hardware) whatever the board is doing, for a white
+  (11-bit, ~19.5 kHz, in hardware) whatever the board is doing, for a white
   ambient light driven by the lab's LED driver board in place of the CCS
   controller. Configure `dim = [{ pin = "D9", percent = 40 }]`; set it live from
   the triggerbox tab's **Dimmed outputs** slider or `POST /api/triggerbox/dim`.
