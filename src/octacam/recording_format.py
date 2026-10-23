@@ -10,6 +10,7 @@ forever: every reader goes through `recording_info_dir`.
 from __future__ import annotations
 
 import datetime
+import itertools
 import json
 import os
 from pathlib import Path
@@ -193,16 +194,29 @@ def _capped(indices: list[int]) -> list[int]:
 
 
 def _real_duration_s(settings: RecordingSettings, cameras: list[CameraStats]) -> float:
-    """A plugin-ended take's length: its longest camera's first-to-last frame
-    timestamps, one interval per frame (an external clock's rate may differ from
-    the target fps); its most frames over the target fps without timestamps.
+    """A plugin-ended take's length: its longest camera's pulse span times that
+    camera's median timestamp interval per pulse (an external clock's rate may
+    differ from the target fps). Raw timestamps can jump (a GS3's +128 s, which
+    the pulse tracker folds), so their first-to-last difference cannot be
+    trusted. Without timestamps, the most frames over the target fps.
     """
     spans = []
     for camera in cameras:
-        stamps = [t for t in camera.timestamp_ns if t]
-        if len(stamps) >= 2:
-            n = len(stamps)
-            spans.append((max(stamps) - min(stamps)) / 1e9 * n / (n - 1))
+        rows = [
+            (stamp, pulse)
+            for stamp, pulse in zip(
+                camera.timestamp_ns, camera.pulse_index, strict=False
+            )
+            if stamp
+        ]
+        per_pulse = [
+            (t1 - t0) / (p1 - p0)
+            for (t0, p0), (t1, p1) in itertools.pairwise(rows)
+            if p1 > p0 and t1 > t0
+        ]
+        if per_pulse:
+            pulses = rows[-1][1] - rows[0][1] + 1
+            spans.append(pulses * float(np.median(per_pulse)) / 1e9)
     if spans:
         return round(max(spans), 3)
     frames = max((camera.frames for camera in cameras), default=0)

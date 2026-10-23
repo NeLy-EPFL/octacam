@@ -1152,3 +1152,115 @@ def test_transient_writer_stalls_are_filled_however_many(fake_system, tmp_path):
     assert cam["writer_dropped"] > queue_size
     assert cam["frames"] == count and len(_frames(save_dir, "FAKE-0")) == count
     np.testing.assert_array_equal(arrays["FAKE-0/pulse_index"], np.arange(count))
+
+
+class EndingSource(Plugin):
+    """A source that ends the take itself, like twophoton when ThorImage stops:
+    `count` pulses, then `finish_recording` with what it emitted. As a managed
+    board its train's ceiling count is far longer than what it emits.
+    """
+
+    name = "board"
+
+    def __init__(self, system, count, *, managed, report=True):
+        self.system = system
+        self.count = count
+        self.generates_trigger = managed
+        self.report = report
+        self._thread = None
+
+    def take_ceiling_s(self, params):
+        return 30.0
+
+    def trigger_train(self, params):
+        return {"period_ns": PERIOD_NS, "count": int(30 * FPS)}
+
+    def prime_trigger(self, params, pulses):
+        self._pulse(pulses)
+        return True
+
+    def on_recording_start(self, params):
+        take_id = self.controller.take_id
+        self._thread = threading.Thread(target=self._run, args=(take_id,))
+        self._thread.start()
+
+    def _run(self, take_id):
+        if not self.generates_trigger:
+            time.sleep(0.3)  # an external source does not wait for octacam
+        self._pulse(self.count)
+        time.sleep(0.2)
+        # A stale take's id ends nothing.
+        self.controller.finish_recording(self.name, take_id=take_id + 1)
+        assert self.controller.recording_active
+        self.controller.finish_recording(
+            self.name, pulses=self.count if self.report else None, take_id=take_id
+        )
+
+    def _pulse(self, n):
+        for _ in range(n):
+            for camera in self.system:
+                camera.trigger_once()
+            time.sleep(PERIOD_NS / 1e9)
+
+
+def _record_ended(system, tmp_path, source, trigger_source):
+    for serial in FAKE_SERIALS:
+        _backend(system, serial).hardware_period_ns = PERIOD_NS
+    _save_dir, summary, _arrays, _ = _record(
+        system,
+        tmp_path,
+        plugins=PluginManager([source]),
+        trigger_source=trigger_source,
+        duration_s=30.0,
+    )
+    assert summary["completed"] is True and summary["ended_by"] == "board"
+    return summary
+
+
+def test_an_external_take_spanning_the_reported_pulses_proves_its_start(
+    fake_system, tmp_path
+):
+    source = EndingSource(fake_system, 20, managed=False)
+    summary = _record_ended(fake_system, tmp_path, source, "external")
+    assert [c["frames"] for c in summary["cameras"]] == [20, 20]
+    sync = summary["sync"]
+    assert sync["ok"], sync
+    assert [c["start_offset_pulses"] for c in summary["cameras"]] == [0, 0]
+    assert any("20 pulses" in note for note in sync["notes"]), sync
+    # 20 pulses at 50 fps, from the timestamps.
+    assert summary["duration_s"] == pytest.approx(0.4, rel=0.01)
+
+
+def test_an_external_take_missing_its_first_and_last_pulses_is_not_aligned(
+    fake_system, tmp_path
+):
+    # Tommy's review: one camera misses the last pulse, the other the first;
+    # both span 19 of 20. Against the reported 20 neither start is proven, and
+    # the arrivals show FAKE-1 a pulse late.
+    _backend(fake_system, "FAKE-0").miss_triggers = {19}
+    _backend(fake_system, "FAKE-1").ignore_first_triggers = 1
+    source = EndingSource(fake_system, 20, managed=False)
+    summary = _record_ended(fake_system, tmp_path, source, "external")
+    assert [c["frames"] for c in summary["cameras"]] == [19, 19]
+    sync = summary["sync"]
+    assert not sync["ok"]
+    assert [c["start_offset_pulses"] for c in summary["cameras"]] == [0, 1], sync
+
+
+@pytest.mark.parametrize("report", [True, False])
+def test_a_managed_train_its_board_ends_is_the_pulses_it_emitted(
+    fake_system, tmp_path, report
+):
+    # Both cameras miss the train's last pulse: only the board's own count
+    # tells it was emitted, so the videos end on it (filled) rather than one
+    # short; never on the ceiling's 1500.
+    for serial in FAKE_SERIALS:
+        _backend(fake_system, serial).miss_triggers = {29}
+    source = EndingSource(fake_system, 30, managed=True, report=report)
+    summary = _record_ended(fake_system, tmp_path, source, "managed")
+    expected = 30 if report else 29
+    assert summary["pulse_train"]["count"] == expected
+    assert [c["frames"] for c in summary["cameras"]] == [expected, expected]
+    missed = [c["missed_pulse_indices"] for c in summary["cameras"]]
+    assert missed == ([[29], [29]] if report else [[], []])
+    assert summary["sync"]["ok"], summary["sync"]
