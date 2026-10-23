@@ -91,7 +91,7 @@ Baud rate: **115200** (nominal — USB CDC). All multi-byte fields little-endian
 
 ### Host → Arduino
 
-**Arm** — `0xA5` · `version=3` (u8) · `payload_len` (u16) · *payload* · `checksum` (u8)
+**Arm** — `0xA5` · `version=4` (u8) · `payload_len` (u16) · *payload* · `checksum` (u8)
 
 The **payload** (`payload_len` bytes) is:
 
@@ -118,7 +118,7 @@ Light **mode** fields:
 | 2    | continuous  | —             | —            | —                | — (on for whole run)   |
 | 3    | pulse_train | pulse_us      | interval_us  | start_delay_us   | train_us (0 = forever) |
 
-**Dim** — `0xD1` · `version=3` (u8) · `payload_len=3` (u16) · `pin_id` (u8) · `duty` (u16) · `checksum` (u8), framed and checksummed like an arm. `duty` is 0–4095: 0 drives the pin LOW, 4095 steadily HIGH, anything between is PWM at `duty`/4096 (a larger value counts as 4095). The board answers `P`, or `E<c>`; the level holds until the next dim of that pin or a board reset, whatever the run state. Dimming a pin that the running spec (or a staged re-arm) drives is rejected with `Eu`, and so is an arm that uses a pin dimmed above 0. Dim 0 frees the pin for arms again.
+**Dim** — `0xD1` · `version=4` (u8) · `payload_len=3` (u16) · `pin_id` (u8) · `duty` (u16) · `checksum` (u8), framed and checksummed like an arm. `duty` is 0–4095: 0 drives the pin LOW, 4095 steadily HIGH, anything between is PWM at `duty`/4096 (a larger value counts as 4095). The board answers `P`, or `E<c>`; the level holds until the next dim of that pin or a board reset, whatever the run state. Dimming a pin that the running spec (or a staged re-arm) drives is rejected with `Eu`, and so is an arm that uses a pin dimmed above 0. Dim 0 frees the pin for arms again.
 
 **Cancel** — `0xCA`. **Identify** — `0x3F` (`?`) → replies `TRIGGERBOX 4 <build>\n`,
 where `<build>` is a short hash of the sketch source (see *Firmware fingerprint* below).
