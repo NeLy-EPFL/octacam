@@ -28,11 +28,14 @@
 //
 //  Right before 'D' the board reports why and how the run ended, as one
 //  newline-terminated line (it starts with 'S', never a status byte):
-//    "STOP <reason> <edges> <high_ms> <run_ms>\n"
+//    "STOP <reason> <edges> <high_ms> <run_ms> <pulses>\n"
 //    reason  'I' = ThorImage stopped (input idle), 'C' = duration ceiling hit
 //    edges   rising edges seen on kTriggerInPin while running (incl. the start)
 //    high_ms total time kTriggerInPin was HIGH while running
 //    run_ms  total run time
+//    pulses  camera trigger pulses (rising edges on kCameraPin) of the run; a
+//            board that sends it starts them half a period after the start
+//            edge (an older one sent the first four fields only)
 //  edges/high_ms tell what is wired to the input (a CaptureOn-style gate: one
 //  edge, HIGH ≈ run; a FrameOut-style train: one edge per 2P frame).
 //
@@ -93,11 +96,15 @@ static bool     g_last_trigger_high = false;
 // level carried over from the previous run's parity made it a whole period
 // half the time (octacam's ThorSync-free alignment relies on the phase).
 static volatile bool g_cam_level = false;
+// The run's camera pulses (rising edges), for the STOP report: octacam counts
+// its frames against them.
+static volatile uint32_t g_cam_pulses = 0;
 
 ISR(TIMER1_COMPA_vect) {
   g_cam_level = !g_cam_level;
   digitalWrite(kCameraPin, g_cam_level);
   digitalWrite(kSyncPin,   g_cam_level);
+  if (g_cam_level) ++g_cam_pulses;
 }
 
 // Timer1 prescaler options, finest first. A fixed /8 prescaler overflowed the
@@ -131,11 +138,13 @@ static void timer1_start(const uint16_t fps) {
     }
   }
   cli();
-  g_cam_level = false;
+  g_cam_level  = false;
+  g_cam_pulses = 0;
   TCCR1A = 0;
   TCCR1B = 0;
   TCNT1  = 0;
   OCR1A  = static_cast<uint16_t>(ocr);
+  TIFR1  = _BV(OCF1A);            // a compare match left pending by the last run
   TCCR1B = _BV(WGM12) | cs_bits;  // CTC mode + selected prescaler
   TIMSK1 = _BV(OCIE1A);
   sei();
@@ -212,7 +221,8 @@ static void enter_running() {
 // Ends a run: report why + what the input looked like, then 'D'.
 static void finish_run(const char reason, const uint32_t now) {
   if (g_last_trigger_high) g_high_ms += now - g_high_since_ms;
-  enter_idle();
+  enter_idle();  // the timer is stopped: the count no longer moves
+  const uint32_t pulses = g_cam_pulses;
   Serial.print("STOP ");
   Serial.write(reason);
   Serial.write(' ');
@@ -221,6 +231,8 @@ static void finish_run(const char reason, const uint32_t now) {
   Serial.print(g_high_ms);
   Serial.write(' ');
   Serial.print(now - g_run_start_ms);
+  Serial.write(' ');
+  Serial.print(pulses);
   Serial.write('\n');
   Serial.write('D');
 }

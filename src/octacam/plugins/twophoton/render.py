@@ -130,6 +130,67 @@ def find_synced_inputs(take_dir: Path) -> SyncedInputs | str:
     return SyncedInputs(behavior, image_dir, sync_dir, board)
 
 
+def _video_pulses(take_dir: Path, summary: dict):
+    """The camera pulse each behavior video frame shows (ascending), or None when
+    frame k is pulse k. A filled train (software, managed) writes one frame per
+    pulse; an unfilled one (external) leaves a missed pulse out, as a writer skip
+    does on any train, and every later frame shifts. Read from the take's
+    `timestamps.npz` (`<camera>/pulse_index`), else rebuilt from the summary's
+    missed and skipped pulse lists when they are complete. The grid shows every
+    camera: when their maps differ, the longest camera's is used and a warning
+    says the grid's cameras are not frame-aligned.
+    """
+    import numpy as np
+
+    from octacam.recording_format import TIMESTAMPS_FILENAME, recording_info_dir
+
+    cameras = [c for c in summary.get("cameras", []) if c.get("frames")]
+    unfilled = (summary.get("pulse_train") or {}).get("source") == "external"
+    gaps = any(
+        (unfilled and c.get("missed_pulses")) or c.get("writer_skipped")
+        for c in cameras
+    )
+    if not gaps:
+        return None
+    maps: dict[str, np.ndarray] = {}
+    try:
+        with np.load(recording_info_dir(take_dir) / TIMESTAMPS_FILENAME) as data:
+            for c in cameras:
+                key = f"{c['name']}/pulse_index"
+                if key in data.files:
+                    maps[c["name"]] = np.asarray(data[key], dtype=np.int64)
+    except OSError, ValueError:
+        pass
+    for c in cameras:
+        if c["name"] in maps:
+            continue
+        missing = set(c.get("missed_pulse_indices") or [])
+        missing |= set(c.get("writer_skipped_pulse_indices") or [])
+        counted = (c.get("missed_pulses") or 0) + (c.get("writer_skipped") or 0)
+        if len(missing) != counted:  # a capped list: the map is unknown
+            continue
+        span = c["frames"] + len(missing)
+        maps[c["name"]] = np.asarray(
+            [p for p in range(span) if p not in missing], dtype=np.int64
+        )
+    if not maps:
+        log.warning(
+            "synced render: %s -- a camera missed pulses on an external trigger, "
+            "but no pulse_index says which: frames are drawn as pulse k",
+            take_dir,
+        )
+        return None
+    distinct = {m.tobytes() for m in maps.values()}
+    longest = max(maps.values(), key=len)
+    if len(distinct) > 1 or len(maps) < len(cameras):
+        log.warning(
+            "synced render: %s -- the cameras missed different pulses, so the "
+            "grid's cameras are not frame-aligned; drawn on the longest one's",
+            take_dir,
+        )
+    return longest
+
+
 def _is_saved_image(name: str) -> bool:
     stem, _, suffix = name.lower().rpartition(".")
     if suffix in ("tif", "tiff"):
@@ -399,8 +460,12 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
         if edges is None or not edges[0] or not edges[1]:
             log.info("synced render: skipping %s (no camera/FrameOut edges)", take_dir)
             return None
+    # Which pulse each behavior frame shows: frame k is pulse k unless a camera
+    # missed pulses an unfilled (external) train left out of its video.
+    pulses = _video_pulses(take_dir, summary)
     # A take stopped from octacam has a few pulses past its last frame.
-    cam_times = np.asarray(edges[0][: max(frame_counts, default=len(edges[0]))])
+    shown = max(frame_counts, default=len(edges[0])) if pulses is None else None
+    cam_times = np.asarray(edges[0][: shown if pulses is None else int(pulses[-1]) + 1])
     frameout_times = np.asarray(edges[1])
 
     stacks = channel_stacks(inputs.image_dir)
@@ -519,6 +584,8 @@ def _render(take_dir: Path, opts: SyncedRenderOptions, force: bool) -> Path | No
         n_out = int((cam_times[-1] - cam_times[0]) * opts.fps) + 1
         t_out = cam_times[0] + np.arange(n_out) / opts.fps
         beh_idx = np.searchsorted(cam_times, t_out, side="right") - 1
+        if pulses is not None:  # the pulse at each output time -> its frame
+            beh_idx = np.maximum(np.searchsorted(pulses, beh_idx, side="right") - 1, 0)
         img_idx = np.searchsorted(vol_times, t_out, side="right") - 1
 
         out.parent.mkdir(parents=True, exist_ok=True)

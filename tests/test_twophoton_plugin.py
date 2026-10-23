@@ -232,11 +232,17 @@ def test_default_start_params_emits_headless_slice():
         "fps": 83,
         "duration_ms": 12000,
         "match_thorimage": False,
+        "fixed_duration": False,
     }
     # And it must reach on_recording_start under the "twophoton" key via the manager.
     params = PluginManager([plugin]).default_start_params(80.0, 5.0)
     assert params == {
-        "twophoton": {"fps": 80, "duration_ms": 5000, "match_thorimage": False}
+        "twophoton": {
+            "fps": 80,
+            "duration_ms": 5000,
+            "match_thorimage": False,
+            "fixed_duration": False,
+        }
     }
 
 
@@ -782,8 +788,11 @@ class _ControllerSpy:
     """
 
     # No take folder by default: the take info is then not written anywhere.
+    take_id = 7
+
     def __init__(self, save_dir="/nonexistent/take"):
         self.finished: list[str] = []
+        self.finish_kwargs: list[dict] = []
         self.threads: list[str] = []
         self.events: list[tuple[str, str]] = []
         self.called = threading.Event()
@@ -792,8 +801,9 @@ class _ControllerSpy:
     def get_settings(self):
         return self._settings
 
-    def finish_recording(self, by: str) -> None:
+    def finish_recording(self, by: str, **kwargs) -> None:
         self.finished.append(by)
+        self.finish_kwargs.append(kwargs)
         self.threads.append(threading.current_thread().name)
         self.called.set()
 
@@ -892,6 +902,13 @@ def test_an_explicit_duration_is_a_fixed_length_take():
     slice_ = plugin.default_start_params(100.0, 30.0, fixed_duration=True)
     assert slice_["match_thorimage"] is False
     assert plugin.take_ceiling_s(slice_) is None
+    # Tommy's review: that one take's choice must not reach the snapshot, or a
+    # GUI relaunch from the recording starts unsynced.
+    assert plugin.snapshot_options(slice_) is None
+    # The Record tab's unticked checkbox still does.
+    assert plugin.snapshot_options({"match_thorimage": False}) == {
+        "match_thorimage": False
+    }
 
 
 def test_done_after_trigger_finishes_a_synced_take():
@@ -909,7 +926,25 @@ def test_done_after_trigger_finishes_a_synced_take():
     assert spy.finished == ["twophoton"]  # a completed take, not an early stop
     # Off the serial reader: finish_recording takes the controller lock.
     assert spy.threads == ["twophoton-finish"]
+    # This take's id; no pulse count from a board that does not send one.
+    assert spy.finish_kwargs == [{"pulses": None, "take_id": 7}]
     assert plugin.take_info()["stop"]["reason"] == "thorimage"
+
+
+def test_done_tells_the_take_how_many_pulses_the_board_emitted():
+    # Tommy's review: equal spans prove a common start only against the count
+    # the source emitted; the board counts its camera pulses since 2026-10-23.
+    plugin, _ = _plugin_with_fake(match_thorimage=True)
+    spy = _attach(plugin)
+    plugin.on_recording_start({})
+    for status in "AT":
+        plugin._on_status(status)
+    report = parse_stop_report("STOP I 4500 293000 294000 29399")
+    assert report is not None
+    plugin._on_stop_report(report)
+    plugin._on_status("D")
+    spy.settle()
+    assert spy.finish_kwargs == [{"pulses": 29399, "take_id": 7}]
 
 
 def test_done_does_not_end_a_fixed_duration_take():
@@ -964,7 +999,17 @@ def test_parse_stop_report():
         "run_ms": 294100,
     }
     assert (parse_stop_report("STOP C 1 3600000 3600000") or {})["reason"] == "ceiling"
-    for garbled in ("STOP X 1 2 3", "STOP I 1 2", "STOP I a b c", "STOPI 1 2 3"):
+    # A board that counts its camera pulses adds them.
+    assert (parse_stop_report("STOP I 4500 293000 294100 29409") or {})[
+        "pulses"
+    ] == 29409
+    for garbled in (
+        "STOP X 1 2 3",
+        "STOP I 1 2",
+        "STOP I a b c",
+        "STOPI 1 2 3",
+        "STOP I 1 2 3 4 5",
+    ):
         assert parse_stop_report(garbled) is None
 
 
@@ -1029,22 +1074,20 @@ def test_the_take_info_lands_in_the_take_folder(tmp_path):
     }
 
 
-@pytest.mark.parametrize(
-    ("state", "phase"),
-    [("CURRENT", "half_period"), ("OUTDATED", None)],
-)
-def test_a_current_board_notes_where_its_camera_pulses_start(state, phase):
-    # The 2026-10-21 build starts a run's camera pulses half a period in; an
-    # older one carried its pin toggle over (board_sync reads this).
+@pytest.mark.parametrize("state", ["CURRENT", "OUTDATED"])
+def test_the_take_records_the_board_s_build_whatever_the_source_says(state):
+    # Tommy's review: noting the phase only for a CURRENT board dropped the
+    # 2026-10-21 boards back to +/-2.5 ms at the next sketch edit. The banner
+    # names the build; board_sync decides the phase from it.
     from octacam import firmware as fw
 
     plugin, _ = _plugin_with_fake(match_thorimage=True)
-    plugin.banner = "2PHOTON 2 abc123"
+    plugin.banner = "2PHOTON 2 dcba4c14"
     plugin.firmware_check = fw.FirmwareCheck(fw.FirmwareState[state], "", "abc123")
     plugin.on_recording_start({"fps": 100})
     info = plugin.take_info()
-    assert info["firmware"] == "2PHOTON 2 abc123"
-    assert info.get("camera_phase") == phase
+    assert info["firmware"] == "2PHOTON 2 dcba4c14"
+    assert "camera_phase" not in info
 
 
 def test_an_unarmed_take_is_recorded_as_such(tmp_path):

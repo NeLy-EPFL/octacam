@@ -3,8 +3,11 @@ record, in place of the AirFlow channel ThorSync would have held.
 
 airflow_control (the rig's MFC controller, on the PC that runs octacam) logs
 every setpoint it writes as one JSON line with the host's wall clock
-(`airflow_*.jsonl`): the clock octacam stamps its frames with. The AirFlow
-sensor follows those commands closely (2026-10-16: the rebuilt signal gives
+(`airflow_*.jsonl`): the clock octacam stamps its frames with. It logs only
+when something changes, so a constant flow leaves no line during a take: a
+session runs from its first line to its shutdown (`stop` lines with a
+"shutdown" reason, its last), else, cut short, until the next session starts.
+The AirFlow sensor follows those commands closely (2026-10-16: the rebuilt signal gives
 the sensor's air on/off on 99.9 % of camera frames; scapepp's
 `analysis/dan_screen/airlog.py` does the rebuild). So for a take paired
 without ThorSync, `octacam process` copies the commands that cover it into
@@ -34,7 +37,10 @@ MARGIN_S = 1.0
 
 
 def _take_span(take: Path) -> tuple[float, float] | None:
-    """The take's first frame and end on the host clock (s), or None."""
+    """The take's first frame and end on the host clock (s), or None. Its
+    length is its frames at its fps: `duration_s` is the set duration for a
+    take stopped by hand, longer than what ran.
+    """
     from octacam.recording_format import read_summary
 
     try:
@@ -42,10 +48,12 @@ def _take_span(take: Path) -> tuple[float, float] | None:
     except OSError, ValueError:
         return None
     first = summary.get("first_frame_time_ns") or summary.get("start_time_ns")
-    duration = summary.get("duration_s")
-    if not first or not duration:
+    fps = summary.get("fps_target")
+    frames = max((c.get("frames") or 0 for c in summary.get("cameras", [])), default=0)
+    length = frames / fps if fps and frames else summary.get("duration_s")
+    if not first or not length:
         return None
-    return first / 1e9, first / 1e9 + float(duration)
+    return first / 1e9, first / 1e9 + float(length)
 
 
 def _read_log(path: Path) -> list[tuple[float, str, dict]]:
@@ -66,9 +74,34 @@ def _read_log(path: Path) -> list[tuple[float, str, dict]]:
     return rows
 
 
+def _shut_down(row: tuple[float, str, dict]) -> bool:
+    r = row[2]
+    return r.get("event") == "stop" and str(r.get("reason", "")).startswith("shutdown")
+
+
+def _sessions(log_dir: Path) -> list[tuple[float, float, list]]:
+    """Each airflow_control session as (start, end, rows), oldest first: its
+    end is its shutdown, else the next session's start (module doc).
+    """
+    logs = [
+        rows for path in sorted(log_dir.glob(LOG_GLOB)) if (rows := _read_log(path))
+    ]
+    logs.sort(key=lambda rows: rows[0][0])
+    sessions = []
+    for i, rows in enumerate(logs):
+        if _shut_down(rows[-1]):
+            end = rows[-1][0]
+        elif i + 1 < len(logs):
+            end = logs[i + 1][0][0]
+        else:
+            end = float("inf")  # still running, or cut short
+        sessions.append((rows[0][0], end, rows))
+    return sessions
+
+
 def commands_for(take: Path, log_dir: Path) -> list[str] | None:
     """The log lines that describe *take*'s air (module doc), or None when no
-    airflow_control session (one log file, first to last line) overlaps it.
+    airflow_control session overlaps it.
     """
     span = _take_span(take)
     if span is None:
@@ -77,9 +110,8 @@ def commands_for(take: Path, log_dir: Path) -> list[str] | None:
     covered = False
     before: dict[str, tuple[float, str]] = {}
     during: list[tuple[float, str]] = []
-    for path in sorted(log_dir.glob(LOG_GLOB)):
-        rows = _read_log(path)
-        if not rows or not (rows[0][0] <= end and start <= rows[-1][0]):
+    for first, last, rows in _sessions(log_dir):
+        if not (first <= end and start <= last):
             continue  # another session: its flows are not this take's
         covered = True
         for t, line, r in rows:

@@ -202,3 +202,58 @@ def test_a_current_board_starts_the_cameras_half_a_period_in(tmp_path):
     assert model is not None
     assert model["first_camera_pulse_ms"] == 5.0
     assert model["start_uncertainty_ms"] == 0.1
+
+
+def _with_info(take: Path, **fields) -> None:
+    info = take / "octacam_recording" / "twophoton.json"
+    info.write_text(json.dumps({**json.loads(info.read_text()), **fields}))
+
+
+@pytest.mark.parametrize(
+    ("banner", "pulses", "half"),
+    [
+        ("2PHOTON 2 dcba4c14", None, True),  # the 2026-10-21 build
+        ("2PHOTON 2 a1a23e47", 32894, True),  # a board that counts its pulses
+        ("2PHOTON 2 0ldbu1ld", None, False),
+        (None, None, False),
+    ],
+)
+def test_the_phase_comes_from_what_the_board_said(tmp_path, banner, pulses, half):
+    # Tommy's review: decided here from the build, not noted by the plugin
+    # only while the board matched the source exactly.
+    stop = STOP if pulses is None else {**STOP, "pulses": pulses}
+    take = _take(tmp_path, "001", stop=stop)
+    _with_info(take, firmware=banner)
+    board = read_board_take(take)
+    assert board is not None and board.half_period_phase is half
+
+
+def test_a_video_that_misses_the_board_s_first_pulses_widens_the_start(tmp_path):
+    # Tommy's review: an external take cannot be primed, so a camera that
+    # ignores the first pulse makes frame 0 the board's second; the model must
+    # not still claim 0.1 ms. The board counted 32896 pulses, the video 32894.
+    take = _take(tmp_path, "001", stop={**STOP, "pulses": 32896})
+    board = read_board_take(take)
+    assert board is not None and board.board_pulses == 32896
+    model = board_sync(board, [])
+    assert model is not None
+    assert model["start_uncertainty_ms"] == 20.0  # two 10 ms camera frames
+    assert "32896 camera pulses" in model["warning"]
+    # Counted and matching: the precise start, no warning.
+    take = _take(tmp_path / "ok", "001", stop={**STOP, "pulses": 32894})
+    model = board_sync(read_board_take(take), [])
+    assert model is not None
+    assert model["start_uncertainty_ms"] == 0.1 and "warning" not in model
+
+
+def test_a_board_without_a_count_is_checked_against_its_run_time(tmp_path):
+    # The 2026-10-21 build sends no count, but its pulses start half a period
+    # in, so the run time implies one (to within a pulse).
+    take = _take(tmp_path, "001", stop=STOP, frames=32894)
+    _with_info(take, firmware="2PHOTON 2 dcba4c14")
+    model = board_sync(read_board_take(take), [])
+    assert model is not None and "warning" not in model
+    short = _take(tmp_path / "short", "001", stop=STOP, frames=32890)
+    _with_info(short, firmware="2PHOTON 2 dcba4c14")
+    model = board_sync(read_board_take(short), [])
+    assert model is not None and model["start_uncertainty_ms"] == 40.0

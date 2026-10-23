@@ -51,7 +51,16 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 - **2-photon firmware**: the first camera pulse of a run is always half a
   period after ThorSync's edge (it was half or a whole one, depending on the
   previous run), so a take without ThorSync starts within ~0.1 ms instead of
-  2.5 ms. Reflash with `octacam flash` (an older board still works).
+  2.5 ms; and the end-of-run report counts the run's camera pulses. A synced
+  take tells octacam that count when it ends, which then proves every camera
+  started on the first pulse (instead of comparing when frames arrived), and
+  the board-clock alignment checks its start against it: a video that does
+  not account for every pulse widens the alignment's stated uncertainty and
+  says so. Reflash with `octacam flash` (an older board still works; the
+  2026-10-21 build keeps its precise start).
+- **The synced video follows `pulse_index`** (`twophoton`): under an external
+  trigger a missed pulse leaves no frame, and the video was drawn one frame
+  early from there on.
 - **Lighter grids**: a `[[visualization]]` may set `max_width` (px) to scale
   its cells down; with its own faster `ffmpeg_params` a grid builds several
   times faster (see Configuration).

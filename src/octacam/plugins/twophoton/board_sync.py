@@ -21,8 +21,17 @@ frameRate (~0.1 % off: 0.4 s by the end of 5000 frames).
 The first camera pulse fires half a camera period after the first 2P frame. A
 board running an older build (before 2026-10-21) carried its pin toggle over
 from the previous run, which made it half or a whole period: such a take's
-start is known to within a quarter period (2.5 ms at 100 fps). The plugin notes
-a current build in `twophoton.json` (`camera_phase`).
+start is known to within a quarter period (2.5 ms at 100 fps). The phase is
+decided here, from what the board said: a STOP report counting the camera
+pulses (`pulses`) comes from a build that starts half a period in, as does the
+one build before it that did (`HALF_PERIOD_BUILDS`, named in the banner
+`twophoton.json` keeps); an older take's `camera_phase` note still counts.
+
+The model assumes video frame 0 is the board's first camera pulse. An
+`external` take is not primed, so a camera that ignores its first pulse breaks
+that. The camera pulses the take accounts for are therefore checked against the
+board's: its count (`pulses`), else the count its run time implies (one either
+way); a mismatch widens the start uncertainty to cover it and is noted.
 
 A board too old to report (before 2026-10-14) leaves no count nor run time.
 Its start rule is the same, so such a take is modeled from ThorImage instead:
@@ -68,6 +77,11 @@ _PRESCALERS = (1, 8, 64, 256, 1024)
 _FIRST_PULSE_PERIODS = 0.75
 _FIRST_PULSE_UNCERTAINTY_PERIODS = 0.25
 _HALF_PERIOD_PHASE = "half_period"
+# The build (sketch fingerprint) that first started the camera pulses half a
+# period in, before boards counted their pulses: 2026-10-21, c7c43f3.
+HALF_PERIOD_BUILDS = frozenset({"dcba4c14"})
+# How far the count a run time implies may be off: the run is timed in whole ms.
+_IMPLIED_PULSES_SLACK = 1
 _FIRST_PULSE_POLL_MS = 0.1
 # Completed captures whose period is shared must agree with ThorImage's frame
 # rate to this much (a different scan configuration has another period).
@@ -131,6 +145,8 @@ class BoardTake:
     has_thorsync: bool
     # The board's build starts the camera pulses half a period in (module doc).
     half_period_phase: bool = False
+    # The run's camera pulses, from a board that counts them.
+    board_pulses: int | None = None
     scan_config: str | None = None
     # The paired SyncData folder, when there is one (a rig-factor reference).
     sync_dir: Path | None = None
@@ -210,10 +226,43 @@ def read_board_take(take: Path) -> BoardTake | None:
         experiment_xml=xml,
         nominal_hz=_nominal_rate(xml),
         has_thorsync=sync_dir is not None,
-        half_period_phase=info.get("camera_phase") == _HALF_PERIOD_PHASE,
+        half_period_phase=_half_period_phase(info, stop),
+        board_pulses=_count(stop.get("pulses")) if stop is not None else None,
         scan_config=_scan_config(xml),
         sync_dir=sync_dir if sync_dir is not None and sync_dir.is_dir() else None,
     )
+
+
+def _count(value: object) -> int | None:
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def _half_period_phase(info: dict, stop: dict | None) -> bool:
+    """Whether the board that ran this take starts its camera pulses half a
+    period in (module doc): it counted them, its build is one that did, or an
+    older take's plugin noted so.
+    """
+    if stop is not None and "pulses" in stop:
+        return True
+    banner = info.get("firmware")
+    build = banner.split()[-1] if isinstance(banner, str) and banner.split() else ""
+    return build in HALF_PERIOD_BUILDS or info.get("camera_phase") == _HALF_PERIOD_PHASE
+
+
+def _start_check(take: BoardTake, camera_ms: float, first_ms: float) -> int | None:
+    """How many pulses the board emitted that the take's video does not account
+    for (negative: more frames than pulses), or None when the board did not say
+    or it is within the slack of a count implied by the run time.
+    """
+    if take.board_pulses is not None:
+        diff = take.board_pulses - take.camera_pulses
+        return diff or None
+    if take.stop is None or not take.half_period_phase:
+        return None  # an unknown first pulse: no count to imply
+    run_ms = take.stop["run_ms"]
+    implied = int((run_ms - first_ms) // camera_ms) + 1 if run_ms >= first_ms else 0
+    diff = implied - take.camera_pulses
+    return diff if abs(diff) > _IMPLIED_PULSES_SLACK else None
 
 
 def _saved_scans(take: BoardTake) -> int | None:
@@ -322,7 +371,19 @@ def board_sync(
     else:
         first_ms = _FIRST_PULSE_PERIODS * camera_ms
         uncertainty_ms = _FIRST_PULSE_UNCERTAINTY_PERIODS * camera_ms
-    return {
+    unaccounted = _start_check(take, camera_ms, first_ms)
+    warning = None
+    if unaccounted is not None:
+        # Frame 0 may be a later pulse (a camera ignored the first ones) or the
+        # video may end short: either way the start is known only this well.
+        uncertainty_ms = max(uncertainty_ms, abs(unaccounted) * camera_ms)
+        warning = (
+            f"The board emitted {take.camera_pulses + unaccounted} camera pulses "
+            f"but the video accounts for {take.camera_pulses}: the alignment may "
+            f"be off by up to {abs(unaccounted)} camera frame(s)."
+        )
+        log.warning("2P board sync: %s %s", take.take, warning)
+    model = {
         "version": BOARD_SYNC_VERSION,
         "source": "board",
         "twop_pulses": pulses,
@@ -337,6 +398,9 @@ def board_sync(
             "from the first 2P frame (octacam.plugins.twophoton.board_sync)."
         ),
     }
+    if warning is not None:
+        model["warning"] = warning
+    return model
 
 
 def _unreported(

@@ -189,23 +189,31 @@ def thorsync_attached_check(source: Path) -> tuple[str, str] | None:
 
 
 def parse_stop_report(line: str) -> dict | None:
-    """The firmware's "STOP <reason> <edges> <high_ms> <run_ms>" line as
-    `{"reason": "thorimage"|"ceiling", "edges", "high_ms", "run_ms"}`, or None
+    """The firmware's "STOP <reason> <edges> <high_ms> <run_ms> [<pulses>]" line
+    as `{"reason": "thorimage"|"ceiling", "edges", "high_ms", "run_ms"}`, plus
+    `"pulses"` (the run's camera pulses) from a board that counts them, or None
     for a garbled one.
     """
     parts = line.split()
-    if len(parts) != 5 or parts[0] != _STOP_PREFIX or parts[1] not in _STOP_REASONS:
+    if (
+        len(parts) not in (5, 6)
+        or parts[0] != _STOP_PREFIX
+        or parts[1] not in _STOP_REASONS
+    ):
         return None
     try:
-        edges, high_ms, run_ms = (int(x) for x in parts[2:])
+        numbers = [int(x) for x in parts[2:]]
     except ValueError:
         return None
-    return {
+    report = {
         "reason": _STOP_REASONS[parts[1]],
-        "edges": edges,
-        "high_ms": high_ms,
-        "run_ms": run_ms,
+        "edges": numbers[0],
+        "high_ms": numbers[1],
+        "run_ms": numbers[2],
     }
+    if len(numbers) == 4:
+        report["pulses"] = numbers[3]
+    return report
 
 
 @dataclass
@@ -371,6 +379,7 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         self._take_dir: Path | None = None
         self._take_armed = False
         self._take_armed_at = 0.0
+        self._take_id: int | None = None  # the controller's, for finish_recording
         # The GUI asks whether ThorImage's ThorSync box is ticked before the
         # session's first armed take, and again after a take ThorSync missed.
         self.thorsync_remind = True
@@ -434,8 +443,13 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         if self._user_delete_share is not None:
             options["delete_share_data"] = self._user_delete_share
         # The Record tab's "Synced with ThorImage", when it differs from the
-        # config's: a relaunch from the recording records the same way.
-        if params is not None and self._wants_match(params) != self.match_thorimage:
+        # config's: a relaunch from the recording records the same way. Not a
+        # headless --duration: that take's own choice, not the rig's setting.
+        if (
+            params is not None
+            and not params.get("fixed_duration")
+            and self._wants_match(params) != self.match_thorimage
+        ):
             options["match_thorimage"] = self._wants_match(params)
         return options or None
 
@@ -504,11 +518,17 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         controller = self.controller
         if ends_take and controller is not None:
             log.info("twophoton: ThorImage stopped \N{EM DASH} ending the take")
+            # The STOP report came just before this 'D' (one reader, in order):
+            # a board that counts its camera pulses tells the take how many.
+            report = self._stop_report or {}
             # Never on the reader: the controller lock can be held for seconds
             # by a camera operation, and the reader must keep draining the board.
+            # The take id keeps a call that waited on the lock from ending a
+            # newer take.
             threading.Thread(
                 target=controller.finish_recording,
                 args=(self.name,),
+                kwargs={"pulses": report.get("pulses"), "take_id": self._take_id},
                 name="twophoton-finish",
                 daemon=True,
             ).start()
@@ -649,6 +669,7 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
             "fps": round(fps),
             "duration_ms": max(1, round(duration_s * 1000)),
             "match_thorimage": self.match_thorimage and not fixed_duration,
+            "fixed_duration": fixed_duration,
         }
 
     def take_ceiling_s(self, params: dict | None) -> float | None:
@@ -670,6 +691,7 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         )
         self._take_armed = params is not None
         self._take_armed_at = time.time()
+        self._take_id = controller.take_id if controller else None
         self._take_synced = params is not None and self._wants_match(params)
         self._stop_report = None
         if params is None:
@@ -778,17 +800,11 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         data at all), synced with ThorImage, and the board's STOP report (absent
         when octacam ended the run: a manual stop or abort), the wait
         after ThorImage stopped it was armed with, and the board's firmware
-        (whose build fixes where the camera pulses start, see board_sync).
+        banner, whose build tells board_sync where the camera pulses start.
         """
         info: dict = {"armed": self._take_armed, "match_thorimage": self._take_synced}
         if self._take_armed:
             info["firmware"] = self.banner
-            # The current sketch starts each run's camera pulses half a period
-            # after ThorSync's edge; an older build, or an unknown one, may
-            # start them a whole period after (board_sync).
-            check = self.firmware_check
-            if check is not None and check.state is fw.FirmwareState.CURRENT:
-                info["camera_phase"] = "half_period"
         if self._take_synced:
             info["stop_idle_ms"] = self.stop_idle_ms
         if self._stop_report is not None:

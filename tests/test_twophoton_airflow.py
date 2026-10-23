@@ -21,7 +21,7 @@ runner = CliRunner()
 T0 = 1_792_500_000.0  # the take's first frame (host clock)
 
 
-def _line(t: float, channel: str, event: str, setpoint: float) -> str:
+def _line(t: float, channel: str, event: str, setpoint: float, **extra) -> str:
     stamp = datetime.fromtimestamp(t).astimezone().isoformat(timespec="milliseconds")
     return json.dumps(
         {
@@ -30,6 +30,7 @@ def _line(t: float, channel: str, event: str, setpoint: float) -> str:
             "channel": channel,
             "event": event,
             "setpoint": setpoint,
+            **extra,
         }
     )
 
@@ -86,7 +87,7 @@ def test_a_take_no_session_covers_gets_nothing(tmp_path):
         "airflow_20261012_115158.jsonl",
         [
             _line(T0 - 7200, "air", "continuous", 0.5),
-            _line(T0 - 3600, "air", "stop", 0),
+            _line(T0 - 3600, "air", "stop", 0, reason="shutdown"),  # closed
         ],
     )
     take = _take(tmp_path / "day")
@@ -179,3 +180,43 @@ def test_only_the_covering_session_and_its_last_setpoints_describe_the_start(tmp
         ("air", 0.9),
         ("air", 0.0),
     ]
+
+
+def test_a_constant_flow_through_the_take_is_still_covered(tmp_path):
+    # Tommy's review: airflow_control logs only changes, so a session whose
+    # last line came before the take read "air unknown". It runs until its
+    # shutdown, or until the next session starts.
+    logs = tmp_path / "logs"
+    _log(
+        logs,
+        "airflow_20261022_113724.jsonl",
+        [
+            _line(T0 - 600, "air", "continuous", 0.4),
+            _line(T0 + 3600, "air", "stop", 0.0, reason="shutdown"),
+        ],
+    )
+    take = _take(tmp_path / "day")
+    lines = [json.loads(x) for x in commands_for(take, logs) or []]
+    assert [(r["channel"], r["setpoint"]) for r in lines] == [("air", 0.4)]
+
+
+def test_a_take_stopped_by_hand_spans_its_frames_not_its_set_duration(tmp_path):
+    # Tommy's review: duration_s is the set duration for a take stopped by
+    # hand, so commands logged after it ended were attached. 6000 frames at
+    # 100 fps ran 60 s of a set 300 s.
+    logs = tmp_path / "logs"
+    _log(
+        logs,
+        "airflow_x.jsonl",
+        [
+            _line(T0 + 10, "air", "continuous", 1.0),
+            _line(T0 + 120, "air", "continuous", 0.0),  # after the take
+        ],
+    )
+    take = _take(tmp_path / "day", duration=300.0)
+    summary = take / "octacam_recording" / "recording_summary.json"
+    summary.write_text(
+        json.dumps({**json.loads(summary.read_text()), "fps_target": 100.0})
+    )
+    lines = [json.loads(x) for x in commands_for(take, logs) or []]
+    assert [r["setpoint"] for r in lines] == [1.0]

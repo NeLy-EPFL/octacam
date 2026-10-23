@@ -130,7 +130,10 @@ and metadata are transferred:
    A take ThorSync did not record is aligned on the trigger board's clock
    instead (`octacam_recording/twophoton_board_sync.json`): the board starts
    the cameras on the first 2P frame and its end-of-run report counts the 2P
-   frames and times them. Every 2P frame lands within one camera frame of
+   frames and the camera pulses and times them. A video that does not account
+   for every camera pulse the board sent (a camera that ignored the first one)
+   is aligned with a wider uncertainty, and a warning says so. Every 2P frame
+   lands within one camera frame of
    where ThorSync would put it (checked against ThorSync on real takes); a
    capture stopped early in ThorImage borrows the 2P frame period of the
    day's completed captures. The synced video and scapepp use it in place of
@@ -138,7 +141,8 @@ and metadata are transferred:
    when `airflow_logs` names airflow_control's log folder: the air commands it
    logged during the take go beside it (`octacam_recording/airflow_commands.jsonl`;
    they give the AirFlow sensor's on/off on 99.9 % of camera frames, checked
-   against ThorSync).
+   against ThorSync). airflow_control logs only changes, so a session counts
+   from its first line to its shutdown, a constant flow included.
 2. **Sweep** the share for settled 2P data no take claims, filed under its
    fly when ThorImage's name tells which, else in the generic bucket.
 3. **Rewrite** the touched days' `2p_reconciliation.md`.

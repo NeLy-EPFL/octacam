@@ -277,3 +277,56 @@ def test_a_capture_discarded_in_thorimage_says_so(tmp_path, caplog):
     with caplog.at_level("INFO", logger="octacam"):
         assert render_synced_video(take, SyncedRenderOptions(fps=10, height=64)) is None
     assert "ThorImage saved no images" in caplog.text
+
+
+def _summary(source, cameras):
+    return {"pulse_train": {"source": source}, "cameras": cameras}
+
+
+def test_behavior_frames_map_to_their_pulses_on_an_external_trigger(tmp_path):
+    # Tommy's review: under an external trigger a missed pulse is not filled,
+    # so frame k is no longer pulse k; the render drew every later frame one
+    # pulse early.
+    from octacam.plugins.twophoton.render import _video_pulses
+
+    take = tmp_path / "take"
+    (take / "octacam_recording").mkdir(parents=True)
+    missed = {"name": "camera_F", "frames": 8, "missed_pulses": 2}
+    # From timestamps.npz when the take has it...
+    np.savez(
+        take / "octacam_recording" / "timestamps.npz",
+        **{"camera_F/pulse_index": np.array([0, 1, 2, 4, 5, 6, 8, 9])},
+    )
+    pulses = _video_pulses(take, _summary("external", [missed]))
+    assert pulses is not None and pulses.tolist() == [0, 1, 2, 4, 5, 6, 8, 9]
+    # ...else from the summary's missed pulses, when that list is complete.
+    (take / "octacam_recording" / "timestamps.npz").unlink()
+    listed = {**missed, "missed_pulse_indices": [3, 7]}
+    pulses = _video_pulses(take, _summary("external", [listed]))
+    assert pulses is not None and pulses.tolist() == [0, 1, 2, 4, 5, 6, 8, 9]
+    # A filled train, or no gap: frame k is pulse k.
+    assert _video_pulses(take, _summary("managed", [listed])) is None
+    clean = {"name": "camera_F", "frames": 8, "missed_pulses": 0}
+    assert _video_pulses(take, _summary("external", [clean])) is None
+
+
+def test_renders_a_take_whose_camera_missed_pulses(tmp_path):
+    take = _make_take(tmp_path, planes=1, timepoints=10, behavior_frames=40)
+    summary = take / "recording_summary.json"
+    summary.write_text(
+        json.dumps(
+            _summary(
+                "external",
+                [
+                    {
+                        "name": "camera_F",
+                        "frames": 38,
+                        "missed_pulses": 2,
+                        "missed_pulse_indices": [5, 30],
+                    }
+                ],
+            )
+        )
+    )
+    out = render_synced_video(take, SyncedRenderOptions(fps=20.0, height=64))
+    assert out is not None and out.is_file()
