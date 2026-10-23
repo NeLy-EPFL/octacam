@@ -13,8 +13,13 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 - **A plugin can end the take itself**: `Plugin.take_ceiling_s` returns a
   safety ceiling that replaces the set duration (deadline and pulse count),
-  and `controller.finish_recording(name)` ends the take as *completed* (not an
-  early stop). The GUI and `octacam record` show elapsed time for such a take;
+  and `controller.finish_recording(name, pulses=, take_id=)` ends the take as
+  *completed* (not an early stop). A plugin that knows how many pulses its
+  source emitted passes `pulses`: every video ends on that count, and on an
+  external trigger a camera spanning all of them provably started on the first
+  (otherwise the start is checked from when the first frames arrived).
+  `take_id` (`controller.take_id`, read while the take ran) keeps a late call
+  from ending a newer take. The GUI and `octacam record` show elapsed time for such a take;
   its summary records `ended_by`, `duration_limit_s` and its real length as
   `duration_s`. Every summary now also has `first_frame_time_ns`, when the
   first frames were in (for an external trigger, possibly long after Start),

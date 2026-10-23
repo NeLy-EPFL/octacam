@@ -227,9 +227,11 @@ def _unlike_profiles_note(groups: dict[DeliveryProfile | str, list[str]]) -> str
 
 
 # The start check's arrival window: a camera's first second of frames (at
-# least ARRIVAL_MIN_FRAMES), whose fastest delivery is its latency.
+# least ARRIVAL_MIN_FRAMES), whose fastest deliveries give its latency: the
+# ARRIVAL_FLOOR_QUANTILE of them, so a single early outlier cannot decide it.
 ARRIVAL_WINDOW_NS = 1_000_000_000
 ARRIVAL_MIN_FRAMES = 16
+ARRIVAL_FLOOR_QUANTILE = 0.05
 
 
 def check_sync(
@@ -238,7 +240,7 @@ def check_sync(
     clock: PulseClock,
     profiles: dict[str, DeliveryProfile | None],
     completed: bool,
-    train_ended: bool = False,
+    train_pulses: int | None = None,
 ) -> dict:
     """Whether frame k is the same trigger pulse in every camera, and why not.
 
@@ -254,15 +256,18 @@ def check_sync(
     ~4.5 ms after an acA1920): those deliver a pulse within ~0.5 ms of each
     other, so a pulse late is a whole period. Across profiles a note says the
     start was not checked. Delivery only ever lags (a stall, a burst after a
-    backlog), so a camera's latency is the floor of its first second of frames.
+    backlog), so a camera's latency is a low quantile of its first second of
+    frames (`ARRIVAL_FLOOR_QUANTILE`).
 
-    `train_ended`: every pulse of an unfilled (external) train was emitted
-    before the grabs stopped, as when a plugin ended the take once its source
-    stopped (`controller.finish_recording`). Each camera then spans the
-    pulses from its first frame to the train's last, so equal spans prove
-    every camera started on the same pulse, whatever the arrivals say: six
-    acA1920s sharing a USB bus deliver one pulse up to 2.4 periods apart at
-    100 fps (2026-10-16), equal frame counts throughout.
+    `train_pulses`: how many pulses an unfilled (external) train emitted, as
+    its source reported when a plugin ended the take
+    (`controller.finish_recording`). A camera spanning that many pulses, from
+    its first frame to its last, started on the first and ended on the last, so
+    when every camera does the arrivals are not compared: six acA1920s sharing
+    a USB bus deliver one pulse up to 2.4 periods apart at 100 fps
+    (2026-10-16), equal frame counts throughout. Equal spans alone prove
+    nothing: a camera that missed the first pulse and one that missed the last
+    span the same.
     """
     warnings: list[str] = []
     notes: list[str] = []
@@ -382,15 +387,14 @@ def check_sync(
             if arrival
         ][:window]
         if period and len(rows) >= 4:
-            delays[camera.name] = float(
-                min(arrival - pulse * period for arrival, pulse in rows)
-            )
+            lags = sorted(arrival - pulse * period for arrival, pulse in rows)
+            delays[camera.name] = float(lags[int(len(lags) * ARRIVAL_FLOOR_QUANTILE)])
     spans = {c.name: c.pulse_index[-1] + 1 for c in cams if c.pulse_index}
     aligned = (
-        train_ended
+        bool(train_pulses)
         and not clock.fill
         and len(spans) == len(cams) > 1
-        and len(set(spans.values())) == 1
+        and set(spans.values()) == {train_pulses}
     )
     if aligned:
         offsets = dict.fromkeys(spans, 0)
@@ -428,9 +432,9 @@ def check_sync(
                     )
     if aligned:
         notes.append(
-            f"Every camera spans the train's {next(iter(spans.values()))} pulses, "
-            "so each started on its first pulse (checked by frame count, not by "
-            "when the first frames reached the host)"
+            f"Every camera spans the {train_pulses} pulses its trigger source "
+            "reported, so each started on the first (checked by frame count, not "
+            "by when the first frames reached the host)"
         )
     elif len(groups) > 1:
         notes.append(_unlike_profiles_note(groups))
@@ -542,6 +546,8 @@ class Take:
         self.first_frame_wall_ns = 0  # wall clock at the first frame
         self.completed: bool | None = None  # ran to its end (None: not over yet)
         self.ended_by: str | None = None  # the plugin that ended it (finish)
+        # The pulses its source emitted, as that plugin reported (finish).
+        self.source_pulses: int | None = None
         self.sync: dict | None = None
         self._event = event
         self._config_dir = config_dir
@@ -555,11 +561,13 @@ class Take:
         self.aborted = abort
         self._stop.set()
 
-    def finish(self, by: str) -> None:
+    def finish(self, by: str, pulses: int | None = None) -> None:
         """End the take as complete: the plugin `by` decides its end (it set a
         ceiling, `Plugin.take_ceiling_s`), so this is not an early stop.
+        `pulses`: how many its trigger source emitted, when it can tell.
         """
         self.ended_by = by
+        self.source_pulses = pulses if pulses is not None and pulses > 0 else None
         self._finish.set()
 
     # ---------------------------------------------------------------- start
@@ -830,14 +838,17 @@ class Take:
         self.hooks_done.wait(self.hooks_timeout_s)
 
     def _emitted_pulses(self) -> int:
-        """The pulses a finished train emitted: the software trigger's sequence
-        (it numbers every trigger it fires), else the furthest any camera got
-        (a plugin finishes once its source stopped, so no pulse is in flight).
+        """The pulses a finished train emitted: what its source reported, else
+        the software trigger's newest fired trigger (an offered one still
+        pending at the stop never fired), else the furthest any camera got (a
+        plugin finishes once its source stopped, so no pulse is in flight).
         """
+        if self.source_pulses is not None:
+            return self.source_pulses
         if self.clock.source == "software":
             return max(
                 (
-                    camera.backend.trigger.next_index
+                    camera.backend.trigger.fired_count
                     for camera in self.system.cameras
                     if camera.name in self.recording
                 ),
@@ -866,8 +877,8 @@ class Take:
             clock,
             self.profiles,
             bool(self.completed),
-            # A plugin ends the take once its source stopped pulsing.
-            train_ended=bool(self.completed) and self.ended_by is not None,
+            # Reported by the plugin that ended the take once its source stopped.
+            train_pulses=self.source_pulses if self.completed else None,
         )
         for message in self.sync["warnings"]:
             self._event("warning", message)

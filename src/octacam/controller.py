@@ -119,6 +119,7 @@ class RecordingController:
         self._starting = False
         # The current or last recording, and the thread that drives it.
         self._take: Take | None = None
+        self._take_id = 0  # numbers the takes this controller started
         self._monitor: threading.Thread | None = None
         # Bumped per countdown, so a client that missed the states between two
         # recordings can still tell them apart.
@@ -199,6 +200,13 @@ class RecordingController:
     def notify_state(self) -> None:
         """Broadcast the current snapshot to listeners."""
         self._notify("state", self.snapshot())
+
+    @property
+    def take_id(self) -> int:
+        """The current (or latest) take's number: a plugin that ends its take
+        later passes it to `finish_recording`, which then cannot end another.
+        """
+        return self._take_id
 
     @property
     def recording_active(self) -> bool:
@@ -617,6 +625,7 @@ class RecordingController:
         """
         resume_mode: str | None = None
         with self._lock:
+            self._take_id += 1
             take = self._take = Take(
                 self.camera_system,
                 self._settings,
@@ -725,17 +734,31 @@ class RecordingController:
             assert self._take is not None
             self._take.stop(abort)
 
-    def finish_recording(self, by: str) -> None:
+    def finish_recording(
+        self, by: str, *, pulses: int | None = None, take_id: int | None = None
+    ) -> None:
         """End the current recording as complete, for the plugin `by` that set
         its end (`Plugin.take_ceiling_s`); unlike `stop_recording`, not an
-        early stop. Call it once the plugin's trigger source has stopped: the
-        sync check then reads equal frame spans as proof of a common start.
+        early stop. Call it once the plugin's trigger source has stopped.
+
+        `pulses`: how many pulses that source emitted, when it can tell; every
+        video then ends on that count, and a camera spanning all of them provably
+        started on the first. `take_id`: the `take_id` read while the take ran,
+        so a call that lost the race to a newer take does not end that one.
         """
         with self._lock:
             if not self.recording_active:
                 return
+            if take_id is not None and take_id != self._take_id:
+                log.info(
+                    "%s asked to end take %d, but take %d is running: ignored",
+                    by,
+                    take_id,
+                    self._take_id,
+                )
+                return
             assert self._take is not None
-            self._take.finish(by)
+            self._take.finish(by, pulses)
 
     def join(self, timeout: float | None = None) -> None:
         """Block until the current recording has fully finished."""

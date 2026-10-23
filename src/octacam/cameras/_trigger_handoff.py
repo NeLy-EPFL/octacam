@@ -132,6 +132,8 @@ class SoftwareTrigger:
         # Offered, unclaimed triggers, oldest first: (sequence number, offer time).
         self._pending: deque[tuple[int, int]] = deque()
         self._next_seq = 0
+        # One past the newest counting trigger fired at the device.
+        self._fired_through = 0
         self._period_s: float | None = None
         self._outstanding: deque[_Fired] = deque()  # oldest first
         self._epoch = 0
@@ -185,6 +187,14 @@ class SoftwareTrigger:
         """The sequence number the next offered trigger gets."""
         return self._next_seq
 
+    @property
+    def fired_count(self) -> int:
+        """One past the newest trigger of the counting sequence fired at the
+        device: an offered trigger still pending when the timer stopped was
+        never fired, so it is no pulse of the train.
+        """
+        return self._fired_through
+
     def configure_period(self, period_s: float | None) -> None:
         """The period of a counting recording's triggers (None for preview and the
         benchmark); see `STALE_TRIGGER_S`.
@@ -201,6 +211,7 @@ class SoftwareTrigger:
         with self._cond:
             self._pending.clear()
             self._next_seq = 0
+            self._fired_through = 0
             self._epoch += 1
             self._counting = True
             # The train's first trigger must fire on time, not wait out a drain
@@ -238,6 +249,7 @@ class SoftwareTrigger:
         with self._cond:
             self._pending.clear()
             self._next_seq = 0
+            self._fired_through = 0
             self._outstanding.clear()
             self._answer = None
             self._epoch += 1
@@ -292,6 +304,8 @@ class SoftwareTrigger:
             self._outstanding.append(
                 _Fired(seq, self._epoch, now + _ns(timeout), self._counting, now)
             )
+            if self._counting:
+                self._fired_through = max(self._fired_through, seq + 1)
             return True
 
     def fetch_timeout_ms(self, timeout_ms: int) -> int:
@@ -304,7 +318,9 @@ class SoftwareTrigger:
         """
         with self._cond:
             if self._outstanding:
-                self._outstanding.pop()
+                refused = self._outstanding.pop()
+                if refused.counted and refused.seq + 1 == self._fired_through:
+                    self._fired_through = refused.seq
 
     def answered(self, timestamp_ns: int | None = None) -> None:
         """An image was fetched, usable or not: it answers the oldest outstanding

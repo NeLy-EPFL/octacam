@@ -316,3 +316,21 @@ def test_take_consumes_pending_triggers_in_order(trigger):
     trigger.offer()
     assert trigger.take(1) == 0 and trigger.take(1) == 1
     assert trigger.pending == 0 and trigger.fired_index is None
+
+
+def test_fired_count_leaves_out_a_trigger_still_pending(trigger, clock):
+    # Tommy's review: next_index advances on offer, so a take finished with a
+    # trigger still pending counted a pulse never fired (a tail fill and a
+    # "missed the last pulse" warning).
+    trigger.restart_sequence()
+    for _ in range(3):
+        _answer_after(trigger, clock, 1_000_000)
+        clock.advance(0.01)
+    trigger.offer()  # offered, never claimed
+    assert trigger.next_index == 4
+    assert trigger.fired_count == 3
+    _fire(trigger)
+    trigger.unfired()  # the device refused it: no pulse either
+    assert trigger.fired_count == 3
+    trigger.restart_sequence()
+    assert trigger.fired_count == 0
