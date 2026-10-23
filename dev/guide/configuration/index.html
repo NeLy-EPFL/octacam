@@ -691,6 +691,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#users" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Users
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#cameras" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -893,6 +904,17 @@
     <span class="md-ellipsis">
       
         [transfer]
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#users" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Users
       
     </span>
   </a>
@@ -1156,20 +1178,65 @@ disable transfer.</p>
 </tbody>
 </table>
 <p>See <a href="../processing/#transfer">Processing → Transfer</a>.</p>
+<h2 id="users">Users<a class="headerlink" href="#users" title="Permanent link">&para;</a></h2>
+<p><code>[users.&lt;initials&gt;]</code> lists who records on this rig, each with where their data
+goes. Picking a user (the Record tab's <strong>User</strong>, or <code>--user MD</code> on <code>gui</code> and
+<code>record</code>) replaces <code>[transfer].directory</code> with theirs, gives each plugin their
+own folders (a sub-table named after the plugin), brings back the last folder
+name they recorded under, and notes them in each recording's summary. The last
+user is remembered on this machine; <code>octacam record</code> without <code>--user</code> records
+as them, and warns so, naming where the data goes.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">[users.MD]</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"Matthias Durrieu"</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">transfer_directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/mnt/upramdya_data/MD/BallPushing_Imaging"</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="k">[users.MD.twophoton]</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="n">source</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/mnt/windows_share/MD"</span><span class="w">     </span><span class="c1"># the plugin's per-user option</span>
+</code></pre></div>
+<p>Users are kept in each rig's own config, as rigs rarely share paths. Nobody
+needs to edit them by hand: <strong>+ Add yourself…</strong> in the User list (or
+<code>octacam users add &lt;config&gt; &lt;INITIALS&gt;</code>) asks for the initials and suggests
+the folders from the other users' (the same root, your own initials folder),
+checking that each exists. Initials folders found beside the users' on the NAS
+appear in the list as people who can be set up in one click. Adding a user
+appends their block to the config and leaves the rest of the file as it is.
+<code>octacam users list &lt;config&gt;</code> shows them all.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>Shown in the user list.</td>
+</tr>
+<tr>
+<td><code>transfer_directory</code></td>
+<td>Their transfer destination; blank keeps <code>[transfer].directory</code>.</td>
+</tr>
+<tr>
+<td><code>[users.XX.&lt;plugin&gt;]</code></td>
+<td>That plugin's per-user options (the 2-photon plugin: <code>source</code>).</td>
+</tr>
+</tbody>
+</table>
 <h2 id="cameras"><code>[[cameras]]</code><a class="headerlink" href="#cameras" title="Permanent link">&para;</a></h2>
 <p>One entry per camera, keyed by serial number. Pins each camera's <strong>name</strong> and its
 place in the preview/grid layout. With no <code>[[cameras]]</code> entries, every detected
 camera is used with auto-assigned names and a default layout.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">[[cameras]]</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="n">serial_number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"40001978"</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"camera_LF"</span>
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="n">scale_x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="n">scale_y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
-<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="n">rotation_deg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span>
-<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="n">window_x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.5</span>
-<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="n">window_y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.25</span>
-<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="n">window_width</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.5</span>
-<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="n">window_height</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.25</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">[[cameras]]</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="n">serial_number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"40001978"</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"camera_LF"</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="n">scale_x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="n">scale_y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="n">rotation_deg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="n">window_x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.5</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="n">window_y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.25</span>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="n">window_width</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.5</span>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="n">window_height</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.25</span>
 </code></pre></div>
 <table>
 <thead>
@@ -1222,15 +1289,15 @@ them back, rather than editing the TOML by hand.</p>
 <strong>opt-in</strong>: with no <code>[[visualization]]</code> entry no composite is built at all. List
 several entries to produce several grids. See
 <a href="../processing/#grid-video">Processing → Grid video</a>.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">[[visualization]]</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"grid.mp4"</span><span class="w">            </span><span class="c1"># output filename inside each recording folder</span>
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">layout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
-<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LF"</span><span class="p">,</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span><span class="w">          </span><span class="s2">"camera_RF"</span><span class="p">],</span>
-<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LM"</span><span class="p">,</span><span class="w"> </span><span class="s2">"camera_F"</span><span class="p">,</span><span class="w">  </span><span class="s2">"camera_RM"</span><span class="p">],</span>
-<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LH"</span><span class="p">,</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span><span class="w">          </span><span class="s2">"camera_RH"</span><span class="p">],</span>
-<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="p">]</span>
-<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="c1"># ffmpeg_params = ""         # optional per-grid encoder override</span>
-<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="c1"># max_width = 1440           # optional: scale the cells so the grid fits</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">[[visualization]]</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"grid.mp4"</span><span class="w">            </span><span class="c1"># output filename inside each recording folder</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">layout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LF"</span><span class="p">,</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span><span class="w">          </span><span class="s2">"camera_RF"</span><span class="p">],</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LM"</span><span class="p">,</span><span class="w"> </span><span class="s2">"camera_F"</span><span class="p">,</span><span class="w">  </span><span class="s2">"camera_RM"</span><span class="p">],</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LH"</span><span class="p">,</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span><span class="w">          </span><span class="s2">"camera_RH"</span><span class="p">],</span>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="p">]</span>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="c1"># ffmpeg_params = ""         # optional per-grid encoder override</span>
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="c1"># max_width = 1440           # optional: scale the cells so the grid fits</span>
 </code></pre></div>
 <p>Each cell is a camera <code>name</code>; <code>""</code> is a black fill. All rows must have the same
 number of columns. <code>octacam config</code> offers to write a near-square layout of the
@@ -1242,20 +1309,20 @@ the archival <code>[transcode]</code> settings, at full size. A faster preset an
 <code>ffmpeg_params = "-c:v libx264 -preset medium -crf 20"</code> and <code>max_width = 1440</code>).</p>
 <h2 id="plugins"><code>[[plugins]]</code><a class="headerlink" href="#plugins" title="Permanent link">&para;</a></h2>
 <p>Enables opt-in <a href="../plugins/">plugins</a>. The default launch loads none.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1"># Bare names work too: plugins = ["flywheel"]</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="k">[[plugins]]</span>
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"flywheel"</span>
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">device</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">"/dev/ttyACM0"</span><span class="p">,</span><span class="w"> </span><span class="n">baud</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">115200</span><span class="w"> </span><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1"># Bare names work too: plugins = ["flywheel"]</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="k">[[plugins]]</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"flywheel"</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">device</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">"/dev/ttyACM0"</span><span class="p">,</span><span class="w"> </span><span class="n">baud</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">115200</span><span class="w"> </span><span class="p">}</span>
 </code></pre></div>
 <h2 id="gui"><code>[gui]</code><a class="headerlink" href="#gui" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">[gui]</span>
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">display_refresh_interval_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">33</span><span class="w">     </span><span class="c1"># preview refresh cadence (~30 Hz)</span>
-<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">theme</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"dark"</span><span class="w">                       </span><span class="c1"># "dark" | "light" rig default; the per-browser toggle overrides it</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">[gui]</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="n">display_refresh_interval_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">33</span><span class="w">     </span><span class="c1"># preview refresh cadence (~30 Hz)</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">theme</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"dark"</span><span class="w">                       </span><span class="c1"># "dark" | "light" rig default; the per-browser toggle overrides it</span>
 </code></pre></div>
 <h2 id="validate-a-config">Validate a config<a class="headerlink" href="#validate-a-config" title="Permanent link">&para;</a></h2>
 <p>Check a directory before recording — this cross-checks declared vs detected
 cameras and resolves the save/transfer paths:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>octacam<span class="w"> </span>doctor<span class="w"> </span>&lt;config_dir&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>octacam<span class="w"> </span>doctor<span class="w"> </span>&lt;config_dir&gt;
 </code></pre></div>
 <p>See <a href="../../cli/#octacam-doctor"><code>doctor</code></a>.</p>
 <h2 id="environment-variables">Environment variables<a class="headerlink" href="#environment-variables" title="Permanent link">&para;</a></h2>

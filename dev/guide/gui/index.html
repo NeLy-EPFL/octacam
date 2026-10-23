@@ -912,10 +912,17 @@ octacam already holds them — see below), the reason is shown in the preview ar
 instead of a spinner, and the server stays up.</p>
 <h2 id="the-tabs">The tabs<a class="headerlink" href="#the-tabs" title="Permanent link">&para;</a></h2>
 <ul>
-<li><strong>Record</strong> — set fps, duration, and the save location, then start/stop
-  recording. The <strong>Process</strong> section here seeds the post-recording pipeline
-  (transcode params, transfer destination) that gets baked into each recording's
-  config snapshot — see <a href="../processing/">Processing</a>.</li>
+<li><strong>Record</strong> — only what a recording needs: duration and fps, who you are
+  (<strong>User</strong>) and the recording's name (<strong>Experiment / Fly / Take</strong>; <strong>Next
+  fly</strong> moves to the next fly with the take back at 001), then start/stop. A
+  <strong>Ready?</strong> strip on top says what to fix before recording: cameras, trigger
+  boards, disk space, your transfer destination, and each plugin's own checks
+  (for example the 2P share and ThorSync's duration); click it for every
+  check. The rest sits in collapsed sections (each remembers being opened):
+  <strong>Paths</strong> (they follow the user, and say so; a change applies to this
+  session), <strong>Triggering</strong>, <strong>Encoding &amp; output</strong>, and <strong>Post-processing</strong>, the
+  pipeline baked into each recording's config snapshot. See
+  <a href="../processing/">Processing</a> and <a href="../configuration/#users">Users</a>.</li>
 <li><strong>Camera</strong> — per-camera sensor controls (exposure, gain, ROI). Save them back
   to the per-camera sensor file from the <em>Save…</em> dialog.</li>
 <li><strong>View</strong> — arrange the preview layout and set each camera's rotation/flips.

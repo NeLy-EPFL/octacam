@@ -872,6 +872,45 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#octacam-users" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        octacam users
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="octacam users">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#octacam-users-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        octacam users list
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#octacam-users-add" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        octacam users add
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1143,6 +1182,45 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#octacam-users" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        octacam users
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="octacam users">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#octacam-users-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        octacam users list
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#octacam-users-add" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        octacam users add
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1186,6 +1264,7 @@
 <li><code>process</code>: Post-recording pipeline: transcode, build...</li>
 <li><code>jobs</code>: Manage detached <code>octacam process</code> jobs...</li>
 <li><code>cache</code>: Inspect and clear the octacam cache...</li>
+<li><code>users</code>: The rig's users: who records and where...</li>
 </ul>
 <h2 id="octacam-gui"><code>octacam gui</code><a class="headerlink" href="#octacam-gui" title="Permanent link">&para;</a></h2>
 <p>Launch the octacam web GUI for the cameras in <code>config_dir</code>.</p>
@@ -1204,6 +1283,7 @@
 <li><code>--plugin &lt;str&gt;</code>: Enable a plugin (repeatable); adds to the config's <code>plugins</code> (e.g. --plugin flywheel). See <code>octacam doctor</code>.</li>
 <li><code>--no-plugins</code>: Disable all plugins for this launch, ignoring the config.</li>
 <li><code>--set KEY=VALUE</code>: Override one config key for this launch by its dotted path, <code>table.key=value</code>; repeatable. The value is read as TOML (a list may drop its brackets), and <code>none</code> restores the default.</li>
+<li><code>-u, --user &lt;str&gt;</code>: Who records: initials from the rig config's [users] (their transfer destination and plugin folders). Default: the last user on this machine. See <code>octacam users list</code>.</li>
 <li><code>-v, --verbose</code>: Debug messages, and a traceback on errors.</li>
 <li><code>--help</code>: Show this message and exit.</li>
 </ul>
@@ -1266,6 +1346,7 @@
 <li><code>--plugin &lt;str&gt;</code>: Enable a plugin (repeatable); adds to the config's <code>plugins</code> (e.g. --plugin flywheel). See <code>octacam doctor</code>.</li>
 <li><code>--no-plugins</code>: Disable all plugins for this launch, ignoring the config.</li>
 <li><code>--set KEY=VALUE</code>: Override one config key for this launch by its dotted path, <code>table.key=value</code>; repeatable. The value is read as TOML (a list may drop its brackets), and <code>none</code> restores the default.</li>
+<li><code>-u, --user &lt;str&gt;</code>: Who records: initials from the rig config's [users] (their transfer destination and plugin folders). Default: the last user on this machine. See <code>octacam users list</code>.</li>
 <li><code>-v, --verbose</code>: Debug messages, and a traceback on errors.</li>
 <li><code>--help</code>: Show this message and exit.</li>
 </ul>
@@ -1491,6 +1572,52 @@
 <ul>
 <li><code>--all</code>: Also remove finished detached-job logs (kept by default).</li>
 <li><code>-y, --yes</code>: Clear without the confirmation prompt.</li>
+<li><code>-v, --verbose</code>: Debug messages, and a traceback on errors.</li>
+<li><code>--help</code>: Show this message and exit.</li>
+</ul>
+<h2 id="octacam-users"><code>octacam users</code><a class="headerlink" href="#octacam-users" title="Permanent link">&para;</a></h2>
+<p>The rig's users: who records and where their data goes.</p>
+<p><strong>Usage</strong>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="gp">$ </span>octacam<span class="w"> </span>users<span class="w"> </span><span class="o">[</span>OPTIONS<span class="o">]</span><span class="w"> </span>COMMAND<span class="w"> </span><span class="o">[</span>ARGS<span class="o">]</span>...
+</code></pre></div>
+<p><strong>Options</strong>:</p>
+<ul>
+<li><code>--help</code>: Show this message and exit.</li>
+</ul>
+<p><strong>Commands</strong>:</p>
+<ul>
+<li><code>list</code>: List the rig's users and where each one's...</li>
+<li><code>add</code>: Add a user to the rig config (appended;...</li>
+</ul>
+<h3 id="octacam-users-list"><code>octacam users list</code><a class="headerlink" href="#octacam-users-list" title="Permanent link">&para;</a></h3>
+<p>List the rig's users and where each one's data goes.</p>
+<p><strong>Usage</strong>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="gp">$ </span>octacam<span class="w"> </span>users<span class="w"> </span>list<span class="w"> </span><span class="o">[</span>OPTIONS<span class="o">]</span><span class="w"> </span><span class="o">{</span>config_dir<span class="o">}</span>
+</code></pre></div>
+<p><strong>Arguments</strong>:</p>
+<ul>
+<li><code>config_dir</code>: The rig's config directory.  [required]</li>
+</ul>
+<p><strong>Options</strong>:</p>
+<ul>
+<li><code>-v, --verbose</code>: Debug messages, and a traceback on errors.</li>
+<li><code>--help</code>: Show this message and exit.</li>
+</ul>
+<h3 id="octacam-users-add"><code>octacam users add</code><a class="headerlink" href="#octacam-users-add" title="Permanent link">&para;</a></h3>
+<p>Add a user to the rig config (appended; the rest is left as is).</p>
+<p><strong>Usage</strong>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="gp">$ </span>octacam<span class="w"> </span>users<span class="w"> </span>add<span class="w"> </span><span class="o">[</span>OPTIONS<span class="o">]</span><span class="w"> </span><span class="o">{</span>config_dir<span class="o">}</span><span class="w"> </span><span class="o">{</span>initials<span class="o">}</span>
+</code></pre></div>
+<p><strong>Arguments</strong>:</p>
+<ul>
+<li><code>config_dir</code>: The rig's config directory.  [required]</li>
+<li><code>initials</code>: 2 to 4 capital letters, like MD.  [required]</li>
+</ul>
+<p><strong>Options</strong>:</p>
+<ul>
+<li><code>--name &lt;str&gt;</code>: Full name.</li>
+<li><code>--transfer-directory &lt;str&gt;</code>: Where <code>octacam process</code> copies their recordings. Default: guessed from the other users' (their own initials folder).</li>
+<li><code>--option PLUGIN.OPTION=VALUE</code>: A plugin's per-user option, e.g. twophoton.source=/mnt/share/MA; repeatable. Default: guessed like the transfer directory.</li>
 <li><code>-v, --verbose</code>: Debug messages, and a traceback on errors.</li>
 <li><code>--help</code>: Show this message and exit.</li>
 </ul>
