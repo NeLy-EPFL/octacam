@@ -1259,7 +1259,7 @@
 <p><strong>Options</strong>:</p>
 <ul>
 <li><code>-f, --fps &lt;float&gt;</code>: Frame rate (default: the config's <code>record.fps</code>).</li>
-<li><code>-d, --duration &lt;float&gt;</code>: Recording duration in seconds (default: the config's <code>record.duration</code> and <code>record.duration_unit</code>).</li>
+<li><code>-d, --duration &lt;float&gt;</code>: Recording duration in seconds (default: the config's <code>record.duration</code> and <code>record.duration_unit</code>). Given here, it is exact: a plugin that would end the take itself does not.</li>
 <li><code>-o, --out &lt;path&gt;</code>: Save directory, overriding the config's templated <code>record.directory</code> and <code>record.relative_directory</code>.</li>
 <li><code>-y, --yes</code>: Before recording, reflash without asking a serial plugin's board that runs an old build of its firmware (a blank or foreign board is only warned about).</li>
 <li><code>-F, --force</code>: Overwrite an existing save directory without the interactive confirmation prompt.</li>

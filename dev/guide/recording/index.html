@@ -1114,7 +1114,7 @@ pulses), from the trigger's sequence number on the software trigger.</p>
 </tr>
 <tr>
 <td><code>start_offset_pulses</code></td>
-<td>0 when this camera's first frame is the same pulse as the others' (checked from when each camera's first frames arrived; positive = started that many pulses late). Only cameras with the same model, frame size, pixel format and exposure are compared — their frames take equally long to arrive — and <code>sync.notes</code> says which were not.</td>
+<td>0 when this camera's first frame is the same pulse as the others' (checked from when each camera's first frames arrived; positive = started that many pulses late). Only cameras with the same model, frame size, pixel format and exposure are compared — their frames take equally long to arrive — and <code>sync.notes</code> says which were not. On an external trigger whose source reported how many pulses it sent (a 2-photon take synced with ThorImage, on a board that counts them), a camera spanning all of them settles it instead.</td>
 </tr>
 </tbody>
 </table>
