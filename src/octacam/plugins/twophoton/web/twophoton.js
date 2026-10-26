@@ -4,8 +4,10 @@
 // ThorSync is set to record long enough is in the Record tab's Ready? strip.
 // ThorImage records ThorSync only with its ThorSync box ticked, so the session's
 // first armed take (and the next one after a take ThorSync missed) asks first,
-// and a take ThorSync did not record is announced in a popup.
-import { el, Modal } from "/js/util.js";
+// and a take ThorSync did not record is announced in a popup. "UV light"
+// switches the UV LED through the board, at once and in any state; it sits in
+// the always-visible strip above the tabs, so its state is never out of sight.
+import { el, Modal, request } from "/js/util.js";
 import { SerialTab } from "/js/serial.js";
 
 const REMINDER =
@@ -76,6 +78,11 @@ const STATE_LABELS = {
   done:      "Done",
 };
 
+const UV_TITLE =
+  "Switch the UV LED on or off now (also recorded by ThorSync and in the take)";
+const UV_REFLASH_TITLE =
+  "The board's firmware has no UV command: flash the current firmware to use it";
+
 const MARKUP = `
   <div class="col">
     <div class="row" title="Current state of the Arduino trigger board">
@@ -94,6 +101,20 @@ const MARKUP = `
       Arm with recording
     </label>
   </div>`;
+
+// The UV switch: lit (and reading ON) while the UV is on.
+function uvControl() {
+  const label = el("label", "twophoton-uv");
+  label.id = "twophoton-uv-label";
+  label.title = UV_TITLE;
+  const box = el("input");
+  box.type = "checkbox";
+  box.id = "twophoton-uv";
+  const state = el("span", "twophoton-uv-state", "OFF");
+  state.id = "twophoton-uv-state";
+  label.append(box, el("span", "twophoton-uv-name", "UV light"), state);
+  return label;
+}
 
 export default class TwoPhotonTab extends SerialTab {
   static label = "2-Photon";
@@ -120,6 +141,18 @@ export default class TwoPhotonTab extends SerialTab {
     this.stateValue = document.getElementById("twophoton-state-value");
     this.armWithRec = document.getElementById("twophoton-arm-with-recording");
     this.armWithRec.addEventListener("change", () => this.refresh());
+    // Above the tabs when the app offers it, else at the end of this tab.
+    const uv = uvControl();
+    if (ctx.addControl) ctx.addControl(uv);
+    else ctx.panel.append(uv);
+    // The board's UV level (server truth) and whether its firmware has it.
+    this.uvOn = false;
+    this.uvSupported = null;
+    this.uvBusy = false;
+    this.uvBox = document.getElementById("twophoton-uv");
+    this.uvLabel = document.getElementById("twophoton-uv-label");
+    this.uvState = document.getElementById("twophoton-uv-state");
+    this.uvBox.addEventListener("change", () => this._setUv(this.uvBox.checked));
     this.start(ctx.status);
   }
 
@@ -136,11 +169,26 @@ export default class TwoPhotonTab extends SerialTab {
       this.matchThorImage = msg.match_thorimage;
     }
     if (typeof msg.thorsync_remind === "boolean") this.thorsyncRemind = msg.thorsync_remind;
+    if (typeof msg.uv === "boolean") this.uvOn = msg.uv;
+    if ("uv_supported" in msg) this.uvSupported = msg.uv_supported;
     if ("thorsync_missing" in msg) {
       this.thorsyncMissing = msg.thorsync_missing || null;
       this._announceMissing();
     }
     super.applyLink(msg);
+  }
+
+  // The box shows what the board reports: a failed switch falls back to it.
+  async _setUv(on) {
+    this.uvBusy = true;
+    this.refresh();
+    const data = await request("POST", "/api/twophoton/uv", { on }, {
+      action: `UV ${on ? "on" : "off"}`,
+      notify: this.notify,
+    });
+    if (data && typeof data.uv === "boolean") this.uvOn = data.uv;
+    this.uvBusy = false;
+    this.refresh();
   }
 
   // Once per missed capture: the operator must fix ThorImage before the next take.
@@ -216,6 +264,13 @@ export default class TwoPhotonTab extends SerialTab {
   refresh() {
     super.refresh();
     this.armWithRec.disabled = !this.ready || !this.connected;
+    if (!this.uvBusy) this.uvBox.checked = this.uvOn;
+    this.uvBox.disabled =
+      !this.ready || !this.connected || this.uvBusy || this.uvSupported === false;
+    this.uvLabel.title = this.uvSupported === false ? UV_REFLASH_TITLE : UV_TITLE;
+    this.uvLabel.classList.toggle("twophoton-uv--on", this.uvOn);
+    this.uvLabel.classList.toggle("twophoton-uv--disabled", this.uvBox.disabled);
+    this.uvState.textContent = this.uvOn ? "ON" : "OFF";
     this.stateValue.textContent = STATE_LABELS[this.arduinoState] ?? this.arduinoState;
     this.stateValue.className = `twophoton-state twophoton-state--${this.arduinoState}`;
     this._offerDurationSync();

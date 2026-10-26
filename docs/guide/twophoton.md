@@ -99,6 +99,32 @@ Pairing, copying and organizing happen later, in `octacam process`.
 is found and filed by the next `octacam process` run, or by
 `octacam twophoton sweep --config <rig>`.
 
+## UV light
+
+The **UV light** switch at the top of the control panel (above the tabs, so
+it is in sight whichever tab is open; violet and reading **ON** while the UV is
+on) switches a UV LED on and off through the trigger Arduino, at once and
+whether or not a take is running. ThorSync records the same signal, so no one
+has to note when the UV was on.
+
+Wiring (a Thorlabs LEDD1B driver; any driver with a TTL on/off input works
+the same way):
+
+- Arduino **D41** → 220 Ω → BNC centre, Arduino **GND** → BNC shield, and
+  10 kΩ from centre to shield (a pull-down: the UV stays off while the board
+  resets, is flashed or is unplugged).
+- A BNC T joins three cables: from the Arduino, to the driver's **MOD IN**, and
+  to a free ThorSync analog input (named e.g. `UV`; it reads ~4.9 V when on).
+- The driver in **TRIG** mode: the input switches the LED, the knob sets its
+  brightness. (In MOD mode the input voltage would set the brightness instead.)
+
+The UV is off whenever the board is (re)connected or octacam closes. Each
+take's `octacam_recording/twophoton.json` records the UV's level at the start
+and every change during the take (`uv.on_at_start`, `uv.events`: host
+wall-clock `time_ns`, as `recording_summary.json`'s times), so a take ThorSync
+did not record still says when the UV was on. A board flashed before this
+command disables the checkbox until it is reflashed (`octacam flash`).
+
 ## Naming ThorImage acquisitions
 
 Pairing a take with its 2P data never reads a name: only times and ThorSync's

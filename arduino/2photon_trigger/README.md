@@ -33,6 +33,7 @@ record on this phase, the run's `STOP` report and the camera pulse period
 | Camera trigger | A0              | Square wave out to camera Line 2 / Trigger In |
 | DAQ sync       | A1              | Copy of the camera trigger for the DAQ  |
 | Gate           | D38             | HIGH for the whole capture window        |
+| UV light       | D41             | HIGH = UV on: the LED driver's MOD IN (TRIG mode) and ThorSync, via 220 Ω with a 10 kΩ pull-down; LOW at power-up and reset |
 | Status LED     | LED_BUILTIN     | Mirrors Gate state                       |
 
 > **Pin 4 does not support hardware interrupts on the Mega.**  The firmware
@@ -51,6 +52,7 @@ Baud rate: **115 200**.
 |----------|-------|-------------------------------------------------------------------|
 | Arm      | 9     | `0xA5` · fps `uint16_t` LE · duration_ms `uint32_t` LE · idle_ms `uint16_t` LE (0 = fixed duration) |
 | Cancel   | 1     | `0xCA`                                                            |
+| UV light | 2     | `0x55` (`U`) · `0` off / `1` on — replies `UV 0` or `UV 1`; any state, untouched by arm/cancel |
 | Identify | 1     | `0x3F` (`?`) — request the identity banner                       |
 
 A new arm packet re-arms the Arduino from any state (including mid-capture).
@@ -64,6 +66,7 @@ A cancel packet returns it to IDLE.
 | `T`                 | Triggered — capture running                                      |
 | `STOP <r> <edges> <high_ms> <run_ms>` | End-of-run report, newline-terminated, sent right before `D`: `r` = `I` (ThorImage stopped — input idle) or `C` (duration ceiling); rising edges seen and total HIGH time on the ThorSync input; run time |
 | `D`                 | Done — capture complete, back to IDLE                            |
+| `UV 0` / `UV 1`     | Reply to a UV command: the pin's level (newline-terminated)      |
 | `2PHOTON 2 <build>` | Reply to an identify request (newline-terminated; `<build>` = source hash) |
 
 Protocol v2 (the `idle_ms` field + `STOP` report) is not compatible with v1

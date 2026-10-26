@@ -12,3 +12,34 @@
 .twophoton-state--armed    { color: var(--amber); }
 .twophoton-state--triggered { color: var(--green); }
 .twophoton-state--done     { color: var(--text-dim); }
+
+/* UV light switch, in the always-visible strip above the tabs: violet and
+   reading ON while the UV is on, so it is hard to forget. */
+.twophoton-uv {
+  --uv: #a371f7;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  font-weight: 600;
+  cursor: pointer;
+}
+:root[data-theme="light"] .twophoton-uv { --uv: #8250df; }
+.twophoton-uv input { width: 18px; height: 18px; margin: 0; accent-color: var(--uv); }
+.twophoton-uv-name { flex: 1; }
+.twophoton-uv-state {
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--panel);
+}
+.twophoton-uv--on {
+  border-color: var(--uv);
+  background: color-mix(in srgb, var(--uv) 22%, var(--panel));
+}
+.twophoton-uv--on .twophoton-uv-state { color: #fff; background: var(--uv); }
+.twophoton-uv--disabled { cursor: default; opacity: 0.6; }

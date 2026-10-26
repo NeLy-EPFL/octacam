@@ -457,6 +457,16 @@ body {
 .tabs-menu button[data-tab]:hover { color: var(--text); background: var(--border); }
 .tabs-menu button[data-tab].active { color: var(--text); }
 
+/* Plugins' always-visible controls (index.html #plugin-controls). */
+#plugin-controls {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 10px 0;
+}
+#plugin-controls[hidden] { display: none; }
+
 /* Incomplete-rig warning (app.js showMissingCameras), above every tab for the
    whole session. Amber like the firmware banner: attention, not an error. */
 #rig-alert {

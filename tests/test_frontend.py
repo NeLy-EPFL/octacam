@@ -1965,6 +1965,107 @@ def test_twophoton_offers_synced_with_thorimage(static_server, browser):
         page.close()
 
 
+def test_twophoton_uv_checkbox_switches_the_board_and_follows_its_reports(
+    static_server, browser
+):
+    """The 2-Photon plugin's "UV light" sits above the tabs (visible from every
+    tab), posts each change, shows what the board reports (a refused switch
+    falls back to it), lights up and reads ON while on, follows the state
+    pushes, and is disabled while the board's firmware lacks the command.
+    """
+    page = browser.new_page()
+    plugins = {
+        "twophoton": {
+            "ready": True,
+            "device": "/dev/arduinoCams",
+            "arduino_state": "idle",
+            "match_thorimage": True,
+            "uv": False,
+            "uv_supported": True,
+            "web": {"module": "/plugins/twophoton/twophoton.js"},
+        }
+    }
+    posts = []
+    refuse = []
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(builder())
+        )
+
+    def uv_route(route):
+        body = json.loads(route.request.post_data or "{}")
+        posts.append(body)
+        if refuse:
+            route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps({"detail": "the board is not connected"}),
+            )
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"uv": body["on"]}),
+            )
+
+    page.route("**/api/**", json_route(dict))
+    page.route(
+        "**/api/system",
+        json_route(lambda: _system_payload(ready=True, plugins=plugins)),
+    )
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=True)))
+    page.route("**/api/twophoton/uv", uv_route)
+    page.route(
+        "**/plugins/twophoton/twophoton.js",
+        lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=TWOPHOTON_JS.read_text()
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+    box = "document.getElementById('twophoton-uv')"
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(f"() => {box} && !{box}.disabled", timeout=5000)
+        assert not page.evaluate(f"() => {box}.checked")
+        assert page.evaluate(
+            "() => !document.getElementById('plugin-controls').hidden && "
+            "document.getElementById('plugin-controls').contains("
+            "document.getElementById('twophoton-uv'))"
+        )
+        assert page.is_visible("#twophoton-uv-label")  # the Record tab is shown
+        assert page.text_content("#twophoton-uv-state") == "OFF"
+
+        page.evaluate(f"() => {box}.click()")
+        page.wait_for_function(f"() => {box}.checked && !{box}.disabled", timeout=5000)
+        assert posts == [{"on": True}]
+        assert page.text_content("#twophoton-uv-state") == "ON"
+        assert page.evaluate(
+            "() => document.getElementById('twophoton-uv-label')"
+            ".classList.contains('twophoton-uv--on')"
+        )
+
+        refuse.append(True)
+        page.evaluate(f"() => {box}.click()")
+        page.wait_for_function(f"() => !{box}.disabled", timeout=5000)
+        assert posts[-1] == {"on": False}
+        assert page.evaluate(f"() => {box}.checked")  # the board is still on
+
+        state = {"type": "twophoton_state", "state": "idle", "ready": True}
+        page.evaluate("(m) => window.__pushWs(m)", {**state, "uv": False})
+        page.wait_for_function(f"() => !{box}.checked", timeout=5000)
+
+        page.evaluate(
+            "(m) => window.__pushWs(m)", {**state, "uv": False, "uv_supported": False}
+        )
+        page.wait_for_function(f"() => {box}.disabled", timeout=5000)
+        assert "flash" in page.evaluate(
+            "() => document.getElementById('twophoton-uv-label').title"
+        )
+    finally:
+        page.close()
+
+
 def test_twophoton_reminds_about_thorsync_and_announces_a_missed_take(
     static_server, browser
 ):

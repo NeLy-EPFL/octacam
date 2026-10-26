@@ -29,6 +29,7 @@ from octacam.plugins.twophoton import (
 # Wire-format constants (mirror the firmware and plugin source)
 ARM_MAGIC = 0xA5
 CANCEL_MAGIC = 0xCA
+UV_MAGIC = 0x55
 # magic(u8) + fps(u16) + duration_ms(u32) + idle_ms(u16) = 9 bytes
 ARM_FORMAT = "<BHIH"
 
@@ -54,6 +55,8 @@ class FakeLink(TwoPhotonLink):
         self.acks = True
         self.fail_writes = False
         self.banner: str | None = None
+        self.uv_answers = True  # False: a board flashed before the UV command
+        self.uv_pin = False
 
     @property
     def is_open(self) -> bool:
@@ -76,6 +79,9 @@ class FakeLink(TwoPhotonLink):
             self.written.append(data)
         if data[0] == ARM_MAGIC and self.acks:
             self._feed(b"A")
+        if data[0] == UV_MAGIC and self.uv_answers:
+            self.uv_pin = bool(data[1])
+            self._feed(b"UV %d\n" % self.uv_pin)
         return True
 
     def snapshot(self) -> list[bytes]:
@@ -1398,3 +1404,104 @@ def test_a_take_s_synced_choice_is_kept_in_its_snapshot():
         "match_thorimage": False
     }
     assert plugin.snapshot_options(None) is None  # not armed: nothing to keep
+
+
+# ---------------------------------------------------------------------------
+# UV light
+# ---------------------------------------------------------------------------
+
+
+def test_uv_switches_the_board_pin_and_reports_it():
+    plugin, link = _plugin_with_fake()
+    pushes = []
+    plugin.broadcast = lambda topic, payload: pushes.append(payload)
+
+    assert plugin.set_uv(True) is None
+    assert link.snapshot()[-1] == bytes([UV_MAGIC, 1])
+    assert link.uv_pin and plugin.uv_on and plugin.uv_supported
+    assert pushes[-1]["uv"] is True
+    assert plugin.status()["uv"] is True
+
+    assert plugin.set_uv(False) is None
+    assert link.snapshot()[-1] == bytes([UV_MAGIC, 0])
+    assert not plugin.uv_on
+
+
+def test_a_board_without_the_uv_command_is_offered_a_reflash(monkeypatch):
+    monkeypatch.setattr(twophoton, "ACK_TIMEOUT_S", 0.05)
+    plugin, link = _plugin_with_fake()
+    link.uv_answers = False
+    error = plugin.set_uv(True)
+    assert error is not None and "octacam flash" in error
+    assert plugin.uv_supported is False
+    assert not plugin.uv_on
+
+
+def test_uv_refused_without_a_board():
+    plugin, link = _plugin_with_fake(is_open=False)
+    assert plugin.set_uv(True) is not None
+    assert link.snapshot() == []
+
+
+def test_connecting_switches_the_uv_off_and_learns_the_firmware_has_it():
+    plugin, link = _plugin_with_fake()
+    plugin.uv_on = True  # before a reconnect
+    _verify_with_banner(plugin, link, "2PHOTON 2 abcd1234")
+    assert link.snapshot()[-1] == bytes([UV_MAGIC, 0])
+    assert plugin.uv_supported is True
+    assert not plugin.uv_on
+
+
+def test_closing_octacam_switches_the_uv_off():
+    plugin, link = _plugin_with_fake()
+    plugin.set_uv(True)
+    plugin.teardown()
+    assert bytes([UV_MAGIC, 0]) in link.snapshot()
+    assert not link.uv_pin
+
+
+def test_a_lost_link_reads_as_uv_off():
+    plugin, _ = _plugin_with_fake()
+    plugin.set_uv(True)
+    plugin._on_link_broken()
+    assert not plugin.uv_on
+
+
+def test_the_reader_takes_the_uv_reply_apart_from_status_bytes():
+    _, link = _plugin_with_fake()
+    statuses = []
+    link._on_status = statuses.append
+    link._feed(b"AUV 1\nT")
+    assert statuses == ["A", "T"]
+    assert link.uv_level is True
+
+
+def test_the_take_records_each_uv_switch(tmp_path):
+    plugin, _ = _plugin_with_fake()
+    _attach(plugin, save_dir=str(tmp_path))
+    plugin.set_uv(True)  # before the take
+    plugin.on_recording_start(None)
+    plugin.set_uv(False)
+    plugin.set_uv(False)  # no change: not an event
+    plugin.set_uv(True)
+    plugin.on_recording_stop(aborted=False)
+    plugin.set_uv(False)  # after the take: not in it
+
+    info = json.loads((tmp_path / "octacam_recording" / "twophoton.json").read_text())
+    uv = info["uv"]
+    assert uv["on_at_start"] is True
+    assert [e["on"] for e in uv["events"]] == [False, True]
+    assert all(e["reason"] == "operator" for e in uv["events"])
+    times = [e["time_ns"] for e in uv["events"]]
+    assert times == sorted(times) and times[0] > 0
+
+
+def test_the_uv_route(monkeypatch):
+    plugin, link = _plugin_with_fake()
+    client = _test_client(plugin)
+    r = client.post("/api/twophoton/uv", json={"on": True})
+    assert r.status_code == 200 and r.json() == {"uv": True}
+    assert client.post("/api/twophoton/uv", json={"on": "yes"}).status_code == 422
+    link._open = False
+    r = client.post("/api/twophoton/uv", json={"on": False})
+    assert r.status_code == 503 and "not connected" in r.json()["detail"]

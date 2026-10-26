@@ -5,8 +5,9 @@
 // /plugins/<name>/).
 //
 // The app constructs a tab as new Tab({name, panel, status, send, notify,
-// getRecordSettings, setDurationSync}) into the empty `panel` it made from the class's static
-// `label` and `title`, then calls setConnected, applyStatus (a /api/system
+// getRecordSettings, setDurationSync, addControl}) into the empty `panel` it
+// made from the class's static `label` and `title` (addControl(node) puts a
+// control in the always-visible strip above the tabs), then calls setConnected, applyStatus (a /api/system
 // plugin status: the init's push, which is also the only sign that the cameras
 // opened), applyState (a "<name>_state" WebSocket message) and getStartParams.
 // A tab may also define async confirmStart(): false cancels a recording start

@@ -36,6 +36,10 @@
       <button type="button" data-tab="benchmark"
         title="Test whether a frame rate is achievable and find the limiting step">Benchmark</button>
     </nav>
+    <!-- A plugin's always-visible controls (ctx.addControl, app.js): above
+         every tab, so a live switch such as twophoton's UV light is never out
+         of sight. Hidden until a plugin adds one. -->
+    <div id="plugin-controls" hidden></div>
     <div id="rig-alert" class="hidden" role="alert"></div>
 
     <section id="tab-record" class="tab active">

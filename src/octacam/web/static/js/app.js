@@ -167,6 +167,11 @@ async function main() {
     notify,
     getRecordSettings: () => record.settings,
     setDurationSync: (spec) => record.setDurationSync(spec),
+    addControl: (node) => {
+      const dock = byId("plugin-controls");
+      dock.append(node);
+      dock.hidden = false;
+    },
   });
 
   const benchmark = new BenchmarkTab({ notify });

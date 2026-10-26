@@ -11,6 +11,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **UV light on 2-photon rigs** (`twophoton`): a **UV light** switch above the
+  GUI's tabs (always in sight, lit while on) switches a UV LED driver (TTL on its MOD IN, also recorded by
+  ThorSync) through the trigger Arduino's D41; each take's `twophoton.json`
+  logs its level and every change. Reflash the board with `octacam flash`.
+  A plugin tab can put such always-visible controls there (`ctx.addControl`).
 - **A plugin tab can hold a recording start**: an optional async
   `confirmStart()` on the tab runs when Start is pressed, and returning false
   cancels the start (for a reminder the operator must acknowledge, such as

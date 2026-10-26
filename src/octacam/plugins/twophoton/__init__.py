@@ -24,16 +24,24 @@ ThorImage" unticked) the take runs for the set duration instead::
 Wire protocol, host -> Arduino (little-endian):
   [0xA5][fps u16][duration_ms u32][idle_ms u16]  arm (idle_ms 0: fixed duration)
   [0xCA]                                         cancel
+  [0x55 'U'][0|1]               UV light off/on: replies "UV <0|1>" + newline
   [0x3F] '?'                    identify: "2PHOTON <version> <build>" + newline
 Arduino -> host: one byte 'A' armed (waiting for ThorSync), 'T' triggered, 'D'
 done -- the 'D' preceded by a "STOP <I|C> <edges> <high_ms> <run_ms>" line (I:
 ThorImage stopped, C: the duration ran out). The banner's build is checked and
 flashed via `octacam.firmware`.
 
-The take's 2P facts (armed, synced with ThorImage, the board's STOP report) go
-to `octacam_recording/twophoton.json` when it ends; `octacam process` pairs the
-take with its ThorImage/ThorSync data from there (`process`, set up by the
-`source` option and the others in `settings`).
+The UV light (the GUI's "UV light" switch, above the tabs) is a board pin
+switching the UV LED driver (LEDD1B in TRIG mode, on its MOD IN), which ThorSync
+records too. It is independent of the run, forced off whenever the board is
+(re)connected and when octacam closes. A board flashed before the command never
+answers it: the switch is then disabled until a reflash (the protocol is
+otherwise unchanged).
+
+The take's 2P facts (armed, synced with ThorImage, the board's STOP report, the
+UV switches) go to `octacam_recording/twophoton.json` when it ends; `octacam
+process` pairs the take with its ThorImage/ThorSync data from there (`process`,
+set up by the `source` option and the others in `settings`).
 """
 
 from __future__ import annotations
@@ -88,6 +96,8 @@ CAPTURE_BEFORE_ARM_S = 60.0
 
 _ARM_MAGIC = 0xA5
 _CANCEL_MAGIC = 0xCA
+_UV_MAGIC = 0x55  # 'U'
+_UV_PREFIX = "UV "
 _ARM_FORMAT = "<BHIH"
 
 _STATE_LABELS = {"A": "armed", "T": "triggered", "D": "done"}
@@ -249,9 +259,9 @@ class ArmParams:
 
 
 class TwoPhotonLink(SerialLink):
-    """The serial link to the 2-photon trigger: bare status bytes, plus two
-    newline-terminated lines -- the banner in reply to identify, and the STOP
-    report that ends a run.
+    """The serial link to the 2-photon trigger: bare status bytes, plus three
+    newline-terminated lines -- the banner in reply to identify, the STOP
+    report that ends a run, and the UV level in reply to a UV command.
     """
 
     name = "twophoton"
@@ -267,6 +277,8 @@ class TwoPhotonLink(SerialLink):
         self._on_status = on_status
         self._on_stop_report = on_stop_report
         self._armed = threading.Event()  # set by the board's 'A'
+        self._uv_reply = threading.Event()  # set by the board's "UV <0|1>"
+        self.uv_level: bool | None = None  # the last UV reply's level
 
     def arm(self, params: ArmParams) -> str:
         """Send an arm: `"ok"` ('A' within ACK_TIMEOUT_S), `"timeout"` or
@@ -279,6 +291,17 @@ class TwoPhotonLink(SerialLink):
 
     def send_cancel(self) -> None:
         self._write(bytes([_CANCEL_MAGIC]))
+
+    def set_uv(self, on: bool) -> str:
+        """Switch the UV pin: `"ok"` (the reply's level is in `uv_level`),
+        `"timeout"` (no reply: a board flashed before the command) or
+        `"write_failed"`.
+        """
+        self._uv_reply.clear()
+        self.uv_level = None
+        if not self._write(bytes([_UV_MAGIC, int(on)])):
+            return "write_failed"
+        return "ok" if self._uv_reply.wait(ACK_TIMEOUT_S) else "timeout"
 
     def identify(self, timeout: float = 0.5) -> str | None:
         """The banner, asking once more after the Mega's boot: opening its port
@@ -298,10 +321,15 @@ class TwoPhotonLink(SerialLink):
             if byte == 0x0A:
                 line = self._buf.decode("ascii", "replace").strip()
                 self._buf.clear()
-                if not self._identified(line) and line.startswith(_STOP_PREFIX):
+                if self._identified(line):
+                    pass
+                elif line.startswith(_STOP_PREFIX):
                     report = parse_stop_report(line)
                     if report is not None:
                         self._dispatch(self._on_stop_report, report)
+                elif line in (f"{_UV_PREFIX}0", f"{_UV_PREFIX}1"):
+                    self.uv_level = line.endswith("1")
+                    self._uv_reply.set()
             elif self._buf:
                 self._buf.append(byte)
                 if len(self._buf) > 64:  # a runaway or garbled line
@@ -397,6 +425,14 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         self._thorsync_check: tuple[float, bool] | None = None
         self._thorsync_stale = False
         self._watching = threading.Event()  # set: stop re-reading ThorSync
+        # The UV light: its level as the board last reported it; whether the
+        # board's firmware has the command (None: not asked yet); the running
+        # take's record of it ({"on_at_start", "events"}), None between takes.
+        # One command at a time: each waits for its own reply.
+        self.uv_on = False
+        self.uv_supported: bool | None = None
+        self._take_uv: dict | None = None
+        self._uv_lock = threading.Lock()
 
     @classmethod
     def from_options(cls, options: dict) -> TwoPhotonPlugin:
@@ -489,6 +525,11 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
                 "arming it (an old protocol-v1 board would misread the arm packet); "
                 "reconnect, or reflash with `octacam flash`"
             )
+        self.uv_supported = None
+        if self.banner is not None and self.firmware_ok:
+            # Opening the port reset the board (UV off); saying so also learns
+            # whether its firmware has the command.
+            self._switch_uv(False, reason="connected")
 
     def link_status(self) -> dict:
         """The base fields plus the "match ThorImage" config the tab seeds its
@@ -502,6 +543,8 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
             "thorsync": self.thorsync,
             "thorsync_remind": self.thorsync_remind,
             "thorsync_missing": self.thorsync_missing,
+            "uv": self.uv_on,
+            "uv_supported": self.uv_supported,
         }
 
     def _on_status(self, status: str) -> None:
@@ -553,14 +596,67 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         )
 
     def _on_link_broken(self) -> None:
+        # The board is unpowered or resets on reconnect: either way the UV is
+        # off (the driver's input has a pull-down).
+        self._uv_changed(False, reason="link lost")
         # Pushes ready=False: the GUI stops offering to arm a dead link.
         self._set_state("idle")
 
     def teardown(self) -> None:
         self._watching.set()
+        if self.uv_on:
+            self._switch_uv(False, reason="octacam closed")
         self._link.send_cancel()
         self._link.close()
         self.board_state = "idle"
+
+    # ------------------------------------------------------------ UV light
+
+    def set_uv(self, on: bool) -> str | None:
+        """Switch the UV light (the tab's checkbox); the error, or None."""
+        if not self._link.is_open:
+            return f"the board on {self.device} is not connected"
+        if not self.firmware_ok:
+            return f"the firmware on {self.device} ({self.banner!r}) is incompatible"
+        return self._switch_uv(on, reason="operator")
+
+    def _switch_uv(self, on: bool, *, reason: str) -> str | None:
+        with self._uv_lock:
+            result = self._link.set_uv(on)
+            level = self._link.uv_level
+        if result == "timeout":
+            # Any reply would have come within ms: the firmware predates it.
+            self.uv_supported = False
+            self._push_state()
+            error = (
+                f"the board on {self.device} does not answer the UV command "
+                "\N{EM DASH} reflash it with `octacam flash` (or the Flash "
+                "firmware button)"
+            )
+            log.warning("twophoton: %s", error)
+            return error
+        if result == "write_failed" or level is None:
+            error = f"UV {'on' if on else 'off'}: write to {self.device} failed"
+            log.error("twophoton: %s", error)
+            return error
+        self.uv_supported = True
+        self._uv_changed(level, reason=reason)
+        self._push_state()
+        return None
+
+    def _uv_changed(self, on: bool, *, reason: str) -> None:
+        """Record the UV light's new level: the take's log (host wall clock,
+        as the summary's times) holds every change while it runs.
+        """
+        if on == self.uv_on:
+            return
+        self.uv_on = on
+        log.info("twophoton: UV light %s (%s)", "on" if on else "off", reason)
+        take = self._take_uv
+        if take is not None:
+            take["events"].append(
+                {"time_ns": time.time_ns(), "on": on, "reason": reason}
+            )
 
     # ---------------------------------------------- ThorSync duration check
 
@@ -694,6 +790,7 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         self._take_id = controller.take_id if controller else None
         self._take_synced = params is not None and self._wants_match(params)
         self._stop_report = None
+        self._take_uv = {"on_at_start": self.uv_on, "events": []}
         if params is None:
             return
         self.thorsync_remind = False  # asked before this take (the GUI)
@@ -759,6 +856,7 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         self._set_state("idle")
         armed = self._take_armed
         self._write_take_info()
+        self._take_uv = None
         # The take's own SyncData folder is now the newest: re-read its settings.
         self.refresh_thorsync_limit()
         if armed and self._source_dir() is not None:
@@ -801,8 +899,12 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
         when octacam ended the run: a manual stop or abort), the wait
         after ThorImage stopped it was armed with, and the board's firmware
         banner, whose build tells board_sync where the camera pulses start.
+        With a board that has the UV command, the UV light's level at the start
+        and each change during the take (`time_ns`: host wall clock).
         """
         info: dict = {"armed": self._take_armed, "match_thorimage": self._take_synced}
+        if self.uv_supported and self._take_uv is not None:
+            info["uv"] = self._take_uv
         if self._take_armed:
             info["firmware"] = self.banner
         if self._take_synced:
@@ -824,6 +926,26 @@ class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
             atomic_write_text(path, json.dumps(self.take_info(), indent=2) + "\n")
         except OSError as e:
             log.error("twophoton: could not write %s: %s", path, e)
+
+    # ------------------------------------------------------------ routes
+
+    def api_router(self):
+        from fastapi import Body, HTTPException
+
+        router = super().api_router()
+
+        @router.post("/api/twophoton/uv")
+        def set_uv(payload: dict = Body(default={})):
+            """Switch the UV light: `{"on": true|false}`."""
+            on = payload.get("on") if isinstance(payload, dict) else None
+            if not isinstance(on, bool):
+                raise HTTPException(422, 'expected {"on": true|false}')
+            error = self.set_uv(on)
+            if error is not None:
+                raise HTTPException(503, error)
+            return {"uv": self.uv_on}
+
+        return router
 
     # ------------------------------------------------------------ doctor
 

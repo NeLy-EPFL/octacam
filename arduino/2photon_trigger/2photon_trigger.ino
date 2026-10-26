@@ -21,6 +21,11 @@
 //  Abort/cancel (1 byte):
 //    [0xCA]  — returns Arduino to IDLE from any state
 //
+//  UV light (2 bytes): [0x55 'U'][0 = off, 1 = on] -> replies "UV <0|1>\n"
+//    Drives kUvPin, which switches the UV LED driver (LEDD1B in TRIG mode, on
+//    its MOD IN) and is recorded by ThorSync. Any state, independent of the
+//    run: a cancel or arm leaves it alone. OFF at power-up and reset.
+//
 //  Arduino → Host wire protocol (single-byte status):
 //    'A' (0x41) — armed, waiting for ThorSync rising edge
 //    'T' (0x54) — triggered, capture running
@@ -40,8 +45,8 @@
 //  edge, HIGH ≈ run; a FrameOut-style train: one edge per 2P frame).
 //
 //  Identify (1 byte): [0x3F] '?'  -> replies "2PHOTON 2 <build>\n"
-//    The banner starts with '2' (never a status byte), so the host can tell it
-//    apart from the bare 'A'/'T'/'D' status bytes. <build> is a short hash of the
+//    The banner starts with '2' and the UV reply with 'U' (never a status
+//    byte), so the host can tell them apart from the bare 'A'/'T'/'D' bytes. <build> is a short hash of the
 //    sketch source (fw_build_info.h) so octacam knows whether this exact firmware
 //    is running and can offer to (re)flash it.
 //
@@ -61,12 +66,14 @@ constexpr uint8_t kTriggerInPin = 4;   // ThorSync input, active HIGH → trigge
 constexpr uint8_t kCameraPin    = A0;  // camera frame trigger (square-wave out)
 constexpr uint8_t kSyncPin      = A1;  // sync copy of the trigger, for the DAQ
 constexpr uint8_t kGatePin      = 38;  // HIGH for the whole capture window
+constexpr uint8_t kUvPin        = 41;  // UV LED driver's MOD IN (and ThorSync)
 constexpr uint8_t kStatusLed    = LED_BUILTIN;
 
 // ---- Serial protocol constants ---------------------------------------------
 constexpr uint8_t  kArmMagic       = 0xA5;
 constexpr uint8_t  kCancelMagic    = 0xCA;
 constexpr uint8_t  kIdentifyMagic  = 0x3F;  // '?'  -> identity banner
+constexpr uint8_t  kUvMagic        = 0x55;  // 'U' + 0/1 -> UV light off/on
 constexpr uint8_t  kArmPayloadSize = 8;   // uint16 fps + uint32 duration_ms + uint16 idle_ms
 constexpr uint32_t kPayloadWaitMs  = 10;  // max wait for payload bytes after magic
 constexpr char     kVersion[]      = "2PHOTON 2";
@@ -182,6 +189,19 @@ static bool parse_arm_payload(uint16_t &fps, uint32_t &duration_ms,
   return fps >= 1 && fps <= 10000 && duration_ms >= 1;
 }
 
+// Reads the UV command's one-byte argument (0 off, 1 on); false on a timeout or
+// any other value.
+static bool parse_uv_payload(bool &on) {
+  const uint32_t start = millis();
+  while (Serial.available() < 1) {
+    if (millis() - start >= kPayloadWaitMs) return false;
+  }
+  const int b = Serial.read();
+  if (b != 0 && b != 1) return false;
+  on = (b == 1);
+  return true;
+}
+
 // ---- State transitions -----------------------------------------------------
 
 static void enter_idle() {
@@ -245,6 +265,9 @@ void setup() {
   pinMode(kSyncPin,      OUTPUT);
   pinMode(kGatePin,      OUTPUT);
   pinMode(kStatusLed,    OUTPUT);
+  // LOW before it becomes an output: the UV stays off through a reset.
+  digitalWrite(kUvPin, LOW);
+  pinMode(kUvPin,        OUTPUT);
 
   digitalWrite(kCameraPin, LOW);
   digitalWrite(kSyncPin,   LOW);
@@ -270,6 +293,14 @@ void loop() {
       Serial.print(kVersion);
       Serial.write(' ');
       Serial.print(TWOPHOTON_FW_BUILD);
+      Serial.write('\n');
+    } else if (b == kUvMagic) {
+      Serial.read();  // consume magic
+      bool on;
+      if (parse_uv_payload(on)) digitalWrite(kUvPin, on ? HIGH : LOW);
+      // The pin's level either way, so the host always learns the truth.
+      Serial.print("UV ");
+      Serial.print(digitalRead(kUvPin) == HIGH ? 1 : 0);
       Serial.write('\n');
     } else if (b == kArmMagic) {
       Serial.read();  // consume magic
