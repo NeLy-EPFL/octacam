@@ -31,6 +31,8 @@ class Plugin:
     # trigger_train; on_preview_stop runs before the record grab starts, so
     # on_recording_start arms idle cameras.
     generates_trigger: ClassVar[bool] = False
+    # Drives the optogenetic outputs set_opto switches (a closed loop's light).
+    drives_opto: ClassVar[bool] = False
     web_dir: ClassVar[Path | None] = None  # serves <name>.js (+ <name>.css)
     # `octacam process` steps for recordings whose config enables the plugin
     # (no instance, no hardware): see process.ProcessSteps.
@@ -124,6 +126,18 @@ class Plugin:
     def prime_trigger(self, params: dict | None, pulses: int) -> bool:
         """Emit `pulses` sacrificial camera pulses, lights dark, and return once
         they are out; True if it did. Off the lock, before on_recording_start.
+        """
+        return False
+
+    def set_opto(self, channel: int, duration_s: float) -> bool:
+        """Switch opto `channel` (1-based) on for `duration_s` from now, or
+        off with 0; True once sent. Only a `drives_opto` plugin has outputs.
+        """
+        return False
+
+    def opto_forced(self, channel: int) -> bool:
+        """Whether an operator override holds opto `channel` on (set_opto
+        cannot switch it off).
         """
         return False
 
@@ -223,6 +237,9 @@ class PluginManager:
 
     def trigger_plugin(self) -> Plugin | None:
         return next((p for p in self.plugins if p.generates_trigger), None)
+
+    def opto_plugin(self) -> Plugin | None:
+        return next((p for p in self.plugins if p.drives_opto), None)
 
     def trigger_train(self, params: dict | None) -> dict | None:
         plugin = self.trigger_plugin()

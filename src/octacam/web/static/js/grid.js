@@ -31,8 +31,13 @@ function effectiveTransform(t) {
 }
 
 export class CameraGrid {
-  constructor(container, cameras, { onSelect, onRename, onViewChange } = {}) {
+  // `overlays` (name -> draw(ctx, view)) draw on each preview frame, in the
+  // frame's canvas, so they follow its zoom and rotate/flip. `view` maps sensor
+  // px to canvas px: {camera: {name, serial}, x(sx), y(sy), scale (canvas px per
+  // sensor px), screen (CSS px per canvas px)}.
+  constructor(container, cameras, { onSelect, onRename, onViewChange, overlays } = {}) {
     this.container = container;
+    this.overlays = overlays || new Map();
     this.onSelect = onSelect;
     this.onRename = onRename; // async (index, name) -> canonical name | null
     // Called when the resolution/crop the server should send changes.
@@ -414,6 +419,7 @@ export class CameraGrid {
       this._layoutCanvas(t);
       t.ctx.drawImage(bmp, 0, 0);
       bmp.close();
+      this._drawOverlays(t);
     } catch {
       // corrupt frame — skip
     }
@@ -424,6 +430,28 @@ export class CameraGrid {
       t.pendingBlob = null;
       t.pendingMeta = null;
       this._draw(t, next, nextMeta);
+    }
+  }
+
+  _drawOverlays(t) {
+    if (!this.overlays.size || !t.cropW || !t.cropH) return;
+    const sx = t.natW / t.cropW;
+    const sy = t.natH / t.cropH;
+    const view = {
+      camera: { name: t.cam.name, serial: t.cam.serial },
+      x: (x) => (x - t.cropX) * sx,
+      y: (y) => (y - t.cropY) * sy,
+      scale: sx,
+      screen: ((t.k || 0) * t.zoom) / sx || 1,
+    };
+    for (const [name, draw] of this.overlays) {
+      t.ctx.save();
+      try {
+        draw(t.ctx, view);
+      } catch (e) {
+        console.warn(`preview overlay ${name} failed`, e);
+      }
+      t.ctx.restore();
     }
   }
 

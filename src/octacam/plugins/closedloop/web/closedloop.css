@@ -1,0 +1,43 @@
+/* Closed-loop tab styles; the colors are core style.css's :root variables. */
+
+.closedloop-warn { color: var(--amber); }
+
+.closedloop-map {
+  width: 100%;
+  height: auto;
+  background: var(--panel-2);
+  border-radius: 4px;
+}
+.closedloop-corridor {
+  fill: none;
+  stroke: var(--border);
+  stroke-dasharray: 3 3;
+}
+.closedloop-corridor.tracked { stroke: var(--accent); stroke-dasharray: none; }
+.closedloop-corridor.lit { fill: color-mix(in srgb, var(--red) 35%, transparent); }
+.closedloop-ball { fill: var(--text); }
+.closedloop-ball.lost { fill: none; stroke: var(--amber); stroke-width: 1.5; }
+.closedloop-label {
+  fill: var(--text-dim);
+  font-size: 9px;
+  text-anchor: middle;
+}
+
+.closedloop-pairs { width: 100%; border-collapse: collapse; font-size: 12px; }
+.closedloop-pairs th { color: var(--text-dim); font-weight: 500; text-align: left; }
+.closedloop-pairs td, .closedloop-pairs th { padding: 2px 4px; }
+.closedloop-light {
+  display: inline-block;
+  min-width: 18px;
+  text-align: center;
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+}
+.closedloop-light.on { background: var(--red); color: #fff; }
+
+.closedloop-live-row.live { color: var(--red); font-weight: 600; }
+
+.closedloop-side { display: inline-flex; gap: 2px; }
+.closedloop-side .btn { min-width: 24px; padding: 1px 6px; }
+.closedloop-side .btn.on { background: var(--accent); border-color: var(--accent); color: #fff; opacity: 1; }

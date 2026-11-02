@@ -85,13 +85,13 @@ pin driven HIGH sinks the channel to GND → **light ON**. This assumes the CCS
 strobe mode instead, its on-time is fixed on the unit and the strobe here only
 needs to deliver a clean rising edge per frame.
 
-## Serial wire protocol (v4)
+## Serial wire protocol (v5)
 
 Baud rate: **115200** (nominal — USB CDC). All multi-byte fields little-endian.
 
 ### Host → Arduino
 
-**Arm** — `0xA5` · `version=4` (u8) · `payload_len` (u16) · *payload* · `checksum` (u8)
+**Arm** — `0xA5` · `version=5` (u8) · `payload_len` (u16) · *payload* · `checksum` (u8)
 
 The **payload** (`payload_len` bytes) is:
 
@@ -118,9 +118,9 @@ Light **mode** fields:
 | 2    | continuous  | —             | —            | —                | — (on for whole run)   |
 | 3    | pulse_train | pulse_us      | interval_us  | start_delay_us   | train_us (0 = forever) |
 
-**Dim** — `0xD1` · `version=4` (u8) · `payload_len=3` (u16) · `pin_id` (u8) · `duty` (u16) · `checksum` (u8), framed and checksummed like an arm. `duty` is 0–4095: 0 drives the pin LOW, 4095 steadily HIGH, anything between is PWM at `duty`/4096 (a larger value counts as 4095). The board answers `P`, or `E<c>`; the level holds until the next dim of that pin or a board reset, whatever the run state. Dimming a pin that the running spec (or a staged re-arm) drives is rejected with `Eu`, and so is an arm that uses a pin dimmed above 0. Dim 0 frees the pin for arms again.
+**Dim** — `0xD1` · `version=5` (u8) · `payload_len=3` (u16) · `pin_id` (u8) · `duty` (u16) · `checksum` (u8), framed and checksummed like an arm. `duty` is 0–4095: 0 drives the pin LOW, 4095 steadily HIGH, anything between is PWM at `duty`/4096 (a larger value counts as 4095). The board answers `P`, or `E<c>`; the level holds until the next dim of that pin or a board reset, whatever the run state. Dimming a pin that the running spec (or a staged re-arm) or an opto output drives is rejected with `Eu`, and so is an arm or opto config that uses a pin dimmed above 0. Dim 0 frees the pin for arms again.
 
-**Cancel** — `0xCA`. **Identify** — `0x3F` (`?`) → replies `TRIGGERBOX 4 <build>\n`,
+**Cancel** — `0xCA`. **Identify** — `0x3F` (`?`) → replies `TRIGGERBOX 5 <build>\n`,
 where `<build>` is a short hash of the sketch source (see *Firmware fingerprint* below).
 
 A valid new arm re-arms from any state, superseding a run in progress (`C`, then
@@ -135,6 +135,10 @@ clock at once. The run clock restarts with the new spec: `duration_ms` is the ma
 gate — a pulse-train longer than the run is truncated at the end — and pulse-train
 `start_delay_us` counts from it.
 
+**Opto config** — `0xB0` · `version=5` · `payload_len` (u16) · *payload* · `checksum`, framed and checksummed like an arm. *payload* = `n_opto` (u8, ≤ 6), then per opto channel `pin_id` u8 · `pulse_us` u32 · `period_us` u32. Opto channel *k* (0-based) is the *k*-th record. An opto output is LOW until switched on; while on it is HIGH for `pulse_us` of every `period_us`, counted from the moment it was switched on (`period_us` 0, or `pulse_us` ≥ `period_us`: HIGH throughout). A new config switches every opto output off. Its pins may not be the run's outputs or dimmed (`ou`), and an arm or dim may not take an opto pin (`Eu`); a pin at its dim boot default yields, as to an arm. Answered `O`, or `o<c>`.
+
+**Opto gate** — `0xB1` · `version=5` · `payload_len` · *payload* · `checksum`, where *payload* = one or more `channel` u8 · `duration_ms` u32: switch the channel on for `duration_ms` from now, or off with 0. A channel switched on starts its pulse train; one already on keeps its phase, so a window extended in steps pulses as one. Opto outputs run whether the board is armed or idle, and the board ends each window itself — a stalled or crashed host cannot leave a light on. Silent unless refused (`g<c>`; `gp`: no such opto channel, e.g. after a reboot lost the config).
+
 ### Arduino → Host (newline-terminated ASCII)
 
 | Token            | Meaning                                                        |
@@ -143,8 +147,10 @@ gate — a pulse-train longer than the run is truncated at the end — and pulse
 | `D`              | done — requested duration elapsed, back to idle                |
 | `C`              | cancelled — cancel received (or a valid re-arm superseded)     |
 | `P`              | dimmed — dim command applied                                   |
-| `E<c>`           | rejected — arm or dim refused; `<c>`: `v`ersion `c`hecksum `o`versize `l`ength `f`ps `p`in `r`eserved `d`uplicate `m`ode, `u` pin in use (dimmed, or driven by the run), `w` no free PWM channel (at most 8 pins dim between 0 and 100 %) |
-| `TRIGGERBOX 4 <build>` | reply to an identify request (`<build>` = source hash) |
+| `E<c>`           | rejected — arm or dim refused; `<c>`: `v`ersion `c`hecksum `o`versize `l`ength `f`ps `p`in `r`eserved `d`uplicate `m`ode, `u` pin in use (dimmed, opto, or driven by the run), `w` no free PWM channel (at most 8 pins dim between 0 and 100 %) |
+| `O`              | opto config accepted                                           |
+| `o<c>` / `g<c>`  | opto config / opto gate refused (codes as for `E`)             |
+| `TRIGGERBOX 5 <build>` | reply to an identify request (`<build>` = source hash) |
 
 ## Flashing the firmware
 
