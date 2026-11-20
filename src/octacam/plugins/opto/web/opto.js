@@ -17,6 +17,10 @@ const MARKUP = `
     </table>
     <p class="hint">An override holds its LED on, through recordings too, until
       pressed again; a recording logs it.</p>
+    <label class="row" title="Light stimulation power">
+        <span>Light power:</span>
+        <input id="opto-stimulation-power" type="number" min="0" max="255" step="1">
+      </label>
   </div>`;
 
 export default class OptoTab extends SerialTab {
@@ -30,7 +34,12 @@ export default class OptoTab extends SerialTab {
     this.rows = document.getElementById("opto-rows");
     this.channels = ctx.status.channels || [];
     this.forced = new Set(ctx.status.forced || []);
+    this.stimulationPower = ctx.status.stimulation_power || 255;
     this.start(ctx.status);
+
+    this.powerInput = document.getElementById("opto-stimulation-power");
+    this.powerInput.addEventListener("change", () => this.sendPower());
+    this.fillPower(this.stimulationPower);
   }
 
   applyLink(msg) {
@@ -46,6 +55,20 @@ export default class OptoTab extends SerialTab {
   refresh() {
     super.refresh();
     this.renderChannels();
+  }
+
+  async sendPower() {
+    const power = parseInt(this.powerInput.value);
+    const response = await request("POST", "/api/opto/set_power", { power }, {
+      action: `set LED power ${power}`,
+      notify: this.notify,
+    });
+    this.fillPower(response.power ?? this.stimulationPower);
+  }
+
+  fillPower(power) {
+    if (!power) return;
+    this.powerInput.value = power;
   }
 
   async toggle(channel) {

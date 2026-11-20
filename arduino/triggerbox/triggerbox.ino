@@ -172,7 +172,8 @@ struct Opto {
   bool     on;
   uint64_t cyc_us;     // current pulse cycle's start
   uint64_t end_us;     // the window's end
-  bool     high;
+  uint8_t  current;
+  uint8_t  power;      // the power level (0-255)
 };
 static Opto    g_opto[kMaxOpto];
 static uint8_t g_nopto = 0;
@@ -235,6 +236,13 @@ static void set_status(bool r, bool g, bool b) {
 static inline void set_level(uint8_t gpio, bool &cur, bool want) {
   if (want != cur) {
     digitalWrite(gpio, want ? HIGH : LOW);
+    cur = want;
+  }
+}
+
+static inline void set_level_analogue(uint8_t gpio, uint8_t &cur, uint8_t want) {
+  if (want != cur) {
+    analogWrite(gpio, want);
     cur = want;
   }
 }
@@ -550,7 +558,7 @@ static void apply_opto(uint64_t now) {
       while (now - o.cyc_us >= (uint64_t)o.period_us) o.cyc_us += o.period_us;
       w = (now - o.cyc_us) < (uint64_t)o.pulse_us;
     }
-    set_level(o.gpio, o.high, w);
+    set_level_analogue(o.gpio, o.current, w ? o.power : 0);
   }
 }
 
@@ -576,12 +584,12 @@ static void parse_opto_config(const uint8_t *payload, uint16_t len) {
     tmp[i] = {kPinTable[idx], pulse, period, false, 0, 0, false};
   }
   for (uint8_t i = 0; i < g_nopto; i++) {
-    digitalWrite(g_opto[i].gpio, LOW);
+    analogWrite(g_opto[i].gpio, 0);
     pinMode(g_opto[i].gpio, INPUT_PULLDOWN);
   }
   for (uint8_t i = 0; i < n; i++) {
     pinMode(tmp[i].gpio, OUTPUT);
-    digitalWrite(tmp[i].gpio, LOW);
+    analogWrite(tmp[i].gpio, 0);
     g_opto[i] = tmp[i];
   }
   g_nopto = n;
@@ -592,18 +600,20 @@ static void parse_opto_config(const uint8_t *payload, uint16_t len) {
 // Switch opto channels on for a window from now, or off (duration 0); a
 // channel already on keeps its pulse phase.
 static void parse_opto_gate(const uint8_t *payload, uint16_t len) {
-  if (len == 0 || len % 5 != 0 || len / 5 > kMaxOpto) { refuse('g', 'l'); return; }
-  for (uint16_t k = 0; k < len; k += 5) {
+  if (len == 0 || len % 6 != 0 || len / 6 > kMaxOpto) { refuse('g', 'l'); return; }
+  for (uint16_t k = 0; k < len; k += 6) {
     if (payload[k] >= g_nopto) { refuse('g', 'p'); return; }
   }
   const uint64_t now = (uint64_t)esp_timer_get_time();
-  for (uint16_t k = 0; k < len; k += 5) {
+  for (uint16_t k = 0; k < len; k += 6) {
     Opto &o = g_opto[payload[k]];
     const uint32_t ms = rd32(payload + k + 1);
+    const uint8_t power = payload[k + 5];
     if (!o.on) o.cyc_us = now;
     o.on = ms > 0;
+    o.power = power;
     o.end_us = now + (uint64_t)ms * 1000ULL;
-    if (!o.on) set_level(o.gpio, o.high, false);
+    if (!o.on) set_level_analogue(o.gpio, o.current, 0);
   }
   apply_opto(now);
 }

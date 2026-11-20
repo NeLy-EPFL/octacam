@@ -62,6 +62,7 @@ name = "opto"
 [plugins.options]
 device = "/dev/serial/by-id/usb-Arduino_Nano_ESP32_E4B063AF3948-if01"
 channels = [ { pin = "D7" }, { pin = "D8" }, { pin = "D9" } ]   # steady while on
+stimulation_power = 255
 
 [transfer]
 directory = "/mnt/upramdya/data/DD/ball_pushing_opto"

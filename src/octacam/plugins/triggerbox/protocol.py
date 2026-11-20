@@ -52,7 +52,7 @@ _FIXED = struct.Struct("<HIBB")   # fps u16, duration_ms u32, n_cam u8, n_light 
 _CAM = struct.Struct("<BHH")      # pin_id u8, pulse_us u16, delay_us u16
 _LIGHT = struct.Struct("<BBIIII")  # pin_id u8, mode u8, p0 u32, p1 u32, p2 u32, p3 u32
 _OPTO = struct.Struct("<BII")     # pin_id u8, pulse_us u32, period_us u32
-_GATE = struct.Struct("<BI")      # channel u8, duration_ms u32
+_GATE = struct.Struct("<BIB")      # channel u8, duration_ms u32, power u8
 
 # The wire's pin ids (by index): the single source of truth, mirrored by kPinTable
 # in triggerbox.ino (a test keeps them equal). D2/D3/D4 drive the status LED and
@@ -83,6 +83,8 @@ REJECT_REASONS = {
     "m": "unknown light mode",
 }
 
+def _u8(v) -> int:
+    return max(0, min(0xFF, int(v)))
 
 def _u16(v) -> int:
     return max(0, min(0xFFFF, int(v)))
@@ -164,6 +166,7 @@ class OptoChannel:
     pin: str = "D8"
     freq_hz: float = 0.0
     pulse_ms: float = 10.0
+    power:int = 255  # 0-255
 
     def record(self) -> tuple[int, int, int]:
         """The wire record ``(pin_id, pulse_us, period_us)``; period 0 = steady."""
@@ -190,9 +193,10 @@ def opto_config_packet(channels: Sequence[OptoChannel]) -> bytes:
     return _packet(_OPTO_CONFIG_MAGIC, payload)
 
 
-def opto_gate_packet(gates: Sequence[tuple[int, int]]) -> bytes:
-    """Switch each ``(channel, duration_ms)`` (0-based; 0 ms = off now)."""
-    return _packet(_OPTO_GATE_MAGIC, b"".join(_GATE.pack(c, _u32(ms)) for c, ms in gates))
+
+def opto_gate_packet(gates: Sequence[tuple[int, int, int]]) -> bytes:
+    """Switch each ``(channel, duration_ms, power)`` (0-based; 0 ms = off now)."""
+    return _packet(_OPTO_GATE_MAGIC, b"".join(_GATE.pack(c, _u32(ms), _u8(power)) for c, ms, power in gates))
 
 
 @dataclass
@@ -280,7 +284,7 @@ class TriggerboxLink(SerialLink):
             self.opto_configured = True
             return "ok"
 
-    def gate_opto(self, gates: Sequence[tuple[int, int]]) -> bool:
+    def gate_opto(self, gates: Sequence[tuple[int, int, int]]) -> bool:
         """Switch opto channels (see :func:`opto_gate_packet`) without waiting:
         True once written. A refusal comes back as 'g<c>' and is logged."""
         return self._write(opto_gate_packet(gates))

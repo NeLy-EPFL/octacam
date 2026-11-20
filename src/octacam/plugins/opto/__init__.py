@@ -70,6 +70,7 @@ class OptoPlugin(SerialPlugin):
     # A silent board is most likely not flashed yet, not wedged.
     recover_silent = False
     _link: TriggerboxLink
+    stimulation_power: int = 255  # the default power for set_opto, 0-255
 
     def __init__(
         self,
@@ -153,7 +154,7 @@ class OptoPlugin(SerialPlugin):
             self._keepalive.join(timeout=1.0)
         self._forced.clear()
         if self.channels and self._link.opto_configured:
-            self._link.gate_opto([(index, 0) for index in range(len(self.channels))])
+            self._link.gate_opto([(index, 0, 0) for index in range(len(self.channels))])
         self._link.close()
 
     def link_status(self) -> dict:
@@ -167,6 +168,10 @@ class OptoPlugin(SerialPlugin):
 
     def status(self) -> dict:
         return {**super().status(), "channels": [asdict(c) for c in self.channels]}
+
+    def snapshot_options(self, params: dict | None) -> dict | None:
+            options = {"stimulation_power": self.stimulation_power}
+            return options or None
 
     # ------------------------------------------------------------ outputs
 
@@ -194,7 +199,8 @@ class OptoPlugin(SerialPlugin):
         channel stays on: True, and nothing is sent."""
         if channel in self._forced:
             return True
-        return self._gate(channel, duration_s)
+        self.channels[channel - 1].power = self.stimulation_power
+        return self._gate(channel, duration_s, self.stimulation_power)
 
     def opto_forced(self, channel: int) -> bool:
         return channel in self._forced
@@ -206,10 +212,12 @@ class OptoPlugin(SerialPlugin):
             return False
         if on:
             self._forced.add(channel)
-            ok = self._gate(channel, OVERRIDE_WINDOW_S)
+            self.channels[channel - 1].power = self.stimulation_power
+            ok = self._gate(channel, OVERRIDE_WINDOW_S, self.stimulation_power)
         else:
             self._forced.discard(channel)
-            ok = self._gate(channel, 0.0)
+            self.channels[channel - 1].power = 0
+            ok = self._gate(channel, 0.0, 0)
         log.info("opto: channel %d %s by the override", channel, "forced on" if on else "released")
         self._push_state()
         return ok
@@ -217,9 +225,9 @@ class OptoPlugin(SerialPlugin):
     def _renew(self) -> None:
         while not self._stop.wait(OVERRIDE_STEP_S):
             for channel in sorted(self._forced):
-                self._gate(channel, OVERRIDE_WINDOW_S)
+                self._gate(channel, OVERRIDE_WINDOW_S, self.channels[channel - 1].power)
 
-    def _gate(self, channel: int, duration_s: float) -> bool:
+    def _gate(self, channel: int, duration_s: float, power: int) -> bool:
         if not 1 <= channel <= len(self.channels):
             log.warning("opto: no channel %d (configured: %d)", channel, len(self.channels))
             return False
@@ -228,7 +236,8 @@ class OptoPlugin(SerialPlugin):
         if not self._link.opto_configured and not self._configure():
             return False
         duration_ms = int(round(min(max(duration_s, 0.0), MAX_WINDOW_S) * 1000))
-        return self._link.gate_opto([(channel - 1, duration_ms)])
+        power_uint8 = max(0, min(0xFF, int(power)))
+        return self._link.gate_opto([(channel - 1, duration_ms, power_uint8)])
 
     def api_router(self):
         from fastapi import Body, HTTPException
@@ -243,5 +252,12 @@ class OptoPlugin(SerialPlugin):
                 raise HTTPException(422, f"channel must be 1-{len(self.channels)}")
             ok = self.force(channel, bool(payload.get("on")))
             return {"ok": ok, "forced": sorted(self._forced)}
+
+        @router.post("/api/opto/set_power")
+        def set_power(payload: dict = Body(...)):
+            """Set LED power ``{"power": 0-255}``."""
+            power = int(payload.get("power", 255))
+            self.stimulation_power = max(0, min(255, power))
+            return {"power": self.stimulation_power}
 
         return router
