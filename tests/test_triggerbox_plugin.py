@@ -1676,9 +1676,10 @@ def _opto_records(raw: bytes) -> list[tuple[int, int, int]]:
     return [struct.unpack_from("<BII", payload, 1 + 9 * k) for k in range(n)]
 
 
-def _gates(raw: bytes) -> list[tuple[int, int]]:
+
+def _gates(raw: bytes) -> list[tuple[int, int, int]]:
     payload = _unframe(raw, OPTO_GATE_MAGIC)
-    return [struct.unpack_from("<BI", payload, k) for k in range(0, len(payload), 5)]
+    return [struct.unpack_from("<BIB", payload, k) for k in range(0, len(payload), 6)]
 
 
 def _written(link: FakeLink, magic: int) -> list[bytes]:
@@ -1693,7 +1694,7 @@ def test_opto_config_packet_matches_the_wire_format():
         # The firmware treats pulse >= period as steady; the host sends it as given.
         (PIN_LABELS.index("D10"), 50_000, 25_000),
     ]
-    assert _gates(protocol.opto_gate_packet([(0, 1500), (2, 0)])) == [(0, 1500), (2, 0)]
+    assert _gates(protocol.opto_gate_packet([(0, 1500, 255), (2, 0, 0)])) == [(0, 1500, 255), (2, 0, 0)]
 
 
 def test_opto_magics_and_limit_match_the_firmware():

@@ -199,6 +199,9 @@ class OptoPlugin(SerialPlugin):
         channel stays on: True, and nothing is sent."""
         if channel in self._forced:
             return True
+        if not 1 <= channel <= len(self.channels):
+            log.warning("opto: no channel %d (configured: %d)", channel, len(self.channels))
+            return False
         self.channels[channel - 1].power = self.stimulation_power
         return self._gate(channel, duration_s, self.stimulation_power)
 

@@ -87,7 +87,7 @@ def test_set_opto_configures_once_then_switches():
     assert plugin.set_opto(2, 1.5) is True
     assert plugin.set_opto(2, 0) is True
     assert len(_written(link, OPTO_CONFIG_MAGIC)) == 1
-    assert [_gates(g) for g in _written(link, OPTO_GATE_MAGIC)] == [[(1, 1500)], [(1, 0)]]
+    assert [_gates(g) for g in _written(link, OPTO_GATE_MAGIC)] == [[(1, 1500, plugin.stimulation_power)], [(1, 0, plugin.stimulation_power)]]
 
 
 def test_set_opto_refuses_unknown_channels_and_caps_the_window():
@@ -96,7 +96,7 @@ def test_set_opto_refuses_unknown_channels_and_caps_the_window():
     assert plugin.set_opto(4, 1.0) is False
     assert plugin.set_opto(1, 1e6) is True
     (gate,) = _written(link, OPTO_GATE_MAGIC)
-    assert _gates(gate) == [(0, 600_000)]
+    assert _gates(gate) == [(0, 600_000, plugin.stimulation_power)]
 
 
 def test_a_refused_config_is_reported():
@@ -120,7 +120,7 @@ def test_teardown_switches_every_channel_off():
     plugin, link = _plugin()
     plugin.set_opto(3, 5.0)
     plugin.teardown()
-    assert _gates(_written(link, OPTO_GATE_MAGIC)[-1]) == [(0, 0), (1, 0), (2, 0)]
+    assert _gates(_written(link, OPTO_GATE_MAGIC)[-1]) == [(0, 0, 0), (1, 0, 0), (2, 0, 0)]
     assert not link.is_open
 
 
@@ -136,14 +136,14 @@ def test_a_forced_channel_stays_on_whatever_else_asks(monkeypatch):
     plugin, link = _plugin()
     assert plugin.force(2, True)
     assert plugin.opto_forced(2) and not plugin.opto_forced(1)
-    assert _gates(_written(link, OPTO_GATE_MAGIC)[-1]) == [(1, 1000)]
+    assert _gates(_written(link, OPTO_GATE_MAGIC)[-1]) == [(1, 1000, plugin.stimulation_power)]
     sent = len(_written(link, OPTO_GATE_MAGIC))
     # The closed loop switching it off (or on) changes nothing.
     assert plugin.set_opto(2, 0.0) is True and plugin.set_opto(2, 5.0) is True
     assert len(_written(link, OPTO_GATE_MAGIC)) == sent
     assert plugin.status()["forced"] == [2]
     assert plugin.force(2, False)
-    assert _gates(_written(link, OPTO_GATE_MAGIC)[-1]) == [(1, 0)]
+    assert _gates(_written(link, OPTO_GATE_MAGIC)[-1]) == [(1, 0, 0)]
     assert not plugin.opto_forced(2) and plugin.status()["forced"] == []
 
 
@@ -158,11 +158,11 @@ def test_a_forced_channel_is_renewed_until_released(monkeypatch):
     try:
         plugin.force(3, True)
         assert wait_until(lambda: len(_written(link, OPTO_GATE_MAGIC)) >= 4, timeout=2)
-        assert all(_gates(g) == [(2, 1000)] for g in _written(link, OPTO_GATE_MAGIC))
+        assert all(_gates(g) == [(2, 1000, plugin.stimulation_power)] for g in _written(link, OPTO_GATE_MAGIC))
     finally:
         plugin.teardown()
     # Teardown releases it: every channel off.
-    assert _gates(_written(link, OPTO_GATE_MAGIC)[-1]) == [(0, 0), (1, 0), (2, 0)]
+    assert _gates(_written(link, OPTO_GATE_MAGIC)[-1]) == [(0, 0, 0), (1, 0, 0), (2, 0, 0)]
     assert not plugin.opto_forced(3)
 
 
